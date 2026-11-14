@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import * as nodeCrypto from '../server/crypto.ts';
-import * as edgeCrypto from './_lib/crypto.ts';
-import { handleApiRequest } from './api/[[path]].ts';
-import { onRequestGet as handleUploadGet } from './uploads/[filename].ts';
-import type { D1Database, D1PreparedStatement, D1Result, Env } from './_lib/types.ts';
+import * as edgeCrypto from '../functions/_lib/crypto.ts';
+import { handleApiRequest } from '../functions/api/[[path]].ts';
+import { onRequestGet as handleUploadGet } from '../functions/uploads/[filename].ts';
+import type { D1Database, D1PreparedStatement, D1Result, Env } from '../functions/_lib/types.ts';
 
 function createSqliteD1Adapter(sqliteDb: DatabaseSync): D1Database {
   const wrapStmt = (query: string, bound: unknown[] = []): D1PreparedStatement => ({
