@@ -1,0 +1,648 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  AlertCircle,
+  Bell,
+  BellOff,
+  CheckCircle2,
+  ExternalLink,
+  Info,
+  WifiOff,
+  X,
+} from 'lucide-react';
+import { api } from '../utils/api';
+
+const DISMISS_KEY = 'crovo_push_prompt_dismissed_until';
+const DISMISS_DAYS = 3;
+
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const buffer = new ArrayBuffer(rawData.length);
+  const outputArray = new Uint8Array(buffer);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+export function isRunningInIframe(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+export function isPushBrowserSupported(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    'Notification' in window &&
+    'serviceWorker' in navigator &&
+    'PushManager' in window &&
+    window.isSecureContext
+  );
+}
+
+function translatePushError(err: unknown): { code: string; message: string; isIframeBlock?: boolean } {
+  const name = err instanceof DOMException ? err.name : err instanceof Error ? err.name : 'Error';
+  const msg = err instanceof Error ? err.message : String(err || '');
+  const inIframe = isRunningInIframe();
+
+  if (!navigator.onLine) {
+    return {
+      code: 'OfflineError',
+      message: 'لا يوجد اتصال بالإنترنت حالياً. تأكد من الاتصال وحاول تاني لتفعيل الإشعارات.',
+    };
+  }
+
+  if (name === 'NotAllowedError' || msg.toLowerCase().includes('denied') || msg.toLowerCase().includes('permission')) {
+    if (inIframe) {
+      return {
+        code: 'IframePermissionBlocked',
+        isIframeBlock: true,
+        message:
+          'المتصفح يمنع طلب إذن الإشعارات داخل نافذة المعاينة المصغّرة. افتح الموقع في صفحة مستقلة واضغط تفعيل الإشعارات.',
+      };
+    }
+    return {
+      code: 'NotAllowedError',
+      message:
+        'تم منع الإشعارات من إعدادات المتصفح. اضغط على أيقونة القفل بجانب عنوان الموقع بالأعلى واختر "السماح بالإشعارات" ثم حاول تاني.',
+    };
+  }
+
+  if (name === 'AbortError' || msg.toLowerCase().includes('push service')) {
+    return {
+      code: 'PushServiceAbortError',
+      message:
+        'تعذر الاتصال بخدمة إشعارات المتصفح (Push Service). تأكد من اتصال الإنترنت أو عدم حجب الإشعارات بواسطة مانع الإعلانات وحاول تاني.',
+    };
+  }
+
+  if (name === 'InvalidStateError') {
+    return {
+      code: 'InvalidStateError',
+      message: 'الـ Service Worker لم يكتمل تفعيله بعد. انتظر لحظة وأعد المحاولة.',
+    };
+  }
+
+  if (inIframe) {
+    return {
+      code: name || 'IframePushError',
+      isIframeBlock: true,
+      message:
+        'المتصفح قيّد تفعيل الإشعارات داخل الإطار المضمّن. افتح الموقع في نافذة مستقلة لتفعيل الإشعارات بضغطة واحدة.',
+    };
+  }
+
+  return {
+    code: name || 'UnknownPushError',
+    message: msg || 'تعذر تفعيل الإشعارات حالياً. جرب تاني بعد ثواني.',
+  };
+}
+
+async function waitForActiveServiceWorker(reg: ServiceWorkerRegistration): Promise<ServiceWorkerRegistration> {
+  if (reg.active?.state === 'activated') return reg;
+  const installingOrWaiting = reg.installing || reg.waiting;
+  if (installingOrWaiting) {
+    await new Promise<void>((resolve) => {
+      const timeout = window.setTimeout(() => resolve(), 4500);
+      const onStateChange = () => {
+        if (installingOrWaiting.state === 'activated' || installingOrWaiting.state === 'redundant') {
+          window.clearTimeout(timeout);
+          installingOrWaiting.removeEventListener('statechange', onStateChange);
+          resolve();
+        }
+      };
+      installingOrWaiting.addEventListener('statechange', onStateChange);
+    });
+  }
+  return await navigator.serviceWorker.ready;
+}
+
+export async function subscribeBrowserToPush(): Promise<{
+  ok: boolean;
+  message: string;
+  requiresStandaloneWindow?: boolean;
+}> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return {
+      ok: false,
+      message: 'أنت غير متصل بالإنترنت حالياً. يرجى الاتصال أولاً ثم الضغط على تفعيل الإشعارات.',
+    };
+  }
+
+  if (!isPushBrowserSupported()) {
+    return {
+      ok: false,
+      message:
+        'متصفحك الحالي أو وضع التصفح لا يدعم إشعارات الويب المباشرة (على iPhone يلزم فتح الموقع من Safari وإضافته للشاشة الرئيسية أولاً).',
+    };
+  }
+
+  // Check already-denied state before invoking requestPermission
+  if (Notification.permission === 'denied') {
+    api.logPushError({ stage: 'precheck', errorCode: 'PermissionAlreadyDenied' });
+    return {
+      ok: false,
+      message:
+        'إذن الإشعارات مرفوض مسبقاً في المتصفح. افتح إعدادات الموقع (أيقونة القفل بالرابط بالأعلى) واسمح بالإشعارات ثم جرب تاني.',
+    };
+  }
+
+  let permission: NotificationPermission = Notification.permission;
+  if (permission === 'default') {
+    try {
+      permission = await Notification.requestPermission();
+    } catch (err) {
+      const translated = translatePushError(err);
+      api.logPushError({ stage: 'requestPermission', errorCode: translated.code, detail: translated.message });
+      return {
+        ok: false,
+        message: translated.message,
+        requiresStandaloneWindow: translated.isIframeBlock,
+      };
+    }
+  }
+
+  if (permission === 'denied') {
+    api.logPushError({ stage: 'requestPermission', errorCode: 'UserDenied' });
+    return {
+      ok: false,
+      message:
+        'تم رفض إذن الإشعارات. تقدر تفعّلها في أي وقت من إعدادات الموقع في المتصفح.',
+    };
+  }
+
+  if (permission !== 'granted') {
+    const inIframe = isRunningInIframe();
+    api.logPushError({
+      stage: 'requestPermission',
+      errorCode: inIframe ? 'IframeSilentDefault' : 'PermissionDismissed',
+    });
+    return {
+      ok: false,
+      requiresStandaloneWindow: inIframe,
+      message: inIframe
+        ? 'المتصفح لا يعرض نافذة إذن الإشعارات داخل المعاينة المضمّنة. افتح الصفحة في نافذة مستقلة لتفعيلها بسهولة.'
+        : 'تم إغلاق نافذة الإذن بدون موافقة. اضغط تفعيل واختر "السماح" لإتمام الاشتراك.',
+    };
+  }
+
+  try {
+    const vapid = await api.getVapidPublicKey();
+    if (!vapid.enabled || !vapid.publicKey) {
+      return {
+        ok: false,
+        message: 'الإشعارات متوقفة مؤقتاً من لوحة الإدارة.',
+      };
+    }
+
+    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+    const readyReg = await waitForActiveServiceWorker(reg);
+    const appServerKey = urlBase64ToUint8Array(vapid.publicKey);
+
+    let subscription = await readyReg.pushManager.getSubscription();
+    if (subscription) {
+      // Detect VAPID key mismatch and cleanly re-subscribe if changed
+      try {
+        const existingKey = subscription.options?.applicationServerKey;
+        if (existingKey) {
+          const existingBytes = new Uint8Array(existingKey);
+          const mismatch =
+            existingBytes.length !== appServerKey.length ||
+            existingBytes.some((b, i) => b !== appServerKey[i]);
+          if (mismatch) {
+            await subscription.unsubscribe();
+            subscription = null;
+          }
+        }
+      } catch {
+        // Ignore key comparison edge cases
+      }
+    }
+
+    if (!subscription) {
+      try {
+        subscription = await readyReg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: appServerKey,
+        });
+      } catch (subErr) {
+        // Retry once after unsubscribing any orphaned subscription
+        const existing = await readyReg.pushManager.getSubscription();
+        if (existing) {
+          await existing.unsubscribe().catch(() => {});
+        }
+        subscription = await readyReg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: appServerKey,
+        });
+        if (!subscription && subErr) throw subErr;
+      }
+    }
+
+    const json = subscription.toJSON();
+    if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+      api.logPushError({ stage: 'extractKeys', errorCode: 'MissingPushKeys' });
+      return { ok: false, message: 'تعذر قراءة مفتاح الاشتراك من المتصفح.' };
+    }
+
+    // Only report success after SQLite confirms persistence
+    await api.subscribePush({
+      endpoint: json.endpoint,
+      keys: {
+        p256dh: json.keys.p256dh,
+        auth: json.keys.auth,
+      },
+    });
+
+    return {
+      ok: true,
+      message: `تم تفعيل الإشعارات بنجاح وحفظ اشتراكك في النظام! هيوصلك تنبيه واحد كل ${vapid.intervalDays} أيام بأهم العروض والتحديثات.`,
+    };
+  } catch (err) {
+    const translated = translatePushError(err);
+    api.logPushError({ stage: 'subscribe', errorCode: translated.code, detail: translated.message });
+    return {
+      ok: false,
+      message: translated.message,
+      requiresStandaloneWindow: translated.isIframeBlock,
+    };
+  }
+}
+
+export async function unsubscribeBrowserFromPush(): Promise<{ ok: boolean; message: string }> {
+  let endpoint: string | undefined;
+  if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+      const sub = await reg?.pushManager.getSubscription();
+      if (sub) {
+        endpoint = sub.endpoint;
+        await sub.unsubscribe();
+      }
+    } catch {
+      // Fall back to DB unsubscribe by visitor/user
+    }
+  }
+
+  await api.unsubscribePush(endpoint);
+  return {
+    ok: true,
+    message: 'تم إلغاء اشتراك الإشعارات وحذفه من قائمة الإرسال بنجاح. تقدر ترجّعه في أي وقت.',
+  };
+}
+
+export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = ({
+  notificationsEnabled = true,
+}) => {
+  const [visible, setVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; standalone?: boolean } | null>(
+    null
+  );
+
+  useEffect(() => {
+    if (!notificationsEnabled) return;
+    if (!isPushBrowserSupported()) return;
+    if (Notification.permission !== 'default') return;
+
+    try {
+      const dismissedUntil = Number(localStorage.getItem(DISMISS_KEY) || '0');
+      if (dismissedUntil > Date.now()) return;
+    } catch {
+      // Ignore storage error
+    }
+
+    const timer = window.setTimeout(async () => {
+      try {
+        const status = await api.getPushStatus();
+        if (!status.subscribed && status.notificationsEnabled && Notification.permission === 'default') {
+          setVisible(true);
+        }
+      } catch {
+        // Silent fail
+      }
+    }, 4500);
+
+    return () => window.clearTimeout(timer);
+  }, [notificationsEnabled]);
+
+  const handleDismiss = () => {
+    try {
+      localStorage.setItem(DISMISS_KEY, String(Date.now() + DISMISS_DAYS * 86400 * 1000));
+    } catch {
+      // Ignore
+    }
+    setVisible(false);
+  };
+
+  const handleEnable = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const res = await subscribeBrowserToPush();
+      setFeedback({
+        ok: res.ok,
+        text: res.message,
+        standalone: res.requiresStandaloneWindow,
+      });
+      if (res.ok) {
+        window.setTimeout(() => setVisible(false), 2600);
+      }
+    } catch (err) {
+      setFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'تعذر تفعيل الإشعارات.',
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!visible) return null;
+
+  return (
+    <div
+      data-testid="notification-prompt"
+      className="fixed bottom-4 left-4 right-4 sm:left-6 sm:right-auto z-40 sm:max-w-sm animate-modal-pop"
+    >
+      <div className="clay-card p-4 bg-white border border-indigo-200/70 shadow-2xl text-right">
+        <button
+          type="button"
+          aria-label="إغلاق"
+          onClick={handleDismiss}
+          className="absolute top-3 left-3 p-1.5 rounded-xl clay-btn text-slate-400 hover:text-slate-700"
+        >
+          <X className="w-3.5 h-3.5" />
+        </button>
+
+        <div className="flex items-start gap-3 pl-6">
+          <div className="w-9 h-9 rounded-2xl clay-apple-blue flex items-center justify-center text-white shrink-0 shadow-sm">
+            <Bell className="w-4 h-4" />
+          </div>
+
+          <div className="space-y-2 flex-1">
+            <h3 className="text-sm font-black font-decorative text-slate-900">
+              تحب يوصلك جديد عروض CROVO؟
+            </h3>
+            <p className="text-[11px] text-slate-600 font-ios leading-relaxed">
+              هنبعتلك إشعار واحد خفيف كل 3 أيام بالخصومات وتحديثات الحلول، من غير إزعاج وتقدر تلغيه في أي وقت.
+            </p>
+
+            {feedback && (
+              <div
+                className={`p-2.5 rounded-xl clay-inset text-[11px] font-bold font-ios space-y-1.5 ${
+                  feedback.ok ? 'text-indigo-700' : 'text-rose-600'
+                }`}
+              >
+                <p>{feedback.text}</p>
+                {feedback.standalone && typeof window !== 'undefined' && (
+                  <a
+                    href={window.location.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 text-indigo-700 underline"
+                  >
+                    <span>فتح في نافذة مستقلة</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={handleEnable}
+                data-testid="enable-notifications-btn"
+                className="clay-apple-blue px-3.5 py-2 rounded-xl text-xs font-black text-white font-ios flex-1 disabled:opacity-60"
+              >
+                {busy ? 'جاري التفعيل...' : 'تفعيل الإشعارات'}
+              </button>
+              <button
+                type="button"
+                onClick={handleDismiss}
+                data-testid="dismiss-notifications-btn"
+                className="clay-btn px-3 py-2 rounded-xl text-xs font-bold text-slate-600 font-ios"
+              >
+                مش دلوقتي
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export const PushPreferenceWidget: React.FC = () => {
+  const [supported] = useState(() => isPushBrowserSupported());
+  const [isOnline, setIsOnline] = useState(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [permState, setPermState] = useState<NotificationPermission | 'unsupported'>(() =>
+    typeof window !== 'undefined' && 'Notification' in window
+      ? Notification.permission
+      : 'unsupported'
+  );
+  const [subscribed, setSubscribed] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [intervalDays, setIntervalDays] = useState(3);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string; standalone?: boolean } | null>(null);
+
+  const refreshStatus = useCallback(async () => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      setPermState(Notification.permission);
+    }
+    try {
+      const status = await api.getPushStatus();
+      setSubscribed(status.subscribed);
+      setNotificationsEnabled(status.notificationsEnabled);
+      setIntervalDays(status.intervalDays);
+    } catch {
+      // Ignore transient failure
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshStatus();
+    const onOnline = () => setIsOnline(true);
+    const onOffline = () => setIsOnline(false);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => {
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [refreshStatus]);
+
+  const handleSubscribe = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await subscribeBrowserToPush();
+      setNote({
+        ok: res.ok,
+        text: res.message,
+        standalone: res.requiresStandaloneWindow,
+      });
+      await refreshStatus();
+    } catch (err) {
+      setNote({
+        ok: false,
+        text: err instanceof Error ? err.message : 'تعذر تفعيل الإشعارات.',
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleUnsubscribe = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await unsubscribeBrowserFromPush();
+      setNote({ ok: res.ok, text: res.message });
+      await refreshStatus();
+    } catch (err) {
+      setNote({
+        ok: false,
+        text: err instanceof Error ? err.message : 'تعذر إلغاء الإشعارات.',
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid="push-preference-widget"
+      className="p-3.5 sm:p-4 rounded-2xl clay-inset space-y-2.5 text-right"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          {subscribed ? (
+            <Bell className="w-4 h-4 text-indigo-600" />
+          ) : (
+            <BellOff className="w-4 h-4 text-slate-400" />
+          )}
+          <span className="text-xs sm:text-sm font-black font-ios text-slate-900">
+            تنبيهات عروض وتحديثات CROVO SPACE
+          </span>
+        </div>
+
+        <span
+          data-testid="push-status-label"
+          className={`text-[11px] font-bold font-ios px-2.5 py-0.5 rounded-full ${
+            subscribed
+              ? 'bg-indigo-100 text-indigo-700'
+              : permState === 'denied'
+              ? 'bg-rose-100 text-rose-700'
+              : 'bg-slate-200/80 text-slate-600'
+          }`}
+        >
+          {loading
+            ? 'جاري التحقق...'
+            : !isOnline
+            ? 'غير متصل'
+            : subscribed
+            ? `مفعّلة (كل ${intervalDays} أيام)`
+            : permState === 'denied'
+            ? 'مرفوضة من المتصفح'
+            : 'غير مفعّلة'}
+        </span>
+      </div>
+
+      {!isOnline && (
+        <div className="flex items-center gap-1.5 text-[11px] text-amber-700 font-bold font-ios">
+          <WifiOff className="w-3.5 h-3.5 shrink-0" />
+          <span>أنت غير متصل بالإنترنت حالياً؛ تأكد من الاتصال لتعديل حالة الإشعارات.</span>
+        </div>
+      )}
+
+      {!supported ? (
+        <div className="flex items-start gap-1.5 text-[11px] text-amber-700 font-ios">
+          <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>
+            متصفحك الحالي مش داعم إشعارات الويب (Web Push) مباشرة. على iPhone بتحتاج تفتح الموقع من Safari وتضيفه للشاشة الرئيسية (Add to Home Screen)، أو تستخدم Chrome على Android والكمبيوتر.
+          </span>
+        </div>
+      ) : permState === 'denied' ? (
+        <div className="p-2.5 rounded-xl bg-rose-50/90 border border-rose-200/70 text-[11px] font-bold text-rose-700 font-ios leading-relaxed">
+          تم حظر الإشعارات لهذا الموقع في إعدادات متصفحك. لتفعيلها: اضغط على أيقونة الإعدادات أو القفل بجانب رابط الموقع بالأعلى ← الإشعارات (Notifications) ← سماح (Allow) ثم أعد المحاولة.
+        </div>
+      ) : !notificationsEnabled ? (
+        <div className="text-[11px] font-bold text-slate-500 font-ios">
+          الإشعارات موقوفة مؤقتاً من لوحة الإدارة.
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          {subscribed ? (
+            <button
+              type="button"
+              disabled={busy || !isOnline}
+              onClick={handleUnsubscribe}
+              data-testid="push-unsubscribe-btn"
+              className="clay-btn px-3.5 py-2 rounded-xl text-xs font-bold text-rose-600 flex items-center gap-1.5 font-ios disabled:opacity-50"
+            >
+              <BellOff className="w-3.5 h-3.5" />
+              <span>{busy ? 'جاري الإلغاء...' : 'إلغاء الإشعارات'}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              disabled={busy || !isOnline}
+              onClick={handleSubscribe}
+              data-testid="push-resubscribe-btn"
+              className="clay-apple-blue px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 font-ios shadow-sm disabled:opacity-50"
+            >
+              <Bell className="w-3.5 h-3.5" />
+              <span>{busy ? 'جاري التفعيل...' : 'تفعيل / إعادة تفعيل الإشعارات'}</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {note && (
+        <div
+          data-testid="push-feedback-note"
+          className={`flex items-start gap-1.5 text-[11px] font-bold font-ios p-2.5 rounded-xl ${
+            note.ok
+              ? 'bg-indigo-50/90 text-indigo-800 border border-indigo-200/60'
+              : 'bg-rose-50/90 text-rose-700 border border-rose-200/60'
+          }`}
+        >
+          {note.ok ? (
+            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-indigo-600 mt-0.5" />
+          ) : (
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 mt-0.5" />
+          )}
+          <div className="space-y-1">
+            <p>{note.text}</p>
+            {note.standalone && typeof window !== 'undefined' && (
+              <a
+                href={window.location.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-indigo-700 underline"
+              >
+                <span>فتح في صفحة مستقلة لتفعيل الإشعارات</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

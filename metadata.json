@@ -1,0 +1,8 @@
+{
+  "name": "Fel3osh",
+  "description": "A sleek, interactive student solution library featuring seamless animations and integrated promotional tools for your academic assistant tool.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

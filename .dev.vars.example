@@ -1,0 +1,22 @@
+# Local Cloudflare Pages Functions Secrets (.dev.vars)
+# Copy this file to ".dev.vars" for local `wrangler pages dev` testing.
+# NEVER commit ".dev.vars" to GitHub.
+
+# Required cryptographic secrets (use two DIFFERENT 32+ char random strings)
+SESSION_SECRET=""
+CREDENTIAL_ENCRYPTION_KEY=""
+
+# Admin dashboard login credentials
+ADMIN_USERNAME=""
+ADMIN_PASSWORD=""
+
+# Public WhatsApp click-to-chat number (digits only with country code)
+ADMIN_WHATSAPP_NUMBER="201550324450"
+
+# Optional persistent Web Push VAPID keys (leave empty or generate via `npx web-push generate-vapid-keys`)
+VAPID_SUBJECT="mailto:support@crovo.space"
+VAPID_PUBLIC_KEY=""
+VAPID_PRIVATE_KEY=""
+
+# Optional cron dispatch secret
+PUSH_CRON_SECRET=""
