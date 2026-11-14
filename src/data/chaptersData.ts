@@ -1,4 +1,4 @@
-import { Chapter, ToolVideo, ToolScreenshot, StudentQuote } from '../types';
+import type { Chapter, ToolVideo, ToolScreenshot, StudentQuote } from '../types/index.ts';
 
 export const chaptersJs: Chapter[] = [
   {

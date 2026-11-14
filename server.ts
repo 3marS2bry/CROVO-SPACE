@@ -125,7 +125,8 @@ export interface CreateServerOptions {
 
 function resolveRuntimeSecrets(
   options: CreateServerOptions,
-  dataDir: string
+  dataDir: string,
+  db: ReturnType<typeof createDatabase>
 ): { sessionSecret: string; encryptionKey: string } {
   const isProd = process.env.NODE_ENV === 'production';
   const envSession = (options.sessionSecret || process.env.SESSION_SECRET || '').trim();
@@ -138,12 +139,6 @@ function resolveRuntimeSecrets(
     return { sessionSecret: envSession, encryptionKey: envEncryption };
   }
 
-  if (isProd && options.dbPath !== ':memory:') {
-    throw new Error(
-      'Missing required production secrets: SESSION_SECRET and CREDENTIAL_ENCRYPTION_KEY must be set in environment variables.'
-    );
-  }
-
   const devSecretsFile = path.join(dataDir, '.local-dev-secrets.json');
   let stored: { sessionSecret?: string; encryptionKey?: string } = {};
   if (fs.existsSync(devSecretsFile)) {
@@ -154,8 +149,30 @@ function resolveRuntimeSecrets(
     }
   }
 
-  const sessionSecret = envSession || stored.sessionSecret || crypto.randomBytes(32).toString('hex');
-  const encryptionKey = envEncryption || stored.encryptionKey || crypto.randomBytes(32).toString('hex');
+  const dbSessionRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('_runtime_session_secret') as
+    | { value?: string }
+    | undefined;
+  const dbEncRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('_runtime_encryption_key') as
+    | { value?: string }
+    | undefined;
+
+  const sessionSecret =
+    envSession || dbSessionRow?.value || stored.sessionSecret || crypto.randomBytes(32).toString('hex');
+  let encryptionKey =
+    envEncryption || dbEncRow?.value || stored.encryptionKey || crypto.randomBytes(32).toString('hex');
+
+  if (encryptionKey === sessionSecret) {
+    encryptionKey = crypto.randomBytes(32).toString('hex');
+  }
+
+  if (!dbSessionRow?.value || !dbEncRow?.value) {
+    try {
+      setSetting(db, '_runtime_session_secret', sessionSecret);
+      setSetting(db, '_runtime_encryption_key', encryptionKey);
+    } catch {
+      // Ignore if DB is read-only
+    }
+  }
 
   if (!stored.sessionSecret || !stored.encryptionKey) {
     try {
@@ -166,6 +183,12 @@ function resolveRuntimeSecrets(
     } catch {
       // Ignore if ephemeral
     }
+  }
+
+  if (isProd && options.dbPath !== ':memory:' && (!envSession || !envEncryption)) {
+    console.warn(
+      'Notice: SESSION_SECRET / CREDENTIAL_ENCRYPTION_KEY not set in env; using persistent auto-generated SQLite runtime keys.'
+    );
   }
 
   return { sessionSecret, encryptionKey };
@@ -182,7 +205,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
   ensureInitialSeedData(db);
   checkpointDatabase(db);
 
-  const { sessionSecret, encryptionKey } = resolveRuntimeSecrets(options, dataDir);
+  const { sessionSecret, encryptionKey } = resolveRuntimeSecrets(options, dataDir, db);
 
   const adminUsername = (options.adminUsername ?? process.env.ADMIN_USERNAME ?? '').trim();
   const adminPassword = options.adminPassword ?? process.env.ADMIN_PASSWORD ?? '';
