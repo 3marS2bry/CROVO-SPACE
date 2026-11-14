@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Allow: /tool
+Allow: /reviews
+Disallow: /admin
+Disallow: /api/
+
+Sitemap: /sitemap.xml

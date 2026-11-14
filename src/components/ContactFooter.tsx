@@ -101,22 +101,28 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto mt-8 pt-6 border-t border-slate-200/60 flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 font-medium text-center gap-3">
-        <span>© {new Date().getFullYear()} جميع الحلول والأكواد جاهزة لدعم وحوش البرمجة</span>
-        <div className="flex items-center gap-3 justify-center text-slate-600">
-          <span>صُنع خصيصاً لمساعدة الطلاب على التفوق والراحة</span>
-          <a
-            href="/admin"
-            onClick={(e) => {
-              e.preventDefault();
-              onOpenAdmin();
-            }}
-            data-testid="footer-admin-link"
-            className="clay-btn px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1"
-          >
-            <Shield className="w-3 h-3" />
-            <span>لوحة الإدارة</span>
-          </a>
+      <div className="max-w-7xl mx-auto mt-8 pt-6 border-t border-slate-200/60 space-y-4">
+        <p className="text-[11px] text-slate-600 font-medium leading-relaxed text-center max-w-4xl mx-auto">
+          مكتبة الحلول المُعالجة لطلاب أولى وتانية بكالوريا مصرية عبر CROVO SPACE: حل منصة كوريو ياباني QUREO، حلول البرمجة Java وPython، حل منصة الثقافة المالية وإجابات دروسها وتدريباتها وتجارتها، تدريبات واختبارات كوريو وإعلانات جميع المجالات وحلول المنصات التعليمية للوصول إلى الإجابات بسهولة.
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 font-medium text-center gap-3">
+          <span>© {new Date().getFullYear()} جميع الحلول والأكواد جاهزة لدعم وحوش البرمجة</span>
+          <div className="flex items-center gap-3 justify-center text-slate-600">
+            <span>صُنع خصيصاً لمساعدة الطلاب على التفوق والراحة</span>
+            <a
+              href="/admin"
+              onClick={(e) => {
+                e.preventDefault();
+                onOpenAdmin();
+              }}
+              data-testid="footer-admin-link"
+              className="clay-btn px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1"
+            >
+              <Shield className="w-3 h-3" />
+              <span>لوحة الإدارة</span>
+            </a>
+          </div>
         </div>
       </div>
     </footer>

@@ -25,6 +25,7 @@ import { HelpCenterSection } from './components/HelpCenterSection';
 import { AcademicGrade, Chapter, SectionType } from './types';
 import { api, PublicConfig } from './utils/api';
 import { LIBRARY_AD_DELAY_MS, shouldShowTimedLibraryAd } from './utils/rules';
+import { applyRouteSeo } from './utils/seo';
 
 function lazyWithRetry<T extends React.ComponentType<any>>(
   importer: () => Promise<{ default: T }>
@@ -141,6 +142,10 @@ function AppContent() {
     const timer = window.setInterval(loadSiteConfig, 60000);
     return () => window.clearInterval(timer);
   }, [loadSiteConfig]);
+
+  useEffect(() => {
+    applyRouteSeo(activeView);
+  }, [activeView]);
 
   // Real visit tracking (once per initial load & view switch)
   const trackedInitialRef = useRef(false);
