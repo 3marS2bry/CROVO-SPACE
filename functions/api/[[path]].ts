@@ -129,20 +129,29 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
 async function resolveSecrets(db: D1Database, env: Env): Promise<{ sessionSecret: string; encryptionKey: string }> {
   const envSession = (env.SESSION_SECRET || '').trim();
   const envEnc = (env.CREDENTIAL_ENCRYPTION_KEY || '').trim();
-  if (envSession && envEnc) {
-    return { sessionSecret: envSession, encryptionKey: envEnc };
-  }
 
   let sessionSecret = envSession || (await getSetting(db, '_edge_session_secret')) || '';
   let encryptionKey = envEnc || (await getSetting(db, '_edge_encryption_key')) || '';
 
-  if (!sessionSecret) {
-    sessionSecret = randomHex(32);
-    await setSetting(db, '_edge_session_secret', sessionSecret);
+  if (!sessionSecret || !encryptionKey) {
+    throw new Error(
+      'Missing required production secrets: SESSION_SECRET and CREDENTIAL_ENCRYPTION_KEY must be configured in environment variables or existing database settings.'
+    );
   }
-  if (!encryptionKey) {
-    encryptionKey = randomHex(32);
-    await setSetting(db, '_edge_encryption_key', encryptionKey);
+
+  if (envSession && envEnc) {
+    if (envSession === envEnc) {
+      throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET.');
+    }
+    // If env secrets are provided and differ from stored DB keys, persist them to sync
+    if (sessionSecret !== envSession) {
+      await setSetting(db, '_edge_session_secret', envSession);
+      sessionSecret = envSession;
+    }
+    if (encryptionKey !== envEnc) {
+      await setSetting(db, '_edge_encryption_key', envEnc);
+      encryptionKey = envEnc;
+    }
   }
 
   return { sessionSecret, encryptionKey };

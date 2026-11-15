@@ -132,13 +132,6 @@ function resolveRuntimeSecrets(
   const envSession = (options.sessionSecret || process.env.SESSION_SECRET || '').trim();
   const envEncryption = (options.encryptionKey || process.env.CREDENTIAL_ENCRYPTION_KEY || '').trim();
 
-  if (envSession && envEncryption) {
-    if (isProd && envSession === envEncryption) {
-      throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET in production.');
-    }
-    return { sessionSecret: envSession, encryptionKey: envEncryption };
-  }
-
   const devSecretsFile = path.join(dataDir, '.local-dev-secrets.json');
   let stored: { sessionSecret?: string; encryptionKey?: string } = {};
   if (fs.existsSync(devSecretsFile)) {
@@ -156,19 +149,32 @@ function resolveRuntimeSecrets(
     | { value?: string }
     | undefined;
 
-  const sessionSecret =
-    envSession || dbSessionRow?.value || stored.sessionSecret || crypto.randomBytes(32).toString('hex');
-  let encryptionKey =
-    envEncryption || dbEncRow?.value || stored.encryptionKey || crypto.randomBytes(32).toString('hex');
+  const sessionSecret = envSession || dbSessionRow?.value || stored.sessionSecret || '';
+  const encryptionKey = envEncryption || dbEncRow?.value || stored.encryptionKey || '';
 
-  if (encryptionKey === sessionSecret) {
-    encryptionKey = crypto.randomBytes(32).toString('hex');
+  if (isProd && (!sessionSecret || !encryptionKey)) {
+    throw new Error(
+      'Missing required production secrets: SESSION_SECRET and CREDENTIAL_ENCRYPTION_KEY must be set in environment variables or existing database settings.'
+    );
+  }
+
+  const finalSession = sessionSecret || crypto.randomBytes(32).toString('hex');
+  let finalEnc = encryptionKey || crypto.randomBytes(32).toString('hex');
+
+  if (finalEnc === finalSession) {
+    finalEnc = crypto.randomBytes(32).toString('hex');
+  }
+
+  if (envSession && envEncryption) {
+    if (isProd && envSession === envEncryption) {
+      throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET in production.');
+    }
   }
 
   if (!dbSessionRow?.value || !dbEncRow?.value) {
     try {
-      setSetting(db, '_runtime_session_secret', sessionSecret);
-      setSetting(db, '_runtime_encryption_key', encryptionKey);
+      setSetting(db, '_runtime_session_secret', finalSession);
+      setSetting(db, '_runtime_encryption_key', finalEnc);
     } catch {
       // Ignore if DB is read-only
     }
@@ -177,7 +183,7 @@ function resolveRuntimeSecrets(
   if (!stored.sessionSecret || !stored.encryptionKey) {
     try {
       fs.mkdirSync(dataDir, { recursive: true });
-      fs.writeFileSync(devSecretsFile, JSON.stringify({ sessionSecret, encryptionKey }, null, 2), {
+      fs.writeFileSync(devSecretsFile, JSON.stringify({ sessionSecret: finalSession, encryptionKey: finalEnc }, null, 2), {
         mode: 0o600,
       });
     } catch {
@@ -185,13 +191,7 @@ function resolveRuntimeSecrets(
     }
   }
 
-  if (isProd && options.dbPath !== ':memory:' && (!envSession || !envEncryption)) {
-    console.warn(
-      'Notice: SESSION_SECRET / CREDENTIAL_ENCRYPTION_KEY not set in env; using persistent auto-generated SQLite runtime keys.'
-    );
-  }
-
-  return { sessionSecret, encryptionKey };
+  return { sessionSecret: finalSession, encryptionKey: finalEnc };
 }
 
 export async function createCrovoApp(options: CreateServerOptions = {}) {
