@@ -5,5 +5,5 @@ compatibility_date = "2026-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "crovo-space-db"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_id = "53d2ac36-dbc3-4c4b-b67e-bda88d682088"
 migrations_dir = "migrations"
