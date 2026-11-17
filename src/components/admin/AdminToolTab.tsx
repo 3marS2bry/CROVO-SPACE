@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Eye, EyeOff, Play, Save, Zap } from 'lucide-react';
 import { api, ToolServiceConfig, ToolVideoConfig } from '../../utils/api';
+import { syncSiteConfigToCloud } from '../../utils/cloudStore';
 
 interface AdminToolTabProps {
   onNotice: (msg: string) => void;
@@ -50,6 +51,7 @@ export const AdminToolTab: React.FC<AdminToolTabProps> = ({ onNotice, onConfigUp
   const handleToggleService = async (svc: ToolServiceConfig) => {
     try {
       await api.adminUpdateToolService(svc.key, { isVisible: !svc.isVisible });
+      void api.getConfig().then(syncSiteConfigToCloud).catch(() => {});
       onNotice(`تم تحديث ظهور خدمة: ${svc.name}`);
       onConfigUpdated();
       loadTool();
@@ -64,6 +66,7 @@ export const AdminToolTab: React.FC<AdminToolTabProps> = ({ onNotice, onConfigUp
         name: svc.name,
         description: svc.description,
       });
+      void api.getConfig().then(syncSiteConfigToCloud).catch(() => {});
       onNotice(`تم حفظ بيانات ${svc.key}.`);
       onConfigUpdated();
     } catch (err) {
@@ -74,6 +77,7 @@ export const AdminToolTab: React.FC<AdminToolTabProps> = ({ onNotice, onConfigUp
   const handleSaveVideos = async () => {
     try {
       await api.adminUpdateToolVideos(videos);
+      void api.getConfig().then(syncSiteConfigToCloud).catch(() => {});
       onNotice('تم حفظ فيديوهات صفحة الأداة وتحديثها فوراً.');
       onConfigUpdated();
     } catch (err) {

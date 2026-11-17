@@ -22,7 +22,9 @@ import {
   validateQuestionReportPayload,
 } from '../_lib/domain';
 import {
+  allocateNextUserSerial,
   ensureDefaultSettingsIfNeeded,
+  ensureUserSerialNumberSchema,
   getDashboardAnalytics,
   getPollSummary,
   getSetting,
@@ -48,6 +50,7 @@ interface RequestCtx {
   currentUser: AuthUser | null;
   sessionSecret: string;
   encryptionKey: string;
+  legacyEncryptionKey: string | null;
   adminUsername: string;
   adminPassword: string;
   cookies: Record<string, string>;
@@ -126,12 +129,18 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown>> 
   }
 }
 
-async function resolveSecrets(db: D1Database, env: Env): Promise<{ sessionSecret: string; encryptionKey: string }> {
+async function resolveSecrets(
+  db: D1Database,
+  env: Env
+): Promise<{ sessionSecret: string; encryptionKey: string; legacyEncryptionKey: string | null }> {
   const envSession = (env.SESSION_SECRET || '').trim();
   const envEnc = (env.CREDENTIAL_ENCRYPTION_KEY || '').trim();
 
-  let sessionSecret = envSession || (await getSetting(db, '_edge_session_secret')) || '';
-  let encryptionKey = envEnc || (await getSetting(db, '_edge_encryption_key')) || '';
+  const dbSession = (await getSetting(db, '_edge_session_secret')) || '';
+  const dbEnc = (await getSetting(db, '_edge_encryption_key')) || '';
+
+  const sessionSecret = envSession || dbSession;
+  const encryptionKey = envEnc || dbEnc;
 
   if (!sessionSecret || !encryptionKey) {
     throw new Error(
@@ -139,22 +148,14 @@ async function resolveSecrets(db: D1Database, env: Env): Promise<{ sessionSecret
     );
   }
 
-  if (envSession && envEnc) {
-    if (envSession === envEnc) {
-      throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET.');
-    }
-    // If env secrets are provided and differ from stored DB keys, persist them to sync
-    if (sessionSecret !== envSession) {
-      await setSetting(db, '_edge_session_secret', envSession);
-      sessionSecret = envSession;
-    }
-    if (encryptionKey !== envEnc) {
-      await setSetting(db, '_edge_encryption_key', envEnc);
-      encryptionKey = envEnc;
-    }
+  if (envSession && envEnc && envSession === envEnc) {
+    throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET.');
   }
 
-  return { sessionSecret, encryptionKey };
+  // Never overwrite or delete existing D1 keys; keep differing stored encryption key read-only for legacy order decryption.
+  const legacyEncryptionKey = envEnc && dbEnc && dbEnc !== envEnc ? dbEnc : null;
+
+  return { sessionSecret, encryptionKey, legacyEncryptionKey };
 }
 
 async function createUserSession(ctx: RequestCtx, userId: string): Promise<string> {
@@ -218,7 +219,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
   }
 
   await ensureDefaultSettingsIfNeeded(db, env);
-  const { sessionSecret, encryptionKey } = await resolveSecrets(db, env);
+  const { sessionSecret, encryptionKey, legacyEncryptionKey } = await resolveSecrets(db, env);
 
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -259,12 +260,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
   const userRawToken = cookies['crovo_user'] || bearerToken;
   let currentUser: AuthUser | null = null;
 
+  await ensureUserSerialNumberSchema(db);
+
   if (userRawToken) {
     const tokenHash = await sha256Hex(userRawToken);
     const sessionRow = await db
       .prepare(
         `SELECT s.id as sessionId, s.expires_at as expiresAt,
-                u.id, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason
+                u.id, u.serial_number as serialNumber, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason
          FROM user_sessions s
          JOIN users u ON u.id = s.user_id
          WHERE s.token_hash = ?`
@@ -274,6 +277,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         sessionId: string;
         expiresAt: string;
         id: string;
+        serialNumber: string | null;
         name: string;
         email: string;
         grade: 'bac1' | 'bac2';
@@ -283,8 +287,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       }>();
 
     if (sessionRow && Date.parse(sessionRow.expiresAt) > Date.now() && sessionRow.status === 'active') {
+      let serialNumber = sessionRow.serialNumber;
+      if (!serialNumber) {
+        serialNumber = await allocateNextUserSerial(db);
+        await db.prepare('UPDATE users SET serial_number = ? WHERE id = ?').bind(serialNumber, sessionRow.id).run();
+      }
       currentUser = {
         id: sessionRow.id,
+        serialNumber,
         name: sessionRow.name,
         email: sessionRow.email,
         grade: sessionRow.grade,
@@ -313,6 +323,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     currentUser,
     sessionSecret,
     encryptionKey,
+    legacyEncryptionKey,
     adminUsername: (env.ADMIN_USERNAME || '').trim(),
     adminPassword: env.ADMIN_PASSWORD || '',
     cookies,
@@ -349,18 +360,27 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     const id = generateId('usr');
+    const serialNumber = await allocateNextUserSerial(db);
     const nowIso = new Date().toISOString();
     const passHash = await hashPassword(password);
 
     await db
       .prepare(
-        `INSERT INTO users (id, name, email, password_hash, grade, role, status, last_active_at, created_at)
-         VALUES (?, ?, ?, ?, ?, 'user', 'active', ?, ?)`
+        `INSERT INTO users (id, serial_number, name, email, password_hash, grade, role, status, last_active_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'user', 'active', ?, ?)`
       )
-      .bind(id, name, email, passHash, grade, nowIso, nowIso)
+      .bind(id, serialNumber, name, email, passHash, grade, nowIso, nowIso)
       .run();
 
     await migrateVisitorActivityToUser(db, visitorId, id);
+    await recordAnalyticsEvent(db, {
+      eventType: 'user_register',
+      visitorId,
+      userId: id,
+      path: '/auth/register',
+      grade,
+      meta: { email, serialNumber },
+    });
     const token = await createUserSession(ctx, id);
 
     return jsonResponse(
@@ -368,7 +388,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       {
         ok: true,
         token,
-        user: { id, name, email, grade, role: 'user', status: 'active' },
+        user: { id, serialNumber, name, email, grade, role: 'user', status: 'active' },
       },
       201
     );
@@ -384,10 +404,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     const userRow = await db
-      .prepare('SELECT id, name, email, password_hash, grade, role, status, suspend_reason FROM users WHERE email = ?')
+      .prepare('SELECT id, serial_number, name, email, password_hash, grade, role, status, suspend_reason FROM users WHERE email = ?')
       .bind(email)
       .first<{
         id: string;
+        serial_number: string | null;
         name: string;
         email: string;
         password_hash: string;
@@ -409,8 +430,22 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       );
     }
 
+    let serialNumber = userRow.serial_number;
+    if (!serialNumber) {
+      serialNumber = await allocateNextUserSerial(db);
+      await db.prepare('UPDATE users SET serial_number = ? WHERE id = ?').bind(serialNumber, userRow.id).run();
+    }
+
     await db.prepare('UPDATE users SET last_active_at = ? WHERE id = ?').bind(new Date().toISOString(), userRow.id).run();
     await migrateVisitorActivityToUser(db, visitorId, userRow.id);
+    await recordAnalyticsEvent(db, {
+      eventType: 'user_login',
+      visitorId,
+      userId: userRow.id,
+      path: '/auth/login',
+      grade: userRow.grade,
+      meta: { email: userRow.email, serialNumber },
+    });
     const token = await createUserSession(ctx, userRow.id);
 
     return jsonResponse(ctx, {
@@ -418,6 +453,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       token,
       user: {
         id: userRow.id,
+        serialNumber,
         name: userRow.name,
         email: userRow.email,
         grade: userRow.grade,
@@ -599,6 +635,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       .bind(questionKey)
       .first<{ copy_count: number }>();
 
+    await recordAnalyticsEvent(db, {
+      eventType: 'question_copy',
+      visitorId,
+      userId: currentUser?.id || null,
+      path: `/library/${grade}/${section}/${chapterNum}`,
+      grade,
+      section,
+      chapterNum,
+      meta: { questionKey, qIndex, questionTitle },
+    });
+
     return jsonResponse(ctx, { ok: true, questionKey, copyCount: Number(row?.copy_count || 1) });
   }
 
@@ -633,6 +680,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       } catch {
         return jsonResponse(ctx, { error: 'أنت بلغت عن السؤال ده قبل كده بالفعل، والبلاغ تحت المراجعة.' }, 409);
       }
+
+      await recordAnalyticsEvent(db, {
+        eventType: 'question_report',
+        visitorId,
+        userId: currentUser?.id || null,
+        path: `/library/${input.grade}/${input.section}/${input.chapterNum}`,
+        grade: input.grade,
+        section: input.section,
+        chapterNum: input.chapterNum,
+        meta: { reportId: id, questionKey: input.questionKey, qIndex: input.qIndex },
+      });
 
       return jsonResponse(
         ctx,
@@ -708,6 +766,13 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       .bind(generateId('sub'), visitorId, currentUser?.id || null, endpoint, p256dh, auth, nowIso, nowIso)
       .run();
 
+    await recordAnalyticsEvent(db, {
+      eventType: 'push_subscribe',
+      visitorId,
+      userId: currentUser?.id || null,
+      path: '/push',
+    });
+
     return jsonResponse(ctx, { ok: true, subscribed: true }, 201);
   }
 
@@ -761,7 +826,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       db
         .prepare(
           `SELECT id, visitor_id, user_id, author_name, grade, rating, content, avatar_url, attachment_url,
-                  contact_phone, show_contact_publicly, is_verified, status, reports_count, created_at, updated_at
+                  attachment_before_url, attachment_after_url, contact_phone, show_contact_publicly,
+                  is_verified, status, reports_count, created_at, updated_at
            FROM comments
            WHERE status = 'approved'
            ORDER BY created_at DESC
@@ -800,7 +866,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         rating: Number(r.rating),
         content: r.content,
         avatarUrl: r.avatar_url || null,
-        attachmentUrl: r.attachment_url || null,
+        attachmentUrl: r.attachment_before_url || r.attachment_url || null,
+        attachmentBeforeUrl: r.attachment_before_url || r.attachment_url || null,
+        attachmentAfterUrl: r.attachment_after_url || null,
         contactPhone: null,
         showContactPublicly: false,
         isVerified: Number(r.is_verified) === 1,
@@ -841,7 +909,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         .first();
 
       const avatarUrl = await saveUploadedImage(db, validated.avatarImage);
-      const attachmentUrl = await saveUploadedImage(db, validated.attachmentImage);
+      const attachmentBeforeUrl = await saveUploadedImage(db, validated.attachmentBeforeImage);
+      const attachmentAfterUrl = await saveUploadedImage(db, validated.attachmentAfterImage);
+      const attachmentUrl = attachmentBeforeUrl;
       const id = generateId('cmt');
       const nowIso = new Date().toISOString();
       const isVerified = completedOrder ? 1 : 0;
@@ -850,9 +920,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         .prepare(
           `INSERT INTO comments (
             id, visitor_id, user_id, author_name, grade, rating, content,
-            avatar_url, attachment_url, contact_phone, show_contact_publicly,
+            avatar_url, attachment_url, attachment_before_url, attachment_after_url,
+            contact_phone, show_contact_publicly,
             is_verified, status, reports_count, content_hash, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 0, ?, ?)`
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 0, ?, ?)`
         )
         .bind(
           id,
@@ -864,6 +935,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           validated.content,
           avatarUrl,
           attachmentUrl,
+          attachmentBeforeUrl,
+          attachmentAfterUrl,
           validated.contactPhone,
           validated.showContactPublicly ? 1 : 0,
           isVerified,
@@ -871,6 +944,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           nowIso
         )
         .run();
+
+      await recordAnalyticsEvent(db, {
+        eventType: 'comment_create',
+        visitorId,
+        userId: currentUser?.id || null,
+        path: '/reviews',
+        meta: { commentId: id, rating: validated.rating, authorName: validated.authorName },
+      });
 
       return jsonResponse(
         ctx,
@@ -883,6 +964,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             content: validated.content,
             avatarUrl,
             attachmentUrl,
+            attachmentBeforeUrl,
+            attachmentAfterUrl,
             contactPhone: null,
             showContactPublicly: false,
             isVerified: isVerified === 1,
@@ -957,6 +1040,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         )
         .run();
 
+      await recordAnalyticsEvent(db, {
+        eventType: 'comment_edit',
+        visitorId,
+        userId: currentUser?.id || null,
+        path: '/reviews',
+        meta: { commentId: id },
+      });
+
       return jsonResponse(ctx, { ok: true, updatedAt: nowIso });
     } catch (err) {
       return jsonResponse(ctx, { error: err instanceof Error ? err.message : 'تعذر تعديل التعليق.' }, 400);
@@ -981,6 +1072,13 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     await db.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
+    await recordAnalyticsEvent(db, {
+      eventType: 'comment_delete',
+      visitorId,
+      userId: currentUser?.id || null,
+      path: '/reviews',
+      meta: { commentId: id },
+    });
     return jsonResponse(ctx, { ok: true });
   }
 
@@ -1009,6 +1107,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const newCount = Number(comment.reports_count || 0) + 1;
       const nextStatus = newCount >= 3 ? 'flagged' : 'approved';
       await db.prepare('UPDATE comments SET reports_count = ?, status = ? WHERE id = ?').bind(newCount, nextStatus, id).run();
+
+      await recordAnalyticsEvent(db, {
+        eventType: 'comment_report',
+        visitorId,
+        userId: currentUser?.id || null,
+        path: '/reviews',
+        meta: { commentId: id, reason },
+      });
 
       return jsonResponse(ctx, {
         ok: true,
@@ -1101,6 +1207,19 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     const countRow = await db.prepare('SELECT COUNT(*) as cnt FROM likes WHERE item_key = ?').bind(rawKey).first<{ cnt: number }>();
+    await recordAnalyticsEvent(db, {
+      eventType: rawKey.startsWith('comment:')
+        ? liked
+          ? 'comment_like'
+          : 'comment_unlike'
+        : liked
+        ? 'tool_like'
+        : 'tool_unlike',
+      visitorId,
+      userId: currentUser?.id || null,
+      path: rawKey.startsWith('comment:') ? '/reviews' : '/',
+      meta: { itemKey: rawKey },
+    });
     return jsonResponse(ctx, { itemKey: rawKey, count: Number(countRow?.cnt || 0), liked });
   }
 
@@ -1178,6 +1297,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     } catch {
       return jsonResponse(ctx, { error: 'سبق لك التصويت في هذا الاستفتاء. مسموح بصوت واحد فقط لكل حساب.' }, 409);
     }
+
+    await recordAnalyticsEvent(db, {
+      eventType: 'poll_vote',
+      visitorId,
+      userId: currentUser.id,
+      path: '/#poll-section',
+      meta: { pollId: poll.id, choice },
+    });
 
     return jsonResponse(ctx, await getPollSummary(db, currentUser.id, poll.id), 201);
   }
@@ -1274,6 +1401,15 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           nowIso
         )
         .run();
+
+      await recordAnalyticsEvent(db, {
+        eventType: 'order_create',
+        visitorId,
+        userId: currentUser?.id || null,
+        path: '/orders',
+        grade: input.grade,
+        meta: { orderCode, platformLabel: pricing.platformLabel, finalPrice: pricing.finalPrice },
+      });
 
       return jsonResponse(
         ctx,
@@ -1403,7 +1539,15 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         config,
         analytics,
       ] = await Promise.all([
-        db.prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 200').all<Record<string, unknown>>(),
+        db
+          .prepare(
+            `SELECT o.*, u.serial_number as user_serial_number, u.email as user_email
+             FROM orders o
+             LEFT JOIN users u ON u.id = o.user_id
+             ORDER BY o.created_at DESC
+             LIMIT 500`
+          )
+          .all<Record<string, unknown>>(),
         db.prepare('SELECT * FROM comments ORDER BY created_at DESC LIMIT 200').all<Record<string, unknown>>(),
         db.prepare('SELECT comment_id, reason, created_at FROM comment_reports ORDER BY created_at DESC').all<{
           comment_id: string;
@@ -1453,22 +1597,31 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             typeof o.password_iv === 'string' &&
             typeof o.password_auth_tag === 'string'
           ) {
+            const payload = {
+              encrypted: o.encrypted_password,
+              iv: o.password_iv,
+              authTag: o.password_auth_tag,
+            };
             try {
-              platformPassword = await decryptSecret(
-                {
-                  encrypted: o.encrypted_password,
-                  iv: o.password_iv,
-                  authTag: o.password_auth_tag,
-                },
-                encryptionKey
-              );
+              platformPassword = await decryptSecret(payload, encryptionKey);
             } catch {
-              platformPassword = '[تعذر فك التشفير - تأكد من ثبات CREDENTIAL_ENCRYPTION_KEY]';
+              if (ctx.legacyEncryptionKey) {
+                try {
+                  platformPassword = await decryptSecret(payload, ctx.legacyEncryptionKey);
+                } catch {
+                  platformPassword = '[تعذر فك التشفير - تأكد من ثبات CREDENTIAL_ENCRYPTION_KEY]';
+                }
+              } else {
+                platformPassword = '[تعذر فك التشفير - تأكد من ثبات CREDENTIAL_ENCRYPTION_KEY]';
+              }
             }
           }
           return {
             id: o.id,
             orderCode: o.order_code,
+            userId: o.user_id || null,
+            userSerialNumber: o.user_serial_number || null,
+            userEmail: o.user_email || null,
             fullName: o.full_name,
             grade: o.grade,
             platformLabel: o.platform_label,
@@ -1506,7 +1659,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         rating: c.rating,
         content: c.content,
         avatarUrl: c.avatar_url || null,
-        attachmentUrl: c.attachment_url || null,
+        attachmentUrl: c.attachment_before_url || c.attachment_url || null,
+        attachmentBeforeUrl: c.attachment_before_url || c.attachment_url || null,
+        attachmentAfterUrl: c.attachment_after_url || null,
         contactPhone: c.contact_phone || null,
         showContactPublicly: Number(c.show_contact_publicly) === 1,
         isVerified: Number(c.is_verified) === 1,
@@ -1568,13 +1723,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (method === 'GET' && path === '/api/admin/users') {
+      await ensureUserSerialNumberSchema(db);
       const q = (url.searchParams.get('q') || '').trim().toLowerCase();
       const role = url.searchParams.get('role') || 'all';
       const status = url.searchParams.get('status') || 'all';
 
       const rowsRes = await db
         .prepare(
-          `SELECT u.id, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason,
+          `SELECT u.id, u.serial_number as serialNumber, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason,
                   u.last_active_at as lastActiveAt, u.created_at as createdAt,
                   (SELECT COUNT(*) FROM comments c WHERE c.user_id = u.id) as reviewsCount,
                   (SELECT COUNT(*) FROM user_poll_votes pv WHERE pv.user_id = u.id) as votesCount,
@@ -1589,7 +1745,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         if (role !== 'all' && u.role !== role) return false;
         if (status !== 'all' && u.status !== status) return false;
         if (q) {
-          const hay = `${String(u.name)} ${String(u.email)} ${String(u.grade)}`.toLowerCase();
+          const hay = `${String(u.serialNumber || '')} ${String(u.name)} ${String(u.email)} ${String(u.grade)} ${String(u.id)}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
         return true;
@@ -1653,10 +1809,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 
     const adminUserActivityMatch = path.match(/^\/api\/admin\/users\/([a-zA-Z0-9_-]+)\/activity$/);
     if (adminUserActivityMatch && method === 'GET') {
+      await ensureUserSerialNumberSchema(db);
       const id = adminUserActivityMatch[1];
       const user = await db
         .prepare(
-          'SELECT id, name, email, grade, role, status, suspend_reason as suspendReason, last_active_at as lastActiveAt, created_at as createdAt FROM users WHERE id = ?'
+          'SELECT id, serial_number as serialNumber, name, email, grade, role, status, suspend_reason as suspendReason, last_active_at as lastActiveAt, created_at as createdAt FROM users WHERE id = ?'
         )
         .bind(id)
         .first();
@@ -1664,30 +1821,40 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { error: 'المستخدم غير موجود.' }, 404);
       }
 
-      const [reviewsRes, votesRes, ordersRes, toolRunsRes] = await Promise.all([
+      const [reviewsRes, votesRes, ordersRes, toolRunsRes, activitiesRes] = await Promise.all([
         db
-          .prepare('SELECT id, content, rating, status, created_at as createdAt FROM comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 20')
+          .prepare('SELECT id, content, rating, status, created_at as createdAt FROM comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 50')
           .bind(id)
           .all(),
         db
           .prepare(
             `SELECT v.poll_id as pollId, p.question, v.option_key as optionKey, v.created_at as createdAt
              FROM user_poll_votes v LEFT JOIN polls p ON p.id = v.poll_id
-             WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 20`
+             WHERE v.user_id = ? ORDER BY v.created_at DESC LIMIT 50`
           )
           .bind(id)
           .all(),
         db
           .prepare(
             `SELECT id, order_code as orderCode, platform_label as platformLabel, final_price as finalPrice, status, created_at as createdAt
-             FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
+             FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`
           )
           .bind(id)
           .all(),
         db
           .prepare(
             `SELECT id, service_key as serviceKey, status, duration_ms as durationMs, error_message as errorMessage, created_at as createdAt
-             FROM tool_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
+             FROM tool_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`
+          )
+          .bind(id)
+          .all(),
+        db
+          .prepare(
+            `SELECT id, event_type as eventType, path, grade, section, chapter_num as chapterNum, query, results_count as resultsCount, meta_json as metaJson, created_at as createdAt
+             FROM analytics_events
+             WHERE user_id = ?
+             ORDER BY created_at DESC
+             LIMIT 100`
           )
           .bind(id)
           .all(),
@@ -1699,6 +1866,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         votes: votesRes.results || [],
         orders: ordersRes.results || [],
         toolRuns: toolRunsRes.results || [],
+        activities: activitiesRes.results || [],
       });
     }
 
@@ -2347,8 +2515,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const allowedStatuses = ['new', 'reviewing', 'completed', 'cancelled'];
       const nextStatus =
         typeof body.status === 'string' && allowedStatuses.includes(body.status) ? body.status : existing.status;
-      const purgeCredentials =
-        body.purgeCredentials === true || nextStatus === 'completed' || nextStatus === 'cancelled';
+      const purgeCredentials = body.purgeCredentials === true;
       const nowIso = new Date().toISOString();
 
       if (purgeCredentials) {
@@ -2375,6 +2542,29 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       });
 
       return jsonResponse(ctx, { ok: true, status: nextStatus, credentialsPurged: purgeCredentials });
+    }
+
+    if (adminOrderPatchMatch && method === 'DELETE') {
+      const id = adminOrderPatchMatch[1];
+      const existing = await db
+        .prepare('SELECT id, order_code FROM orders WHERE id = ?')
+        .bind(id)
+        .first<{ id: string; order_code: string }>();
+
+      if (!existing) {
+        return jsonResponse(ctx, { error: 'الطلب غير موجود.' }, 404);
+      }
+
+      await db.prepare('DELETE FROM orders WHERE id = ?').bind(id).run();
+      await logAdminAudit(db, {
+        actorUsername: actor,
+        action: 'order_delete',
+        targetType: 'order',
+        targetId: id,
+        details: { orderCode: existing.order_code },
+        ipHash,
+      });
+      return jsonResponse(ctx, { ok: true });
     }
 
     // Comments moderation

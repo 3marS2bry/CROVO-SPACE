@@ -27,6 +27,23 @@ import {
   Zap,
 } from 'lucide-react';
 import { api } from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import {
+  deleteCommentAdminCloud,
+  deleteOrderAdminCloud,
+  getFirebaseIdToken,
+  getFirebaseUid,
+  listAllCommentsAdminCloud,
+  listOrdersAdminCloud,
+  listQuestionReportsAdminCloud,
+  saveOrderMetadataCloud,
+  saveQuestionReportCloud,
+  signInWithGoogleCloud,
+  syncSiteConfigToCloud,
+  updateCommentAdminCloud,
+  updateOrderAdminCloud,
+  updateQuestionReportCloud,
+} from '../utils/cloudStore';
 import { AdminAnalyticsTab } from './admin/AdminAnalyticsTab';
 import { AdminUsersTab } from './admin/AdminUsersTab';
 import { AdminLibraryTab } from './admin/AdminLibraryTab';
@@ -59,12 +76,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onBackToSite,
   onConfigUpdated,
 }) => {
+  const { user } = useAuth();
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loggingIn, setLoggingIn] = useState(false);
+  const [googleLoggingIn, setGoogleLoggingIn] = useState(false);
 
   const [tab, setTab] = useState<AdminTab>('analytics');
   const [data, setData] = useState<OverviewData | null>(null);
@@ -76,9 +95,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
   const [revealedOrderPasswords, setRevealedOrderPasswords] = useState<Record<string, boolean>>({});
 
-  // Question reports notes & comment delete confirmation
+  // Question reports notes & delete confirmations
   const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
   const [confirmDeleteCommentId, setConfirmDeleteCommentId] = useState<string | null>(null);
+  const [confirmDeleteOrderId, setConfirmDeleteOrderId] = useState<string | null>(null);
 
   // Editable pricing & countdown settings form state
   const [qureoOfferPrice, setQureoOfferPrice] = useState(50);
@@ -132,9 +152,131 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const loadOverview = useCallback(async () => {
     setLoadingData(true);
     try {
-      const overview = await api.adminOverview();
-      setData(overview);
-      syncSettingsFields(overview);
+      const [overview, cloudOrders, cloudComments, cloudReports] = await Promise.all([
+        api.adminOverview(),
+        listOrdersAdminCloud().catch(() => []),
+        listAllCommentsAdminCloud().catch(() => []),
+        listQuestionReportsAdminCloud().catch(() => []),
+      ]);
+
+      // Merge Orders (keep local encrypted/decrypted password when present + include cross-site orders)
+      const ordersById = new Map<string, OverviewData['orders'][number]>();
+      for (const co of cloudOrders) {
+        ordersById.set(co.id, co);
+      }
+      for (const lo of overview.orders) {
+        const cloudMatch = ordersById.get(lo.id);
+        ordersById.set(lo.id, {
+          ...lo,
+          status: cloudMatch?.status || lo.status,
+          credentialsPurged: Boolean(lo.credentialsPurged || cloudMatch?.credentialsPurged),
+          userSerialNumber: lo.userSerialNumber || cloudMatch?.userSerialNumber || null,
+          userEmail: lo.userEmail || cloudMatch?.userEmail || null,
+        });
+      }
+      const mergedOrders = Array.from(ordersById.values()).sort(
+        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+      );
+
+      // Merge Comments (merge cloud moderation/likes + cross-site reviews)
+      const commentsById = new Map<string, OverviewData['comments'][number]>();
+      for (const cc of cloudComments) {
+        commentsById.set(cc.id, cc);
+      }
+      for (const lc of overview.comments) {
+        const cloudMatch = commentsById.get(lc.id);
+        commentsById.set(lc.id, {
+          ...lc,
+          isVerified: Boolean(lc.isVerified || cloudMatch?.isVerified),
+          status: cloudMatch?.status || lc.status,
+          likesCount: Math.max(lc.likesCount || 0, cloudMatch?.likesCount || 0),
+        });
+      }
+      const mergedComments = Array.from(commentsById.values()).sort(
+        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+      );
+
+      // Merge Question Reports
+      const reportsById = new Map<string, OverviewData['questionReports'][number]>();
+      for (const cr of cloudReports) {
+        reportsById.set(cr.id, cr);
+      }
+      for (const lr of overview.questionReports) {
+        const cloudMatch = reportsById.get(lr.id);
+        reportsById.set(lr.id, {
+          ...lr,
+          status: cloudMatch?.status || lr.status,
+          adminNote: cloudMatch?.adminNote ?? lr.adminNote,
+        });
+      }
+      const mergedReports = Array.from(reportsById.values()).sort(
+        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+      );
+
+      const mergedOverview: OverviewData = {
+        ...overview,
+        orders: mergedOrders,
+        comments: mergedComments,
+        questionReports: mergedReports,
+        stats: {
+          ...overview.stats,
+          pendingQuestionReports: mergedReports.filter(
+            (r) => r.status === 'pending' || r.status === 'reviewed'
+          ).length,
+        },
+      };
+
+      setData(mergedOverview);
+      syncSettingsFields(mergedOverview);
+
+      // Background push of local items to Firestore so future republishes stay 100% synced
+      if (getFirebaseUid()) {
+        void syncSiteConfigToCloud(overview.config);
+        const cloudOrderIds = new Set(cloudOrders.map((o) => o.id));
+        for (const lo of overview.orders) {
+          if (!cloudOrderIds.has(lo.id)) {
+            void saveOrderMetadataCloud({
+              order: {
+                id: lo.id,
+                orderCode: lo.orderCode,
+                fullName: lo.fullName,
+                grade: lo.grade,
+                platformLabel: lo.platformLabel,
+                sectionDetails: lo.sectionDetails,
+                oldPrice: lo.oldPrice,
+                finalPrice: lo.finalPrice,
+                offerApplied: lo.offerApplied,
+                paymentMethod: lo.paymentMethod,
+                status: lo.status,
+                createdAt: lo.createdAt,
+              },
+              authorUid: lo.userId || 'guest_order',
+              userSerialNumber: lo.userSerialNumber,
+              userEmail: lo.userEmail,
+              platformUsername: lo.platformUsername,
+              credentialsPurged: lo.credentialsPurged,
+            });
+          }
+        }
+        const cloudReportIds = new Set(cloudReports.map((r) => r.id));
+        for (const lr of overview.questionReports) {
+          if (!cloudReportIds.has(lr.id)) {
+            void saveQuestionReportCloud({
+              id: lr.id,
+              reporterUid: 'guest_report',
+              questionKey: lr.questionKey,
+              grade: lr.grade,
+              section: lr.section,
+              chapterNum: lr.chapterNum,
+              qIndex: lr.qIndex,
+              questionTitle: lr.questionTitle,
+              description: lr.description,
+              status: lr.status,
+              adminNote: lr.adminNote,
+            });
+          }
+        }
+      }
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : 'تعذر تحميل بيانات الإدارة.');
     } finally {
@@ -157,6 +299,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .finally(() => setAuthChecked(true));
   }, [loadOverview]);
 
+  // Automatic Google Admin elevation across deployments if signed in as the verified owner email
+  useEffect(() => {
+    if (!authChecked || authenticated) return;
+    if (!user || user.role !== 'admin' || user.email.toLowerCase() !== '3mars7bry@gmail.com') return;
+
+    let cancelled = false;
+    (async () => {
+      const idToken = await getFirebaseIdToken();
+      if (!idToken || cancelled) return;
+      try {
+        await api.adminFirebaseLogin(idToken);
+        if (cancelled) return;
+        setAuthenticated(true);
+        await loadOverview();
+      } catch {
+        // Leave login form available
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authChecked, authenticated, user, loadOverview]);
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoggingIn(true);
@@ -173,6 +339,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleGoogleAdminLogin = async () => {
+    if (googleLoggingIn) return;
+    setGoogleLoggingIn(true);
+    setLoginError(null);
+    try {
+      let idToken = await getFirebaseIdToken();
+      if (!idToken || user?.email.toLowerCase() !== '3mars7bry@gmail.com') {
+        await signInWithGoogleCloud('bac1');
+        idToken = await getFirebaseIdToken();
+      }
+      if (!idToken) {
+        throw new Error('تعذر الحصول على رمز التحقق من Google.');
+      }
+      await api.adminFirebaseLogin(idToken);
+      setAuthenticated(true);
+      await loadOverview();
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'فشل تسجيل الدخول بحساب الإدارة.');
+    } finally {
+      setGoogleLoggingIn(false);
+    }
+  };
+
   const handleLogout = async () => {
     await api.adminLogout();
     setAuthenticated(false);
@@ -184,7 +373,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     status: 'new' | 'reviewing' | 'completed' | 'cancelled'
   ) => {
     try {
-      await api.adminUpdateOrder(id, { status });
+      await updateOrderAdminCloud(id, { status });
+      await api.adminUpdateOrder(id, { status }).catch(() => {});
       flashNotice('تم تحديث حالة الطلب بنجاح.');
       await loadOverview();
     } catch (err) {
@@ -194,18 +384,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handlePurgeCredentials = async (id: string) => {
     try {
-      await api.adminUpdateOrder(id, { purgeCredentials: true });
-      flashNotice('تم حذف كلمة السر من الخادم نهائياً.');
+      await updateOrderAdminCloud(id, { credentialsPurged: true });
+      await api.adminUpdateOrder(id, { purgeCredentials: true }).catch(() => {});
+      flashNotice('تم حذف كلمة السر نهائياً.');
       await loadOverview();
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : 'تعذر مسح البيانات.');
     }
   };
 
+  const handleDeleteOrder = async (id: string) => {
+    try {
+      await deleteOrderAdminCloud(id);
+      await api.adminDeleteOrder(id).catch(() => {});
+      setConfirmDeleteOrderId(null);
+      flashNotice('تم حذف الطلب نهائياً.');
+      await loadOverview();
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'تعذر حذف الطلب.');
+    }
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.adminUpdateSettings({
+      const res = await api.adminUpdateSettings({
         qureoOfferPrice,
         qureoOldPrice,
         finOfferPrice,
@@ -219,6 +422,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         notificationsEnabled,
         notificationsIntervalDays,
       });
+      void syncSiteConfigToCloud(res.config);
       flashNotice('تم حفظ الإعدادات وتحديث الموقع للجميع فوراً.');
       onConfigUpdated();
       await loadOverview();
@@ -232,7 +436,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     payload: { isVerified?: boolean; status?: 'approved' | 'hidden'; clearReports?: boolean }
   ) => {
     try {
-      await api.adminUpdateComment(id, payload);
+      await updateCommentAdminCloud(id, payload);
+      await api.adminUpdateComment(id, payload).catch(() => {});
       flashNotice('تم تحديث التقييم.');
       await loadOverview();
     } catch (err) {
@@ -242,7 +447,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleDeleteComment = async (id: string) => {
     try {
-      await api.adminDeleteComment(id);
+      await deleteCommentAdminCloud(id);
+      await api.adminDeleteComment(id).catch(() => {});
       setConfirmDeleteCommentId(null);
       flashNotice('تم حذف التعليق نهائياً.');
       await loadOverview();
@@ -256,10 +462,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     status: 'pending' | 'reviewed' | 'resolved' | 'dismissed'
   ) => {
     try {
-      await api.adminUpdateQuestionReport(id, {
-        status,
-        adminNote: reportNotes[id] ?? undefined,
-      });
+      const note = reportNotes[id] ?? undefined;
+      await updateQuestionReportCloud(id, { status, adminNote: note });
+      await api
+        .adminUpdateQuestionReport(id, {
+          status,
+          adminNote: note,
+        })
+        .catch(() => {});
       flashNotice('تم تحديث حالة بلاغ السؤال.');
       await loadOverview();
     } catch (err) {
@@ -368,10 +578,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <button
             type="submit"
-            disabled={loggingIn}
-            className="w-full clay-apple-blue py-3 rounded-xl text-sm font-black text-white font-ios shadow-md"
+            disabled={loggingIn || googleLoggingIn}
+            className="w-full clay-apple-blue py-3 rounded-xl text-sm font-black text-white font-ios shadow-md disabled:opacity-60"
           >
             {loggingIn ? 'جاري التحقق...' : 'دخول الإدارة'}
+          </button>
+
+          <div className="relative flex items-center py-1">
+            <div className="flex-1 border-t border-slate-300/70" />
+            <span className="px-3 text-[11px] font-bold text-slate-500 font-ios">أو</span>
+            <div className="flex-1 border-t border-slate-300/70" />
+          </div>
+
+          <button
+            type="button"
+            data-testid="admin-google-login-btn"
+            disabled={loggingIn || googleLoggingIn}
+            onClick={handleGoogleAdminLogin}
+            className="w-full clay-btn py-2.5 rounded-xl text-xs font-black text-indigo-700 font-ios flex items-center justify-center gap-2 border border-indigo-200/80 disabled:opacity-60"
+          >
+            <ShieldCheck className="w-4 h-4 text-indigo-600" />
+            <span>
+              {googleLoggingIn
+                ? 'جاري التحقق بحساب Google...'
+                : 'دخول سريع بحساب Google الإدارة (3mars7bry@gmail.com)'}
+            </span>
           </button>
         </form>
       </div>
@@ -385,7 +616,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return (
       o.orderCode.toLowerCase().includes(q) ||
       o.fullName.toLowerCase().includes(q) ||
-      o.platformUsername.toLowerCase().includes(q)
+      o.platformUsername.toLowerCase().includes(q) ||
+      (o.userSerialNumber || '').toLowerCase().includes(q) ||
+      (o.userEmail || '').toLowerCase().includes(q)
     );
   });
 
@@ -487,9 +720,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
             <input
               type="text"
+              data-testid="admin-orders-search"
               value={orderSearch}
               onChange={(e) => setOrderSearch(e.target.value)}
-              placeholder="بحث برقم الطلب أو اسم العميل أو اسم المستخدم..."
+              placeholder="بحث برقم الطلب أو الرقم التسلسلي (CRV-1001) أو الاسم..."
               className="px-3.5 py-2 rounded-xl text-xs font-ios clay-inset border-none outline-none flex-1"
             />
             <select
@@ -522,6 +756,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-black text-indigo-600">{ord.orderCode}</span>
+                        {ord.userSerialNumber && (
+                          <span
+                            dir="ltr"
+                            title={ord.userEmail || undefined}
+                            className="px-2 py-0.5 rounded-lg bg-indigo-600 text-white text-[10px] font-mono font-black"
+                          >
+                            {ord.userSerialNumber}
+                          </span>
+                        )}
                         <span className="font-black text-slate-900">{ord.fullName}</span>
                         <span className="text-slate-500">
                           ({ord.grade === 'bac1' ? 'أولى بكالوريا' : 'تانية بكالوريا'})
@@ -583,28 +826,60 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </span>
                       </div>
 
-                      {!ord.credentialsPurged && (
-                        <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {!ord.credentialsPurged && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setRevealedOrderPasswords((prev) => ({ ...prev, [ord.id]: !prev[ord.id] }))
+                              }
+                              className="clay-btn px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold"
+                            >
+                              {isPassVisible ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                              <span>{isPassVisible ? 'إخفاء' : 'عرض'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handlePurgeCredentials(ord.id)}
+                              className="clay-btn px-2.5 py-1 rounded-lg text-amber-700 flex items-center gap-1 font-bold"
+                            >
+                              <KeyRound className="w-3 h-3" />
+                              <span>مسح كلمة السر</span>
+                            </button>
+                          </>
+                        )}
+
+                        {confirmDeleteOrderId === ord.id ? (
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              data-testid={`confirm-delete-order-${ord.orderCode}`}
+                              onClick={() => handleDeleteOrder(ord.id)}
+                              className="px-2.5 py-1 rounded-lg bg-rose-600 text-white font-bold"
+                            >
+                              تأكيد حذف الطلب
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteOrderId(null)}
+                              className="clay-btn px-2.5 py-1 rounded-lg font-bold"
+                            >
+                              إلغاء
+                            </button>
+                          </div>
+                        ) : (
                           <button
                             type="button"
-                            onClick={() =>
-                              setRevealedOrderPasswords((prev) => ({ ...prev, [ord.id]: !prev[ord.id] }))
-                            }
-                            className="clay-btn px-2.5 py-1 rounded-lg flex items-center gap-1 font-bold"
-                          >
-                            {isPassVisible ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
-                            <span>{isPassVisible ? 'إخفاء' : 'عرض'}</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handlePurgeCredentials(ord.id)}
+                            data-testid={`delete-order-${ord.orderCode}`}
+                            onClick={() => setConfirmDeleteOrderId(ord.id)}
                             className="clay-btn px-2.5 py-1 rounded-lg text-rose-600 flex items-center gap-1 font-bold"
                           >
-                            <KeyRound className="w-3 h-3" />
-                            <span>مسح كلمة السر</span>
+                            <Trash2 className="w-3 h-3" />
+                            <span>حذف الطلب</span>
                           </button>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -774,6 +1049,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     )}
                   </div>
                   <p className="text-slate-700">{cmt.content}</p>
+                  {(cmt.attachmentBeforeUrl || cmt.attachmentAfterUrl || cmt.attachmentUrl) && (
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {(cmt.attachmentBeforeUrl || cmt.attachmentUrl) && (
+                        <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg clay-card">
+                          <img
+                            src={(cmt.attachmentBeforeUrl || cmt.attachmentUrl)!}
+                            alt="قبل الحل"
+                            className="w-10 h-10 rounded object-cover"
+                          />
+                          <span className="text-[10px] font-bold text-amber-700">قبل الحل</span>
+                        </div>
+                      )}
+                      {cmt.attachmentAfterUrl && (
+                        <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg clay-card">
+                          <img
+                            src={cmt.attachmentAfterUrl}
+                            alt="بعد الحل"
+                            className="w-10 h-10 rounded object-cover"
+                          />
+                          <span className="text-[10px] font-bold text-emerald-700">بعد الحل</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {cmt.reports.length > 0 && (
                     <div className="text-[10px] text-rose-600">
                       أسباب البلاغات: {cmt.reports.map((r) => r.reason).join(' · ')}

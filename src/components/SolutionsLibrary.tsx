@@ -15,6 +15,10 @@ import { QuestionCard } from './QuestionCard';
 import { ChapterSidebar } from './ChapterSidebar';
 import { api, QuestionStatsResponse } from '../utils/api';
 import {
+  fetchQuestionStatsCloud,
+  incrementQuestionCopyCloud,
+} from '../utils/cloudStore';
+import {
   buildQuestionKey,
   filterAndSortLibraryQuestions,
   getLibrarySectionTotals,
@@ -75,8 +79,28 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await api.getQuestionStats();
-      setStats(res);
+      const [apiRes, cloudRes] = await Promise.all([
+        api.getQuestionStats().catch(() => null),
+        fetchQuestionStatsCloud().catch(() => null),
+      ]);
+      if (!apiRes && !cloudRes) return;
+      const mergedCounts: Record<string, number> = { ...(cloudRes?.copyCounts || {}) };
+      for (const [k, v] of Object.entries(apiRes?.copyCounts || {})) {
+        mergedCounts[k] = Math.max(mergedCounts[k] || 0, v);
+      }
+      const totalCopies = Object.values(mergedCounts).reduce((a, b) => a + b, 0);
+      const topMap = new Map<string, QuestionStatsResponse['topQuestions'][number]>();
+      for (const item of [...(cloudRes?.topQuestions || []), ...(apiRes?.topQuestions || [])]) {
+        const existing = topMap.get(item.questionKey);
+        const count = mergedCounts[item.questionKey] || item.copyCount;
+        if (!existing || count > existing.copyCount) {
+          topMap.set(item.questionKey, { ...item, copyCount: count });
+        }
+      }
+      const topQuestions = Array.from(topMap.values())
+        .sort((a, b) => b.copyCount - a.copyCount)
+        .slice(0, 6);
+      setStats({ totalCopies, copyCounts: mergedCounts, topQuestions });
     } catch {
       // Keep previous stats safely
     }
@@ -213,6 +237,14 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
     }
 
     try {
+      void incrementQuestionCopyCloud({
+        questionKey,
+        grade: academicGrade,
+        section: activeSection,
+        chapterNum,
+        qIndex,
+        questionTitle,
+      });
       const saved = await api.recordQuestionCopy({
         questionKey,
         grade: academicGrade,
@@ -225,10 +257,10 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
         ...prev,
         copyCounts: {
           ...prev.copyCounts,
-          [saved.questionKey]: saved.copyCount,
+          [saved.questionKey]: Math.max(prev.copyCounts[saved.questionKey] || 0, saved.copyCount),
         },
       }));
-      api.getQuestionStats().then(setStats).catch(() => {});
+      void loadStats();
     } catch {
       // Offline / transient network error doesn't block user copy
     }

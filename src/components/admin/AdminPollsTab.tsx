@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { BarChart3, Download, Lock, Plus, RotateCcw, Unlock } from 'lucide-react';
 import { AdminPollItem, api } from '../../utils/api';
+import {
+  listAllPollsAdminCloud,
+  resetPollInCloud,
+  savePollToCloud,
+} from '../../utils/cloudStore';
 
 interface AdminPollsTabProps {
   onNotice: (msg: string) => void;
@@ -20,8 +25,31 @@ export const AdminPollsTab: React.FC<AdminPollsTabProps> = ({ onNotice, onConfig
   const loadPolls = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.adminPolls();
-      setPolls(res.polls);
+      const [apiRes, cloudPolls] = await Promise.all([
+        api.adminPolls().catch(() => ({ polls: [] as AdminPollItem[] })),
+        listAllPollsAdminCloud().catch(() => [] as AdminPollItem[]),
+      ]);
+      const cloudIds = new Set(cloudPolls.map((p) => p.id));
+      const mergedMap = new Map<string, AdminPollItem>();
+      for (const cp of cloudPolls) {
+        mergedMap.set(cp.id, cp);
+      }
+      for (const lp of apiRes.polls) {
+        const cp = mergedMap.get(lp.id);
+        if (!cloudIds.has(lp.id)) {
+          void savePollToCloud(lp);
+        }
+        if (cp && cp.totalVotes > lp.totalVotes) {
+          mergedMap.set(lp.id, { ...lp, ...cp });
+        } else {
+          mergedMap.set(lp.id, lp);
+        }
+      }
+      setPolls(
+        Array.from(mergedMap.values()).sort(
+          (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+        )
+      );
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر تحميل الاستفتاءات.');
     } finally {
@@ -41,7 +69,12 @@ export const AdminPollsTab: React.FC<AdminPollsTabProps> = ({ onNotice, onConfig
       return;
     }
     try {
-      await api.adminCreatePoll({ question: newQuestion, options: opts });
+      const created = await api.adminCreatePoll({ question: newQuestion, options: opts });
+      const latestApi = await api.adminPolls().catch(() => null);
+      const createdRow = latestApi?.polls.find((p) => p.id === created.id);
+      if (createdRow) {
+        void savePollToCloud(createdRow);
+      }
       setNewQuestion('');
       setNewOpt1('');
       setNewOpt2('');
@@ -56,7 +89,9 @@ export const AdminPollsTab: React.FC<AdminPollsTabProps> = ({ onNotice, onConfig
 
   const handleToggleOpen = async (poll: AdminPollItem) => {
     try {
-      await api.adminUpdatePoll(poll.id, { isOpen: !poll.isOpen });
+      const nextOpen = !poll.isOpen;
+      await savePollToCloud({ ...poll, isOpen: nextOpen });
+      await api.adminUpdatePoll(poll.id, { isOpen: nextOpen }).catch(() => {});
       onNotice(poll.isOpen ? 'تم إغلاق التصويت.' : 'تم فتح التصويت.');
       onConfigUpdated();
       loadPolls();
@@ -67,7 +102,8 @@ export const AdminPollsTab: React.FC<AdminPollsTabProps> = ({ onNotice, onConfig
 
   const handleReset = async (id: string) => {
     try {
-      await api.adminResetPoll(id);
+      await resetPollInCloud(id);
+      await api.adminResetPoll(id).catch(() => {});
       setConfirmResetId(null);
       onNotice('تم تصفير أصوات الاستفتاء بنجاح.');
       loadPolls();

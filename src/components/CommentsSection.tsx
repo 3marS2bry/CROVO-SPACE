@@ -10,12 +10,24 @@ import {
   MessageSquarePlus,
   Phone,
   SendHorizonal,
+  Sparkles,
   Star,
   Trash2,
   UserCircle2,
   X,
 } from 'lucide-react';
 import { api, CommentItem } from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import {
+  createCloudComment,
+  deleteCloudComment,
+  getFirebaseUid,
+  logCloudActivity,
+  reportCloudComment,
+  subscribeCloudComments,
+  toggleCloudCommentLike,
+  updateCloudComment,
+} from '../utils/cloudStore';
 
 interface CommentsSectionProps {
   fullPageMode?: boolean;
@@ -34,12 +46,16 @@ function formatArabicDate(iso: string): string {
   }
 }
 
-async function compressImageToDataUrl(file: File, maxDimension = 1000): Promise<string> {
+async function compressImageToDataUrl(
+  file: File,
+  maxDimension = 920,
+  maxDataUrlChars = 280000
+): Promise<string> {
   if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
     throw new Error('اختار صورة بصيغة PNG أو JPG أو WEBP فقط.');
   }
-  if (file.size > 5 * 1024 * 1024) {
-    throw new Error('حجم الصورة كبير أوي، اختار صورة أقل من 5 ميجا.');
+  if (file.size > 6 * 1024 * 1024) {
+    throw new Error('حجم الصورة كبير أوي، اختار صورة أقل من 6 ميجا.');
   }
 
   return new Promise((resolve, reject) => {
@@ -49,20 +65,37 @@ async function compressImageToDataUrl(file: File, maxDimension = 1000): Promise<
       const img = new Image();
       img.onerror = () => reject(new Error('الملف المختار مش صورة سليمة.'));
       img.onload = () => {
-        const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
-        const width = Math.max(1, Math.round(img.width * scale));
-        const height = Math.max(1, Math.round(img.height * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(String(reader.result));
+        const renderAt = (dim: number, quality: number, outMime: string): string => {
+          const scale = Math.min(1, dim / Math.max(img.width, img.height));
+          const width = Math.max(1, Math.round(img.width * scale));
+          const height = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return String(reader.result);
+          ctx.drawImage(img, 0, 0, width, height);
+          return canvas.toDataURL(outMime, quality);
+        };
+
+        const outType = file.type === 'image/png' ? 'image/jpeg' : file.type;
+        let dataUrl = renderAt(maxDimension, 0.8, outType);
+
+        const attempts: Array<[number, number]> = [
+          [Math.round(maxDimension * 0.8), 0.72],
+          [Math.round(maxDimension * 0.65), 0.64],
+          [520, 0.56],
+        ];
+        for (const [dim, q] of attempts) {
+          if (dataUrl.length <= maxDataUrlChars) break;
+          dataUrl = renderAt(dim, q, 'image/jpeg');
+        }
+
+        if (dataUrl.length > maxDataUrlChars) {
+          reject(new Error('حجم الصورة بعد الضغط ما زال كبيراً، جرب صورة أصغر.'));
           return;
         }
-        ctx.drawImage(img, 0, 0, width, height);
-        const outType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
-        resolve(canvas.toDataURL(outType, 0.82));
+        resolve(dataUrl);
       };
       img.src = String(reader.result);
     };
@@ -75,7 +108,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   onOpenAllReviews,
   onBackToLibrary,
 }) => {
-  const [comments, setComments] = useState<CommentItem[]>([]);
+  const { user, isCloudUser, openAuthModal } = useAuth();
+  const [cloudComments, setCloudComments] = useState<CommentItem[]>([]);
+  const [apiComments, setApiComments] = useState<CommentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(fullPageMode);
@@ -87,13 +122,15 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   const [rating, setRating] = useState(5);
   const [content, setContent] = useState('');
   const [avatarDataUrl, setAvatarDataUrl] = useState<string | null>(null);
-  const [attachmentDataUrl, setAttachmentDataUrl] = useState<string | null>(null);
+  const [attachmentBeforeDataUrl, setAttachmentBeforeDataUrl] = useState<string | null>(null);
+  const [attachmentAfterDataUrl, setAttachmentAfterDataUrl] = useState<string | null>(null);
   const [contactPhone, setContactPhone] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formMsg, setFormMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
   const [likingIds, setLikingIds] = useState<Record<string, boolean>>({});
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
 
-  // Edit / Delete / Report states
+  // Edit / Delete / Report / Lightbox states
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editRating, setEditRating] = useState(5);
@@ -101,28 +138,82 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   const [reportingId, setReportingId] = useState<string | null>(null);
   const [reportReason, setReportReason] = useState('محتوى غير مناسب');
   const [reportNotice, setReportNotice] = useState<string | null>(null);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; label: string } | null>(null);
 
-  const loadComments = async () => {
+  useEffect(() => {
+    if (user?.name && !authorName.trim()) {
+      setAuthorName(user.name);
+    }
+  }, [user?.name]);
+
+  const loadApiComments = async () => {
     try {
       const res = await api.getComments();
-      setComments(res.comments);
+      setApiComments(res.comments.map((c) => ({ ...c, source: 'api' })));
       setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'تعذر تحميل التعليقات.');
+    } catch {
+      // Keep cloud comments if backend API is temporarily unavailable
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadComments();
+    loadApiComments();
+
+    const unsubCloud = subscribeCloudComments(
+      isCloudUser ? getFirebaseUid() : null,
+      (list) => {
+        setCloudComments(list);
+        setLoading(false);
+        setError(null);
+      },
+      () => {
+        setLoading(false);
+      }
+    );
+
     const handleAuthChanged = () => {
-      loadComments();
+      loadApiComments();
     };
     window.addEventListener('crovo:auth-updated', handleAuthChanged);
-    return () => window.removeEventListener('crovo:auth-updated', handleAuthChanged);
-  }, []);
+    return () => {
+      unsubCloud();
+      window.removeEventListener('crovo:auth-updated', handleAuthChanged);
+    };
+  }, [isCloudUser, user?.id]);
+
+  const apiCommentIds = useMemo(() => new Set(apiComments.map((c) => c.id)), [apiComments]);
+  const cloudCommentIds = useMemo(() => new Set(cloudComments.map((c) => c.id)), [cloudComments]);
+
+  const comments = useMemo(() => {
+    const byId = new Map<string, CommentItem>();
+    for (const c of apiComments) {
+      byId.set(c.id, c);
+    }
+    for (const c of cloudComments) {
+      const existing = byId.get(c.id);
+      if (existing) {
+        byId.set(c.id, {
+          ...existing,
+          authorName: c.authorName || existing.authorName,
+          grade: c.grade || existing.grade,
+          rating: c.rating || existing.rating,
+          content: c.content || existing.content,
+          isVerified: existing.isVerified || c.isVerified,
+          updatedAt: c.updatedAt || existing.updatedAt,
+          isOwner: existing.isOwner || c.isOwner,
+          hasLiked: existing.hasLiked || c.hasLiked,
+          likesCount: Math.max(existing.likesCount, c.likesCount),
+        });
+      } else {
+        byId.set(c.id, c);
+      }
+    }
+    return Array.from(byId.values()).sort(
+      (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+    );
+  }, [cloudComments, apiComments]);
 
   const statsSummary = useMemo(() => {
     const total = comments.length;
@@ -139,7 +230,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     if (reviewFilter === 'verified') {
       list = comments.filter((c) => c.isVerified);
     } else if (reviewFilter === 'withImage') {
-      list = comments.filter((c) => Boolean(c.attachmentUrl));
+      list = comments.filter((c) =>
+        Boolean(c.attachmentBeforeUrl || c.attachmentAfterUrl || c.attachmentUrl)
+      );
     }
     return fullPageMode ? list : list.slice(0, 6);
   }, [comments, reviewFilter, fullPageMode]);
@@ -148,7 +241,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await compressImageToDataUrl(file, 360);
+      const dataUrl = await compressImageToDataUrl(file, 320, 100000);
       setAvatarDataUrl(dataUrl);
       setFormMsg(null);
     } catch (err) {
@@ -156,15 +249,27 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     }
   };
 
-  const handleAttachmentChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleBeforeImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const dataUrl = await compressImageToDataUrl(file, 1000);
-      setAttachmentDataUrl(dataUrl);
+      const dataUrl = await compressImageToDataUrl(file, 920, 280000);
+      setAttachmentBeforeDataUrl(dataUrl);
       setFormMsg(null);
     } catch (err) {
-      setFormMsg({ type: 'err', text: err instanceof Error ? err.message : 'تعذر تجهيز الصورة.' });
+      setFormMsg({ type: 'err', text: err instanceof Error ? err.message : 'تعذر تجهيز صورة قبل الحل.' });
+    }
+  };
+
+  const handleAfterImageChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageToDataUrl(file, 920, 280000);
+      setAttachmentAfterDataUrl(dataUrl);
+      setFormMsg(null);
+    } catch (err) {
+      setFormMsg({ type: 'err', text: err instanceof Error ? err.message : 'تعذر تجهيز صورة بعد الحل.' });
     }
   };
 
@@ -175,25 +280,65 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     setFormMsg(null);
 
     try {
-      const res = await api.createComment({
-        authorName,
-        grade,
-        rating,
-        content,
-        contactPhone: contactPhone.trim() || undefined,
-        showContactPublicly: false,
-        avatarDataUrl,
-        attachmentDataUrl,
-      });
+      const fbUid = getFirebaseUid();
+      let savedComment: CommentItem | null = null;
 
-      setComments((prev) => [res.comment, ...prev]);
-      setAuthorName('');
+      try {
+        const res = await api.createComment({
+          authorName,
+          grade,
+          rating,
+          content,
+          contactPhone: contactPhone.trim() || undefined,
+          showContactPublicly: false,
+          avatarDataUrl,
+          attachmentBeforeDataUrl,
+          attachmentAfterDataUrl,
+        });
+        savedComment = { ...res.comment, source: 'api' };
+        setApiComments((prev) => [savedComment!, ...prev]);
+      } catch (apiErr) {
+        if (!fbUid) throw apiErr;
+        savedComment = await createCloudComment(fbUid, {
+          authorName,
+          grade,
+          rating,
+          content,
+          contactPhone: contactPhone.trim() || undefined,
+          avatarDataUrl,
+          attachmentBeforeDataUrl,
+          attachmentAfterDataUrl,
+        });
+      }
+
+      if (fbUid && savedComment && savedComment.source === 'api') {
+        void createCloudComment(fbUid, {
+          id: savedComment.id,
+          authorName,
+          grade,
+          rating,
+          content,
+          contactPhone: contactPhone.trim() || undefined,
+          avatarDataUrl,
+          attachmentBeforeDataUrl,
+          attachmentAfterDataUrl,
+        }).catch(() => {});
+        void logCloudActivity(fbUid, {
+          eventType: 'comment_create',
+          label: 'إضافة تقييم وتعليق',
+          path: '/reviews',
+          detail: content.trim().slice(0, 80),
+        });
+      }
+
+      setAuthorName(user?.name || '');
       setContent('');
       setRating(5);
       setAvatarDataUrl(null);
-      setAttachmentDataUrl(null);
+      setAttachmentBeforeDataUrl(null);
+      setAttachmentAfterDataUrl(null);
       setContactPhone('');
-      setFormMsg({ type: 'ok', text: 'تسلم يا بطل! تعليقك اتنشر وهيشوفه كل زوار الموقع دلوقتي.' });
+      setFormMsg({ type: 'ok', text: 'تسلم يا بطل! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.' });
     } catch (err) {
       setFormMsg({
         type: 'err',
@@ -204,33 +349,90 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     }
   };
 
-  const handleSaveEdit = async (id: string) => {
+  const handleSaveEdit = async (cmt: CommentItem) => {
     try {
-      await api.updateComment(id, { content: editContent, rating: editRating });
+      const inApi = apiCommentIds.has(cmt.id);
+      const inCloud = cloudCommentIds.has(cmt.id);
+      const fbUid = getFirebaseUid();
+      let cloudUpdated = false;
+      if (inCloud && fbUid) {
+        await updateCloudComment(cmt.id, { content: editContent, rating: editRating });
+        cloudUpdated = true;
+      }
+      if (inApi || !cloudUpdated) {
+        await api.updateComment(cmt.id, { content: editContent, rating: editRating }).catch((err) => {
+          if (!cloudUpdated) throw err;
+        });
+        await loadApiComments();
+      }
+      if (fbUid) {
+        void logCloudActivity(fbUid, {
+          eventType: 'comment_edit',
+          label: 'تعديل تعليق',
+          path: '/reviews',
+          detail: editContent.trim().slice(0, 80),
+        });
+      }
       setEditingId(null);
-      await loadComments();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تعديل التعليق.');
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (cmt: CommentItem) => {
     try {
-      await api.deleteComment(id);
+      const inApi = apiCommentIds.has(cmt.id);
+      const inCloud = cloudCommentIds.has(cmt.id);
+      const fbUid = getFirebaseUid();
+      let cloudDeleted = false;
+      if (inCloud && fbUid) {
+        await deleteCloudComment(cmt.id);
+        cloudDeleted = true;
+        setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
+      }
+      if (inApi || !cloudDeleted) {
+        await api.deleteComment(cmt.id).catch((err) => {
+          if (!cloudDeleted) throw err;
+        });
+        setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+      }
+      if (fbUid) {
+        void logCloudActivity(fbUid, {
+          eventType: 'comment_delete',
+          label: 'حذف تعليق',
+          path: '/reviews',
+        });
+      }
       setConfirmDeleteId(null);
-      setComments((prev) => prev.filter((c) => c.id !== id));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر حذف التعليق.');
     }
   };
 
-  const handleReportSubmit = async (id: string) => {
+  const handleReportSubmit = async (cmt: CommentItem) => {
     try {
-      const res = await api.reportComment(id, reportReason);
-      setReportingId(null);
-      setReportNotice(res.message);
-      if (res.flaggedForReview) {
-        setComments((prev) => prev.filter((c) => c.id !== id));
+      const inApi = apiCommentIds.has(cmt.id);
+      const inCloud = cloudCommentIds.has(cmt.id);
+      const fbUid = getFirebaseUid();
+
+      if (inApi || !inCloud) {
+        const res = await api.reportComment(cmt.id, reportReason);
+        setReportingId(null);
+        setReportNotice(res.message);
+        if (res.flaggedForReview) {
+          setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+        }
+        if (inCloud && fbUid) {
+          void reportCloudComment(cmt.id, fbUid, reportReason).catch(() => {});
+        }
+      } else if (fbUid) {
+        const res = await reportCloudComment(cmt.id, fbUid, reportReason);
+        setReportingId(null);
+        setReportNotice(res.message);
+      } else {
+        setReportingId(null);
+        openAuthModal('سجّل دخولك لإرسال بلاغ عن تعليق.');
+        return;
       }
       window.setTimeout(() => setReportNotice(null), 4000);
     } catch (err) {
@@ -239,27 +441,55 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     }
   };
 
-  const handleToggleCommentLike = async (commentId: string) => {
-    if (likingIds[commentId]) return;
-    const current = comments.find((c) => c.id === commentId);
-    const desiredLiked = current ? !current.hasLiked : undefined;
-    setLikingIds((prev) => ({ ...prev, [commentId]: true }));
+  const handleToggleCommentLike = async (cmt: CommentItem) => {
+    if (likingIds[cmt.id]) return;
 
+    const inApi = apiCommentIds.has(cmt.id);
+    const inCloud = cloudCommentIds.has(cmt.id);
+    const fbUid = getFirebaseUid();
+
+    if (!inApi && inCloud && !fbUid) {
+      openAuthModal('سجّل دخولك أولاً لتسجيل إعجابك بالتعليق.');
+      return;
+    }
+
+    setLikingIds((prev) => ({ ...prev, [cmt.id]: true }));
+    const nextDesired = !cmt.hasLiked;
     try {
-      const res = await api.toggleLike(`comment:${commentId}`, desiredLiked);
-      setComments((prev) =>
-        prev.map((c) =>
-          c.id === commentId
-            ? { ...c, likesCount: res.count, hasLiked: res.liked }
-            : c
-        )
-      );
+      if (inCloud && fbUid && !inApi) {
+        const res = await toggleCloudCommentLike(cmt.id, fbUid, nextDesired);
+        setCloudComments((prev) =>
+          prev.map((c) =>
+            c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
+          )
+        );
+        void logCloudActivity(fbUid, {
+          eventType: res.liked ? 'comment_like' : 'comment_unlike',
+          label: res.liked ? 'إعجاب بتعليق' : 'إلغاء الإعجاب بتعليق',
+          path: '/reviews',
+        });
+      } else {
+        const res = await api.toggleLike(`comment:${cmt.id}`, nextDesired);
+        setApiComments((prev) =>
+          prev.map((c) =>
+            c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
+          )
+        );
+        if (inCloud && fbUid) {
+          void toggleCloudCommentLike(cmt.id, fbUid, res.liked).catch(() => {});
+          void logCloudActivity(fbUid, {
+            eventType: res.liked ? 'comment_like' : 'comment_unlike',
+            label: res.liked ? 'إعجاب بتعليق' : 'إلغاء الإعجاب بتعليق',
+            path: '/reviews',
+          });
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تسجيل الإعجاب.');
     } finally {
       setLikingIds((prev) => {
         const next = { ...prev };
-        delete next[commentId];
+        delete next[cmt.id];
         return next;
       });
     }
@@ -298,7 +528,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                 : 'آراء عملائنا على CROVO SPACE'}
             </h2>
             <p className="text-xs text-slate-600 font-ios mt-0.5">
-              كل رأي أو تجربة بتتكتب هنا بتتحفظ في قاعدة البيانات وتظهر لكل زوار الموقع فوراً.
+              كل رأي وتجربة قبل وبعد الحل بتظهر لجميع زوار الموقع وتبقى مرجعاً حقيقياً للجميع.
             </p>
           </div>
 
@@ -373,7 +603,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         {error && (
           <div className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios flex items-center justify-between">
             <span>{error}</span>
-            <button type="button" onClick={loadComments} className="underline font-bold">
+            <button type="button" onClick={loadApiComments} className="underline font-bold">
               إعادة المحاولة
             </button>
           </div>
@@ -385,9 +615,32 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
             onSubmit={handleSubmit}
             className="mb-6 p-3.5 sm:p-5 rounded-2xl clay-inset space-y-3 border border-indigo-200/50"
           >
-            <h3 className="text-sm font-black font-ios text-slate-900">
-              شارك تجربتك مع الكل (بالاسم والصورة لو حابب):
-            </h3>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <h3 className="text-sm font-black font-ios text-slate-900">
+                شارك تجربتك مع الكل (مع صور قبل الحل وبعد الحل لو حابب):
+              </h3>
+
+              {!user ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    openAuthModal('سجّل دخولك بحسابك لربط تعليقاتك وتعديلاتك باسمك مباشرة.')
+                  }
+                  className="clay-btn px-3 py-1.5 rounded-xl text-[11px] font-bold text-indigo-700 flex items-center gap-1.5 font-ios self-start sm:self-auto"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  <span>تسجيل الدخول لربط التعليق بحسابك</span>
+                </button>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-700 text-[11px] font-bold font-ios self-start sm:self-auto">
+                  <BadgeCheck className="w-3.5 h-3.5" />
+                  <span>
+                    مرتبط بحسابك ({user.name}
+                    {user.serialNumber ? ` · ${user.serialNumber}` : ''})
+                  </span>
+                </span>
+              )}
+            </div>
 
             {formMsg && (
               <div
@@ -470,12 +723,15 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
               />
             </div>
 
-            {/* Optional Avatar & Attachment Uploads */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {/* Optional Avatar + Before & After Solution Images */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Avatar */}
               <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2">
-                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
                   <UserCircle2 className="w-4 h-4 text-indigo-500 shrink-0" />
-                  <span>{avatarDataUrl ? 'تم اختيار صورة شخصية ✓' : 'صورة شخصية (اختياري)'}</span>
+                  <span className="truncate">
+                    {avatarDataUrl ? 'صورة شخصية ✓' : 'صورة شخصية (اختياري)'}
+                  </span>
                   <input
                     type="file"
                     accept="image/png,image/jpeg,image/webp"
@@ -484,8 +740,12 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                   />
                 </label>
                 {avatarDataUrl && (
-                  <div className="flex items-center gap-1.5">
-                    <img src={avatarDataUrl} alt="معاينة الصورة الشخصية" className="w-7 h-7 rounded-full object-cover" />
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={avatarDataUrl}
+                      alt="معاينة الصورة الشخصية"
+                      className="w-7 h-7 rounded-full object-cover"
+                    />
                     <button
                       type="button"
                       aria-label="إزالة الصورة الشخصية"
@@ -498,24 +758,66 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                 )}
               </div>
 
-              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2">
-                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1">
-                  <ImagePlus className="w-4 h-4 text-emerald-500 shrink-0" />
-                  <span>{attachmentDataUrl ? 'تم إرفاق صورة التجربة ✓' : 'صورة داخل التعليق (اختياري)'}</span>
+              {/* Before Solution Image */}
+              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-amber-200/70">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
+                  <ImagePlus className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span className="truncate">
+                    {attachmentBeforeDataUrl ? 'صورة قبل الحل ✓' : 'صورة قبل الحل (اختياري)'}
+                  </span>
                   <input
                     type="file"
+                    data-testid="comment-before-image-input"
                     accept="image/png,image/jpeg,image/webp"
-                    onChange={handleAttachmentChange}
+                    onChange={handleBeforeImageChange}
                     className="hidden"
                   />
                 </label>
-                {attachmentDataUrl && (
-                  <div className="flex items-center gap-1.5">
-                    <img src={attachmentDataUrl} alt="معاينة صورة التجربة" className="w-7 h-7 rounded-lg object-cover" />
+                {attachmentBeforeDataUrl && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={attachmentBeforeDataUrl}
+                      alt="معاينة صورة قبل الحل"
+                      className="w-8 h-7 rounded-lg object-cover border border-amber-300"
+                    />
                     <button
                       type="button"
-                      aria-label="إزالة صورة التجربة"
-                      onClick={() => setAttachmentDataUrl(null)}
+                      aria-label="إزالة صورة قبل الحل"
+                      onClick={() => setAttachmentBeforeDataUrl(null)}
+                      className="p-1 text-rose-500"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* After Solution Image */}
+              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-emerald-200/70">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
+                  <ImagePlus className="w-4 h-4 text-emerald-500 shrink-0" />
+                  <span className="truncate">
+                    {attachmentAfterDataUrl ? 'صورة بعد الحل ✓' : 'صورة بعد الحل (اختياري)'}
+                  </span>
+                  <input
+                    type="file"
+                    data-testid="comment-after-image-input"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleAfterImageChange}
+                    className="hidden"
+                  />
+                </label>
+                {attachmentAfterDataUrl && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={attachmentAfterDataUrl}
+                      alt="معاينة صورة بعد الحل"
+                      className="w-8 h-7 rounded-lg object-cover border border-emerald-300"
+                    />
+                    <button
+                      type="button"
+                      aria-label="إزالة صورة بعد الحل"
+                      onClick={() => setAttachmentAfterDataUrl(null)}
                       className="p-1 text-rose-500"
                     >
                       <X className="w-3.5 h-3.5" />
@@ -556,11 +858,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           </form>
         )}
 
-        {/* Comments List */}
+        {/* Comments List — Balanced & Compact Cards */}
         {loading ? (
-          <div className="space-y-3">
-            <div className="h-24 rounded-2xl clay-inset animate-pulse" />
-            <div className="h-24 rounded-2xl clay-inset animate-pulse" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+            <div className="h-36 rounded-2xl clay-inset animate-pulse" />
+            <div className="h-36 rounded-2xl clay-inset animate-pulse" />
           </div>
         ) : visibleComments.length === 0 ? (
           <div className="p-6 rounded-2xl clay-inset text-center space-y-2">
@@ -571,231 +873,306 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
             </p>
             <p className="text-xs text-slate-500 font-ios">
               {comments.length === 0
-                ? 'كن أول طالب يشارك تجربته الحقيقية عشان باقي الزوار يشوفوها!'
-                : 'جرّب اختيار"الكل" عشان تشوف باقي التعليقات.'}
+                ? 'كن أول طالب يشارك تجربته الحقيقية بصور قبل وبعد الحل!'
+                : 'جرّب اختيار "الكل" عشان تشوف باقي التعليقات.'}
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {visibleComments.map((cmt) => (
-              <article
-                key={cmt.id}
-                data-testid={`comment-card-${cmt.id}`}
-                className="clay-inset p-3.5 rounded-2xl space-y-2 text-right flex flex-col justify-between"
-              >
-                <div className="space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      {cmt.avatarUrl ? (
-                        <img
-                          src={cmt.avatarUrl}
-                          alt={cmt.authorName}
-                          className="w-9 h-9 rounded-full object-cover shrink-0 shadow-sm"
-                        />
-                      ) : (
-                        <div className="w-9 h-9 rounded-full clay-apple-blue flex items-center justify-center text-white text-xs font-black font-ios shrink-0">
-                          {cmt.authorName.charAt(0)}
-                        </div>
-                      )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-stretch">
+            {visibleComments.map((cmt) => {
+              const beforeImg = cmt.attachmentBeforeUrl || cmt.attachmentUrl || null;
+              const afterImg = cmt.attachmentAfterUrl || null;
+              const isLong = cmt.content.length > 180;
+              const isExpanded = Boolean(expandedIds[cmt.id]);
 
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate">
-                            {cmt.authorName}
-                          </span>
-                          {cmt.isVerified && (
-                            <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-700 font-ios">
-                              <BadgeCheck className="w-3.5 h-3.5 text-emerald-500" />
-                              <span>عميل موثّق</span>
+              return (
+                <article
+                  key={cmt.id}
+                  data-testid={`comment-card-${cmt.id}`}
+                  className="clay-inset p-3.5 sm:p-4 rounded-2xl text-right flex flex-col justify-between gap-2.5 h-full border border-white/60"
+                >
+                  <div className="space-y-2.5">
+                    {/* Compact Card Header */}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {cmt.avatarUrl ? (
+                          <img
+                            src={cmt.avatarUrl}
+                            alt={cmt.authorName}
+                            className="w-9 h-9 rounded-full object-cover shrink-0 shadow-sm border border-white"
+                          />
+                        ) : (
+                          <div className="w-9 h-9 rounded-full clay-apple-blue flex items-center justify-center text-white text-xs font-black font-ios shrink-0">
+                            {cmt.authorName.charAt(0)}
+                          </div>
+                        )}
+
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate max-w-[165px]">
+                              {cmt.authorName}
                             </span>
-                          )}
+                            {cmt.isVerified && (
+                              <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-700 font-ios">
+                                <BadgeCheck className="w-3.5 h-3.5 text-emerald-500" />
+                                <span>عميل موثّق</span>
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-slate-500 font-ios truncate">
+                            {cmt.grade} · {formatArabicDate(cmt.createdAt)}
+                          </div>
                         </div>
-                        <div className="text-[10px] text-slate-500 font-ios">
-                          {cmt.grade} · {formatArabicDate(cmt.createdAt)}
-                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-0.5 text-amber-400 shrink-0 pt-0.5">
+                        {[...Array(cmt.rating)].map((_, idx) => (
+                          <Star key={idx} className="w-3 h-3 fill-current" />
+                        ))}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-0.5 text-amber-400 shrink-0">
-                      {[...Array(cmt.rating)].map((_, idx) => (
-                        <Star key={idx} className="w-3 h-3 fill-current" />
-                      ))}
-                    </div>
-                  </div>
-
-                  {editingId === cmt.id ? (
-                    <div className="space-y-2 pt-1">
-                      <textarea
-                        rows={2}
-                        value={editContent}
-                        onChange={(e) => setEditContent(e.target.value)}
-                        className="w-full p-2 rounded-xl text-xs font-ios clay-card border-none outline-none text-slate-900"
-                      />
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1">
-                          {[1, 2, 3, 4, 5].map((s) => (
-                            <button
-                              key={s}
-                              type="button"
-                              onClick={() => setEditRating(s)}
-                              className="p-1"
-                            >
-                              <Star
-                                className={`w-3.5 h-3.5 ${
-                                  s <= editRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
-                                }`}
-                              />
-                            </button>
-                          ))}
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <button
-                            type="button"
-                            onClick={() => handleSaveEdit(cmt.id)}
-                            className="clay-apple-blue px-3 py-1 rounded-lg text-[11px] font-bold text-white font-ios"
-                          >
-                            حفظ
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setEditingId(null)}
-                            className="clay-btn px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-600 font-ios"
-                          >
-                            إلغاء
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="text-xs sm:text-sm text-slate-800 font-ios leading-relaxed break-words">
-                      {cmt.content}
-                    </p>
-                  )}
-
-                  {cmt.attachmentUrl && (
-                    <button
-                      type="button"
-                      onClick={() => setLightboxSrc(cmt.attachmentUrl)}
-                      className="block rounded-xl overflow-hidden border border-slate-200/70 max-w-full"
-                    >
-                      <img
-                        src={cmt.attachmentUrl}
-                        alt={`تجربة ${cmt.authorName}`}
-                        className="max-h-44 w-auto object-cover rounded-xl"
-                      />
-                    </button>
-                  )}
-
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/50 text-[11px] font-ios">
-                  <div className="flex flex-wrap items-center gap-2.5">
-                    <button
-                      type="button"
-                      disabled={Boolean(likingIds[cmt.id])}
-                      data-testid={`comment-like-btn-${cmt.id}`}
-                      onClick={() => handleToggleCommentLike(cmt.id)}
-                      className={`px-2.5 py-1 rounded-xl flex items-center gap-1 font-bold transition-all disabled:opacity-60 ${
-                        cmt.hasLiked
-                          ? 'bg-rose-500/15 text-rose-600 ring-1 ring-rose-400/40'
-                          : 'clay-btn text-slate-600 hover:text-rose-600'
-                      }`}
-                    >
-                      <Heart
-                        className={`w-3.5 h-3.5 ${cmt.hasLiked ? 'fill-rose-500 text-rose-500' : ''}`}
-                      />
-                      <span className="font-mono" data-testid={`comment-like-count-${cmt.id}`}>
-                        {cmt.likesCount || 0}
-                      </span>
-                    </button>
-
-                    {cmt.isOwner ? (
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingId(cmt.id);
-                            setEditContent(cmt.content);
-                            setEditRating(cmt.rating);
-                          }}
-                          className="text-indigo-600 hover:underline flex items-center gap-1 font-bold"
-                        >
-                          <Edit3 className="w-3 h-3" />
-                          <span>تعديل</span>
-                        </button>
-
-                        {confirmDeleteId === cmt.id ? (
-                          <span className="flex items-center gap-1.5">
+                    {/* Comment Text with Controlled Height */}
+                    {editingId === cmt.id ? (
+                      <div className="space-y-2 pt-1">
+                        <textarea
+                          rows={2}
+                          value={editContent}
+                          onChange={(e) => setEditContent(e.target.value)}
+                          className="w-full p-2 rounded-xl text-xs font-ios clay-card border-none outline-none text-slate-900"
+                        />
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <button
+                                key={s}
+                                type="button"
+                                onClick={() => setEditRating(s)}
+                                className="p-1"
+                              >
+                                <Star
+                                  className={`w-3.5 h-3.5 ${
+                                    s <= editRating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
+                                  }`}
+                                />
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex items-center gap-1.5">
                             <button
                               type="button"
-                              onClick={() => handleDelete(cmt.id)}
-                              className="text-rose-600 font-black underline"
+                              onClick={() => handleSaveEdit(cmt)}
+                              className="clay-apple-blue px-3 py-1 rounded-lg text-[11px] font-bold text-white font-ios"
                             >
-                              تأكيد الحذف
+                              حفظ
                             </button>
                             <button
                               type="button"
-                              onClick={() => setConfirmDeleteId(null)}
-                              className="text-slate-500"
+                              onClick={() => setEditingId(null)}
+                              className="clay-btn px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-600 font-ios"
                             >
                               إلغاء
                             </button>
-                          </span>
-                        ) : (
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="space-y-1">
+                        <p
+                          className={`text-xs sm:text-[13px] text-slate-800 font-ios leading-relaxed break-words ${
+                            isLong && !isExpanded ? 'line-clamp-3' : ''
+                          }`}
+                        >
+                          {cmt.content}
+                        </p>
+                        {isLong && (
                           <button
                             type="button"
-                            onClick={() => setConfirmDeleteId(cmt.id)}
-                            className="text-rose-600 hover:underline flex items-center gap-1 font-bold"
+                            onClick={() =>
+                              setExpandedIds((prev) => ({ ...prev, [cmt.id]: !isExpanded }))
+                            }
+                            className="text-[11px] font-bold text-indigo-600 hover:underline font-ios"
                           >
-                            <Trash2 className="w-3 h-3" />
-                            <span>حذف</span>
+                            {isExpanded ? 'عرض أقل' : 'اقرأ المزيد'}
                           </button>
                         )}
                       </div>
-                    ) : cmt.updatedAt ? (
-                      <span className="text-[10px] text-slate-400">تم التعديل</span>
+                    )}
+
+                    {/* Before & After Solution Image Showcase */}
+                    {beforeImg && afterImg ? (
+                      <div className="grid grid-cols-2 gap-2 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setLightbox({ src: beforeImg, label: `قبل الحل — ${cmt.authorName}` })}
+                          className="relative group rounded-xl overflow-hidden border border-amber-200/80 bg-slate-100 block text-right"
+                        >
+                          <img
+                            src={beforeImg}
+                            alt={`قبل الحل - ${cmt.authorName}`}
+                            className="h-28 sm:h-32 w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                          />
+                          <span className="absolute top-1.5 right-1.5 px-2 py-0.5 rounded-md bg-slate-900/75 text-amber-300 text-[10px] font-bold font-ios">
+                            قبل الحل
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setLightbox({ src: afterImg, label: `بعد الحل — ${cmt.authorName}` })}
+                          className="relative group rounded-xl overflow-hidden border border-emerald-200/80 bg-slate-100 block text-right"
+                        >
+                          <img
+                            src={afterImg}
+                            alt={`بعد الحل - ${cmt.authorName}`}
+                            className="h-28 sm:h-32 w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                          />
+                          <span className="absolute top-1.5 right-1.5 px-2 py-0.5 rounded-md bg-emerald-700/85 text-white text-[10px] font-bold font-ios">
+                            بعد الحل
+                          </span>
+                        </button>
+                      </div>
+                    ) : beforeImg || afterImg ? (
+                      <div className="pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setLightbox({
+                              src: (beforeImg || afterImg)!,
+                              label: `${afterImg && !beforeImg ? 'بعد الحل' : 'قبل الحل'} — ${cmt.authorName}`,
+                            })
+                          }
+                          className="relative group rounded-xl overflow-hidden border border-slate-200/80 bg-slate-100 w-full max-w-[260px] block"
+                        >
+                          <img
+                            src={(beforeImg || afterImg)!}
+                            alt={`تجربة ${cmt.authorName}`}
+                            className="h-32 sm:h-36 w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                          />
+                          <span
+                            className={`absolute top-1.5 right-1.5 px-2 py-0.5 rounded-md text-[10px] font-bold font-ios ${
+                              afterImg && !beforeImg
+                                ? 'bg-emerald-700/85 text-white'
+                                : 'bg-slate-900/75 text-amber-300'
+                            }`}
+                          >
+                            {afterImg && !beforeImg ? 'بعد الحل' : 'قبل الحل'}
+                          </span>
+                        </button>
+                      </div>
                     ) : null}
                   </div>
 
-                  {reportingId === cmt.id ? (
-                    <div className="flex items-center gap-1.5">
-                      <select
-                        value={reportReason}
-                        onChange={(e) => setReportReason(e.target.value)}
-                        className="px-2 py-1 rounded-lg text-[10px] clay-card text-slate-800"
-                      >
-                        <option value="محتوى غير مناسب">محتوى غير مناسب</option>
-                        <option value="إعلان أو سبام">إعلان أو سبام</option>
-                        <option value="كلام مسيء">كلام مسيء</option>
-                      </select>
+                  {/* Compact Footer */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200/50 text-[11px] font-ios">
+                    <div className="flex flex-wrap items-center gap-2.5">
                       <button
                         type="button"
-                        onClick={() => handleReportSubmit(cmt.id)}
-                        className="px-2 py-1 rounded-lg bg-rose-600 text-white text-[10px] font-bold"
+                        disabled={Boolean(likingIds[cmt.id])}
+                        data-testid={`comment-like-btn-${cmt.id}`}
+                        onClick={() => handleToggleCommentLike(cmt)}
+                        className={`px-2.5 py-1 rounded-xl flex items-center gap-1 font-bold transition-all disabled:opacity-60 ${
+                          cmt.hasLiked
+                            ? 'bg-rose-500/15 text-rose-600 ring-1 ring-rose-400/40'
+                            : 'clay-btn text-slate-600 hover:text-rose-600'
+                        }`}
                       >
-                        إرسال
+                        <Heart
+                          className={`w-3.5 h-3.5 ${cmt.hasLiked ? 'fill-rose-500 text-rose-500' : ''}`}
+                        />
+                        <span className="font-mono" data-testid={`comment-like-count-${cmt.id}`}>
+                          {cmt.likesCount || 0}
+                        </span>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => setReportingId(null)}
-                        className="text-slate-500 text-[10px]"
-                      >
-                        إلغاء
-                      </button>
+
+                      {cmt.isOwner ? (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingId(cmt.id);
+                              setEditContent(cmt.content);
+                              setEditRating(cmt.rating);
+                            }}
+                            className="text-indigo-600 hover:underline flex items-center gap-1 font-bold"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span>تعديل</span>
+                          </button>
+
+                          {confirmDeleteId === cmt.id ? (
+                            <span className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleDelete(cmt)}
+                                className="text-rose-600 font-black underline"
+                              >
+                                تأكيد الحذف
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteId(null)}
+                                className="text-slate-500"
+                              >
+                                إلغاء
+                              </button>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteId(cmt.id)}
+                              className="text-rose-600 hover:underline flex items-center gap-1 font-bold"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>حذف</span>
+                            </button>
+                          )}
+                        </div>
+                      ) : cmt.updatedAt ? (
+                        <span className="text-[10px] text-slate-400">تم التعديل</span>
+                      ) : null}
                     </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setReportingId(cmt.id)}
-                      className="text-slate-400 hover:text-rose-500 flex items-center gap-1 font-bold"
-                    >
-                      <Flag className="w-3 h-3" />
-                      <span>إبلاغ</span>
-                    </button>
-                  )}
-                </div>
-              </article>
-            ))}
+
+                    {reportingId === cmt.id ? (
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={reportReason}
+                          onChange={(e) => setReportReason(e.target.value)}
+                          className="px-2 py-1 rounded-lg text-[10px] clay-card text-slate-800"
+                        >
+                          <option value="محتوى غير مناسب">محتوى غير مناسب</option>
+                          <option value="إعلان أو سبام">إعلان أو سبام</option>
+                          <option value="كلام مسيء">كلام مسيء</option>
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleReportSubmit(cmt)}
+                          className="px-2 py-1 rounded-lg bg-rose-600 text-white text-[10px] font-bold"
+                        >
+                          إرسال
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setReportingId(null)}
+                          className="text-slate-500 text-[10px]"
+                        >
+                          إلغاء
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setReportingId(cmt.id)}
+                        className="text-slate-400 hover:text-rose-500 flex items-center gap-1 font-bold"
+                      >
+                        <Flag className="w-3 h-3" />
+                        <span>إبلاغ</span>
+                      </button>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
 
@@ -814,21 +1191,31 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       </div>
 
       {/* Lightbox */}
-      {lightboxSrc && (
+      {lightbox && (
         <div
-          onClick={() => setLightboxSrc(null)}
+          onClick={() => setLightbox(null)}
           className="fixed inset-0 z-50 bg-slate-900/80 flex items-center justify-center p-4"
         >
-          <div onClick={(e) => e.stopPropagation()} className="relative max-w-lg w-full clay-card p-3 bg-slate-900">
-            <button
-              type="button"
-              aria-label="إغلاق الصورة"
-              onClick={() => setLightboxSrc(null)}
-              className="absolute top-4 left-4 p-2 rounded-full bg-black/70 text-white"
-            >
-              <X className="w-4 h-4" />
-            </button>
-            <img src={lightboxSrc} alt="صورة التجربة" className="w-full max-h-[80vh] object-contain rounded-xl" />
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="relative max-w-xl w-full clay-card p-3 bg-slate-900 space-y-2"
+          >
+            <div className="flex items-center justify-between px-1">
+              <span className="text-xs font-bold text-white font-ios">{lightbox.label}</span>
+              <button
+                type="button"
+                aria-label="إغلاق الصورة"
+                onClick={() => setLightbox(null)}
+                className="p-1.5 rounded-full bg-white/15 hover:bg-white/25 text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <img
+              src={lightbox.src}
+              alt={lightbox.label}
+              className="w-full max-h-[78vh] object-contain rounded-xl bg-black/30"
+            />
           </div>
         </div>
       )}

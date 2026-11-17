@@ -71,7 +71,13 @@ function buildMigratedMemoryDb(): DatabaseSync {
   const sqlite = new DatabaseSync(':memory:');
   sqlite.exec('PRAGMA foreign_keys = ON;');
   const migrationsDir = path.resolve(process.cwd(), 'migrations');
-  const files = ['0001_initial_schema.sql', '0002_seed_defaults.sql', '0003_live_data_export.sql'];
+  const files = [
+    '0001_initial_schema.sql',
+    '0002_seed_defaults.sql',
+    '0003_live_data_export.sql',
+    '0004_comment_before_after_images.sql',
+    '0005_user_serial_and_no_purge.sql',
+  ];
   for (const file of files) {
     const full = path.join(migrationsDir, file);
     if (fs.existsSync(full)) {
@@ -200,6 +206,7 @@ test('Cloudflare Pages Functions handleApiRequest full D1 persistence & security
   const userToken = regJson.token as string;
   const visitorToken = regRes.headers.get('X-Crovo-Visitor-Token') || '';
   assert.ok(userToken.length > 20);
+  assert.match(String(regJson.user.serialNumber || ''), /^CRV-\d{4,}$/);
 
   const authHeaders = {
     Authorization: `Bearer ${userToken}`,
@@ -211,6 +218,7 @@ test('Cloudflare Pages Functions handleApiRequest full D1 persistence & security
   const meJson = await meRes.json();
   assert.equal(meJson.authenticated, true);
   assert.equal(meJson.user.email, 'ahmed.d1@crovo.space');
+  assert.equal(meJson.user.serialNumber, regJson.user.serialNumber);
 
   // 6. Strict poll voting (first vote 201, duplicate 409)
   const voteRes = await callApi(
@@ -242,7 +250,9 @@ test('Cloudflare Pages Functions handleApiRequest full D1 persistence & security
   assert.equal(likeAfter.liked, true);
   assert.equal(likeAfter.count, initialLikeCount + 1);
 
-  // 8. Comments create -> edit -> persist -> delete
+  // 8. Comments with before & after images create -> persist
+  const tinyPngForComment =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
   const cmtCreateRes = await callApi(
     '/api/comments',
     {
@@ -252,15 +262,26 @@ test('Cloudflare Pages Functions handleApiRequest full D1 persistence & security
         grade: 'أولى بكالوريا',
         rating: 5,
         content: 'المكتبة والأداة شغالين ممتاز على D1!',
+        attachmentBeforeDataUrl: tinyPngForComment,
+        attachmentAfterDataUrl: tinyPngForComment,
       }),
     },
     authHeaders
   );
   assert.equal(cmtCreateRes.status, 201);
-  const createdCmtId = (await cmtCreateRes.json()).comment.id as string;
+  const createdCmt = (await cmtCreateRes.json()).comment as {
+    id: string;
+    attachmentBeforeUrl?: string | null;
+    attachmentAfterUrl?: string | null;
+  };
+  assert.ok(createdCmt.attachmentBeforeUrl?.startsWith('/uploads/'));
+  assert.ok(createdCmt.attachmentAfterUrl?.startsWith('/uploads/'));
 
   const listCmtsJson = await (await callApi('/api/comments', {}, authHeaders)).json();
-  assert.ok(listCmtsJson.comments.some((c: { id: string }) => c.id === createdCmtId));
+  const listedCmt = listCmtsJson.comments.find((c: { id: string }) => c.id === createdCmt.id);
+  assert.ok(listedCmt);
+  assert.equal(listedCmt.attachmentBeforeUrl, createdCmt.attachmentBeforeUrl);
+  assert.equal(listedCmt.attachmentAfterUrl, createdCmt.attachmentAfterUrl);
 
   // 9. Order creation encrypts password in D1 and Admin RBAC decrypts it
   const ordRes = await callApi(
@@ -332,5 +353,137 @@ test('Cloudflare Pages Functions handleApiRequest full D1 persistence & security
   const buf = await mediaRes.arrayBuffer();
   assert.ok(buf.byteLength > 20);
 
+  // 10. Serial search, full user activity log, non-auto-purge on complete, and explicit delete
+  const usersBySerialRes = await callApi(
+    `/api/admin/users?q=${encodeURIComponent(regJson.user.serialNumber)}`,
+    {},
+    { 'X-Crovo-Admin-Token': adminToken }
+  );
+  assert.equal(usersBySerialRes.status, 200);
+  const usersBySerial = await usersBySerialRes.json();
+  assert.equal(usersBySerial.users.length, 1);
+  assert.equal(usersBySerial.users[0].serialNumber, regJson.user.serialNumber);
+
+  const userActivityRes = await callApi(
+    `/api/admin/users/${regJson.user.id}/activity`,
+    {},
+    { 'X-Crovo-Admin-Token': adminToken }
+  );
+  assert.equal(userActivityRes.status, 200);
+  const userActivity = await userActivityRes.json();
+  assert.ok(Array.isArray(userActivity.activities));
+  const d1EventTypes = new Set(userActivity.activities.map((a: { eventType: string }) => a.eventType));
+  assert.ok(d1EventTypes.has('user_register'));
+  assert.ok(d1EventTypes.has('poll_vote'));
+  assert.ok(d1EventTypes.has('tool_like'));
+  assert.ok(d1EventTypes.has('comment_create'));
+  assert.ok(d1EventTypes.has('order_create'));
+
+  const completeOrderRes = await callApi(
+    `/api/admin/orders/${overviewJson.orders[0].id}`,
+    { method: 'PATCH', body: JSON.stringify({ status: 'completed' }) },
+    { 'X-Crovo-Admin-Token': adminToken }
+  );
+  assert.equal(completeOrderRes.status, 200);
+  const completeOrderJson = await completeOrderRes.json();
+  assert.equal(completeOrderJson.credentialsPurged, false);
+
+  const overviewAfterComplete = await (
+    await callApi('/api/admin/overview', {}, { 'X-Crovo-Admin-Token': adminToken })
+  ).json();
+  assert.equal(overviewAfterComplete.orders.length, 1);
+  assert.equal(overviewAfterComplete.orders[0].platformPassword, 'SecretPlatformPassword#9');
+
+  const delOrderRes = await callApi(
+    `/api/admin/orders/${overviewJson.orders[0].id}`,
+    { method: 'DELETE' },
+    { 'X-Crovo-Admin-Token': adminToken }
+  );
+  assert.equal(delOrderRes.status, 200);
+  const overviewAfterDel = await (
+    await callApi('/api/admin/overview', {}, { 'X-Crovo-Admin-Token': adminToken })
+  ).json();
+  assert.equal(overviewAfterDel.orders.length, 0);
+
   sqlite.close();
 });
+
+test('Edge resolveSecrets never overwrites existing D1 keys and decrypts legacy orders', async () => {
+  const sqlite = buildMigratedMemoryDb();
+  const d1 = createSqliteD1Adapter(sqlite);
+  const legacyKey = 'legacy-d1-encryption-key-0123456789';
+  const rotatedKey = 'new-env-encryption-key-9876543210';
+
+  sqlite
+    .prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+    .run('_edge_encryption_key', legacyKey);
+
+  const encLegacy = await edgeCrypto.encryptSecret('LegacyOrderPass!77', legacyKey);
+  sqlite
+    .prepare(
+      `INSERT INTO orders (
+        id, order_code, visitor_id, full_name, grade, platforms_json, platform_label, section_details,
+        platform_username, encrypted_password, password_iv, password_auth_tag,
+        credentials_purged, old_price, final_price, offer_applied, payment_method, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 100, 50, 1, ?, ?, ?)`
+    )
+    .run(
+      'ord_legacy_1',
+      'CRV-LEGACY1',
+      'v_legacy',
+      'طالب قديم',
+      'bac1',
+      '["qureo"]',
+      'منصة البرمجة (Qureo)',
+      'JS',
+      'legacy_user',
+      encLegacy.encrypted,
+      encLegacy.iv,
+      encLegacy.authTag,
+      'إنستا باي',
+      'new',
+      new Date().toISOString()
+    );
+
+  const env: Env = {
+    DB: d1,
+    SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    CREDENTIAL_ENCRYPTION_KEY: rotatedKey,
+    ADMIN_USERNAME: 'crovo_admin',
+    ADMIN_PASSWORD: 'SuperSecretAdminPassword!2026',
+  };
+
+  const loginRes = await handleApiRequest(
+    new Request('https://crovo.pages.dev/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: 'crovo_admin',
+        password: 'SuperSecretAdminPassword!2026',
+      }),
+    }),
+    env
+  );
+  assert.equal(loginRes.status, 200);
+  const { adminToken } = await loginRes.json();
+
+  const overviewRes = await handleApiRequest(
+    new Request('https://crovo.pages.dev/api/admin/overview', {
+      headers: { 'X-Crovo-Admin-Token': adminToken },
+    }),
+    env
+  );
+  assert.equal(overviewRes.status, 200);
+  const overviewJson = await overviewRes.json();
+  const legacyOrder = overviewJson.orders.find((o: { id: string }) => o.id === 'ord_legacy_1');
+  assert.ok(legacyOrder);
+  assert.equal(legacyOrder.platformPassword, 'LegacyOrderPass!77');
+
+  const storedRow = sqlite
+    .prepare('SELECT value FROM settings WHERE key = ?')
+    .get('_edge_encryption_key') as { value: string };
+  assert.equal(storedRow.value, legacyKey, 'Stored D1 _edge_encryption_key must NEVER be overwritten');
+
+  sqlite.close();
+});
+

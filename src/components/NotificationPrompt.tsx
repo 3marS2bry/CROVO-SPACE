@@ -12,6 +12,9 @@ import {
 import { api } from '../utils/api';
 
 const DISMISS_KEY = 'crovo_push_prompt_dismissed_until';
+const ACTIVATED_ONCE_KEY = 'crovo_push_activated_once';
+const OPTED_OUT_KEY = 'crovo_push_opted_out';
+const PUSH_UPDATED_EVENT = 'crovo:push-updated';
 const DISMISS_DAYS = 3;
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
@@ -43,6 +46,31 @@ export function isPushBrowserSupported(): boolean {
     'PushManager' in window &&
     window.isSecureContext
   );
+}
+
+function getStorageFlag(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function setStorageFlag(key: string, value: string | null): void {
+  try {
+    if (value === null) {
+      localStorage.removeItem(key);
+    } else {
+      localStorage.setItem(key, value);
+    }
+  } catch {
+    // Ignore storage restriction
+  }
+}
+
+function emitPushUpdated(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(PUSH_UPDATED_EVENT));
 }
 
 function translatePushError(err: unknown): { code: string; message: string; isIframeBlock?: boolean } {
@@ -77,14 +105,14 @@ function translatePushError(err: unknown): { code: string; message: string; isIf
     return {
       code: 'PushServiceAbortError',
       message:
-        'تعذر الاتصال بخدمة إشعارات المتصفح (Push Service). تأكد من اتصال الإنترنت أو عدم حجب الإشعارات بواسطة مانع الإعلانات وحاول تاني.',
+        'تعذر الاتصال بخدمة إشعارات المتصفح حالياً. تأكد من اتصال الإنترنت أو عدم حجب الإشعارات بواسطة مانع الإعلانات وحاول تاني.',
     };
   }
 
   if (name === 'InvalidStateError') {
     return {
       code: 'InvalidStateError',
-      message: 'الـ Service Worker لم يكتمل تفعيله بعد. انتظر لحظة وأعد المحاولة.',
+      message: 'خدمة الإشعارات بتجهّز في الخلفية حالياً. انتظر لحظة وأعد المحاولة.',
     };
   }
 
@@ -122,6 +150,110 @@ async function waitForActiveServiceWorker(reg: ServiceWorkerRegistration): Promi
   return await navigator.serviceWorker.ready;
 }
 
+async function ensureBrowserPushSubscription(): Promise<{
+  ok: true;
+  intervalDays: number;
+} | {
+  ok: false;
+  message: string;
+  requiresStandaloneWindow?: boolean;
+}> {
+  const vapid = await api.getVapidPublicKey();
+  if (!vapid.enabled || !vapid.publicKey) {
+    return {
+      ok: false,
+      message: 'الإشعارات متوقفة مؤقتاً من لوحة الإدارة.',
+    };
+  }
+
+  const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
+  const readyReg = await waitForActiveServiceWorker(reg);
+  const appServerKey = urlBase64ToUint8Array(vapid.publicKey);
+
+  let subscription = await readyReg.pushManager.getSubscription();
+  if (subscription) {
+    try {
+      const existingKey = subscription.options?.applicationServerKey;
+      if (existingKey) {
+        const existingBytes = new Uint8Array(existingKey);
+        const mismatch =
+          existingBytes.length !== appServerKey.length ||
+          existingBytes.some((b, i) => b !== appServerKey[i]);
+        if (mismatch) {
+          await subscription.unsubscribe();
+          subscription = null;
+        }
+      }
+    } catch {
+      // Ignore key comparison edge cases
+    }
+  }
+
+  if (!subscription) {
+    try {
+      subscription = await readyReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey,
+      });
+    } catch (subErr) {
+      const existing = await readyReg.pushManager.getSubscription();
+      if (existing) {
+        await existing.unsubscribe().catch(() => {});
+      }
+      subscription = await readyReg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey,
+      });
+      if (!subscription && subErr) throw subErr;
+    }
+  }
+
+  const json = subscription.toJSON();
+  if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
+    api.logPushError({ stage: 'extractKeys', errorCode: 'MissingPushKeys' });
+    return { ok: false, message: 'تعذر قراءة مفتاح الاشتراك من المتصفح.' };
+  }
+
+  await api.subscribePush({
+    endpoint: json.endpoint,
+    keys: {
+      p256dh: json.keys.p256dh,
+      auth: json.keys.auth,
+    },
+  });
+
+  return { ok: true, intervalDays: vapid.intervalDays };
+}
+
+let inFlightSilentSync: Promise<boolean> | null = null;
+
+export async function syncPushSubscriptionSilently(): Promise<boolean> {
+  if (typeof window === 'undefined' || !navigator.onLine) return false;
+  if (!isPushBrowserSupported()) return false;
+  if (Notification.permission !== 'granted') return false;
+  if (getStorageFlag(OPTED_OUT_KEY) === '1') return false;
+
+  if (inFlightSilentSync) return inFlightSilentSync;
+
+  inFlightSilentSync = (async () => {
+    try {
+      const res = await ensureBrowserPushSubscription();
+      if (res.ok) {
+        setStorageFlag(ACTIVATED_ONCE_KEY, '1');
+        emitPushUpdated();
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      inFlightSilentSync = null;
+    }
+  })();
+
+  return inFlightSilentSync;
+}
+
 export async function subscribeBrowserToPush(): Promise<{
   ok: boolean;
   message: string;
@@ -142,7 +274,6 @@ export async function subscribeBrowserToPush(): Promise<{
     };
   }
 
-  // Check already-denied state before invoking requestPermission
   if (Notification.permission === 'denied') {
     api.logPushError({ stage: 'precheck', errorCode: 'PermissionAlreadyDenied' });
     return {
@@ -186,82 +317,29 @@ export async function subscribeBrowserToPush(): Promise<{
       ok: false,
       requiresStandaloneWindow: inIframe,
       message: inIframe
-        ? 'المتصفح لا يعرض نافذة إذن الإشعارات داخل المعاينة المضمّنة. افتح الصفحة في نافذة مستقلة لتفعيلها بسهولة.'
+        ? 'المتصفح لا يعرض نافذة إذن الإشعارات داخل المعاينة المضمّنة. افتح الصفحة في نافذة مستقلة لتفعيلها بضغطة واحدة.'
         : 'تم إغلاق نافذة الإذن بدون موافقة. اضغط تفعيل واختر "السماح" لإتمام الاشتراك.',
     };
   }
 
   try {
-    const vapid = await api.getVapidPublicKey();
-    if (!vapid.enabled || !vapid.publicKey) {
+    setStorageFlag(OPTED_OUT_KEY, null);
+    const res = await ensureBrowserPushSubscription();
+    if (!res.ok) {
       return {
         ok: false,
-        message: 'الإشعارات متوقفة مؤقتاً من لوحة الإدارة.',
+        message: res.message,
+        requiresStandaloneWindow: res.requiresStandaloneWindow,
       };
     }
 
-    const reg = await navigator.serviceWorker.register('/sw.js', { scope: '/' });
-    const readyReg = await waitForActiveServiceWorker(reg);
-    const appServerKey = urlBase64ToUint8Array(vapid.publicKey);
-
-    let subscription = await readyReg.pushManager.getSubscription();
-    if (subscription) {
-      // Detect VAPID key mismatch and cleanly re-subscribe if changed
-      try {
-        const existingKey = subscription.options?.applicationServerKey;
-        if (existingKey) {
-          const existingBytes = new Uint8Array(existingKey);
-          const mismatch =
-            existingBytes.length !== appServerKey.length ||
-            existingBytes.some((b, i) => b !== appServerKey[i]);
-          if (mismatch) {
-            await subscription.unsubscribe();
-            subscription = null;
-          }
-        }
-      } catch {
-        // Ignore key comparison edge cases
-      }
-    }
-
-    if (!subscription) {
-      try {
-        subscription = await readyReg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: appServerKey,
-        });
-      } catch (subErr) {
-        // Retry once after unsubscribing any orphaned subscription
-        const existing = await readyReg.pushManager.getSubscription();
-        if (existing) {
-          await existing.unsubscribe().catch(() => {});
-        }
-        subscription = await readyReg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: appServerKey,
-        });
-        if (!subscription && subErr) throw subErr;
-      }
-    }
-
-    const json = subscription.toJSON();
-    if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) {
-      api.logPushError({ stage: 'extractKeys', errorCode: 'MissingPushKeys' });
-      return { ok: false, message: 'تعذر قراءة مفتاح الاشتراك من المتصفح.' };
-    }
-
-    // Only report success after SQLite confirms persistence
-    await api.subscribePush({
-      endpoint: json.endpoint,
-      keys: {
-        p256dh: json.keys.p256dh,
-        auth: json.keys.auth,
-      },
-    });
+    setStorageFlag(ACTIVATED_ONCE_KEY, '1');
+    setStorageFlag(DISMISS_KEY, null);
+    emitPushUpdated();
 
     return {
       ok: true,
-      message: `تم تفعيل الإشعارات بنجاح وحفظ اشتراكك في النظام! هيوصلك تنبيه واحد كل ${vapid.intervalDays} أيام بأهم العروض والتحديثات.`,
+      message: `تم تفعيل إشعارات العروض بنجاح! هتوصلك عروضنا وتحديثاتنا الجديدة كل ${res.intervalDays} أيام تلقائياً.`,
     };
   } catch (err) {
     const translated = translatePushError(err);
@@ -290,6 +368,9 @@ export async function unsubscribeBrowserFromPush(): Promise<{ ok: boolean; messa
   }
 
   await api.unsubscribePush(endpoint);
+  setStorageFlag(OPTED_OUT_KEY, '1');
+  setStorageFlag(ACTIVATED_ONCE_KEY, null);
+  emitPushUpdated();
   return {
     ok: true,
     message: 'تم إلغاء اشتراك الإشعارات وحذفه من قائمة الإرسال بنجاح. تقدر ترجّعه في أي وقت.',
@@ -306,37 +387,81 @@ export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = 
   );
 
   useEffect(() => {
-    if (!notificationsEnabled) return;
-    if (!isPushBrowserSupported()) return;
-    if (Notification.permission !== 'default') return;
+    if (!notificationsEnabled || !isPushBrowserSupported()) return;
 
-    try {
-      const dismissedUntil = Number(localStorage.getItem(DISMISS_KEY) || '0');
-      if (dismissedUntil > Date.now()) return;
-    } catch {
-      // Ignore storage error
-    }
-
-    const timer = window.setTimeout(async () => {
-      try {
-        const status = await api.getPushStatus();
-        if (!status.subscribed && status.notificationsEnabled && Notification.permission === 'default') {
-          setVisible(true);
-        }
-      } catch {
-        // Silent fail
+    const runSyncOrPrompt = async () => {
+      if (Notification.permission === 'granted') {
+        setVisible(false);
+        await syncPushSubscriptionSilently();
+        return true;
       }
-    }, 4500);
+      return false;
+    };
 
-    return () => window.clearTimeout(timer);
+    const onAuthOrOnline = () => {
+      void runSyncOrPrompt();
+    };
+    const onPushUpdated = () => {
+      if (Notification.permission === 'granted' && getStorageFlag(ACTIVATED_ONCE_KEY) === '1') {
+        setVisible((prev) => (prev ? prev : false));
+      }
+    };
+    window.addEventListener('crovo:auth-updated', onAuthOrOnline);
+    window.addEventListener('online', onAuthOrOnline);
+    window.addEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
+
+    let cancelled = false;
+    let timerId: number | null = null;
+
+    const scheduleCheck = async () => {
+      if (cancelled) return;
+      const synced = await runSyncOrPrompt();
+      if (synced || cancelled) return;
+      if (Notification.permission !== 'default') return;
+      if (getStorageFlag(OPTED_OUT_KEY) === '1') return;
+
+      const dismissedUntil = Number(getStorageFlag(DISMISS_KEY) || '0');
+      if (dismissedUntil > Date.now()) return;
+
+      const tryShow = async () => {
+        if (cancelled) return;
+        const welcomeOpen = Boolean(document.querySelector('[data-testid="first-visit-welcome-modal"]'));
+        if (welcomeOpen) {
+          timerId = window.setTimeout(() => void tryShow(), 700);
+          return;
+        }
+        try {
+          const status = await api.getPushStatus();
+          if (cancelled) return;
+          if (status.subscribed) {
+            setStorageFlag(ACTIVATED_ONCE_KEY, '1');
+            setVisible(false);
+            return;
+          }
+          if (status.notificationsEnabled && Notification.permission === 'default') {
+            setVisible(true);
+          }
+        } catch {
+          // Silent fail
+        }
+      };
+
+      timerId = window.setTimeout(() => void tryShow(), 1500);
+    };
+
+    void scheduleCheck();
+
+    return () => {
+      cancelled = true;
+      if (timerId !== null) window.clearTimeout(timerId);
+      window.removeEventListener('crovo:auth-updated', onAuthOrOnline);
+      window.removeEventListener('online', onAuthOrOnline);
+      window.removeEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
+    };
   }, [notificationsEnabled]);
 
   const handleDismiss = () => {
-    try {
-      localStorage.setItem(DISMISS_KEY, String(Date.now() + DISMISS_DAYS * 86400 * 1000));
-    } catch {
-      // Ignore
-    }
+    setStorageFlag(DISMISS_KEY, String(Date.now() + DISMISS_DAYS * 86400 * 1000));
     setVisible(false);
   };
 
@@ -352,7 +477,7 @@ export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = 
         standalone: res.requiresStandaloneWindow,
       });
       if (res.ok) {
-        window.setTimeout(() => setVisible(false), 2600);
+        window.setTimeout(() => setVisible(false), 1100);
       }
     } catch (err) {
       setFeedback({
@@ -388,10 +513,10 @@ export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = 
 
           <div className="space-y-2 flex-1">
             <h3 className="text-sm font-black font-decorative text-slate-900">
-              تحب يوصلك جديد عروض CROVO؟
+              فعّل إشعارات العروض والخصومات
             </h3>
             <p className="text-[11px] text-slate-600 font-ios leading-relaxed">
-              هنبعتلك إشعار واحد خفيف كل 3 أيام بالخصومات وتحديثات الحلول، من غير إزعاج وتقدر تلغيه في أي وقت.
+              اضغط موافقة مرة واحدة بس عشان يوصلك كل جديد وعروض المنصة أول بأول.
             </p>
 
             {feedback && (
@@ -423,7 +548,7 @@ export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = 
                 data-testid="enable-notifications-btn"
                 className="clay-apple-blue px-3.5 py-2 rounded-xl text-xs font-black text-white font-ios flex-1 disabled:opacity-60"
               >
-                {busy ? 'جاري التفعيل...' : 'تفعيل الإشعارات'}
+                {busy ? 'جاري التفعيل...' : 'تفعيل مرة واحدة الآن'}
               </button>
               <button
                 type="button"
@@ -459,11 +584,29 @@ export const PushPreferenceWidget: React.FC = () => {
   const [note, setNote] = useState<{ ok: boolean; text: string; standalone?: boolean } | null>(null);
 
   const refreshStatus = useCallback(async () => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      setPermState(Notification.permission);
-    }
+    const currentPerm =
+      typeof window !== 'undefined' && 'Notification' in window
+        ? Notification.permission
+        : 'unsupported';
+    setPermState(currentPerm);
+
     try {
       const status = await api.getPushStatus();
+      if (
+        !status.subscribed &&
+        status.notificationsEnabled &&
+        currentPerm === 'granted' &&
+        getStorageFlag(OPTED_OUT_KEY) !== '1'
+      ) {
+        const synced = await syncPushSubscriptionSilently();
+        if (synced) {
+          const updated = await api.getPushStatus();
+          setSubscribed(updated.subscribed);
+          setNotificationsEnabled(updated.notificationsEnabled);
+          setIntervalDays(updated.intervalDays);
+          return;
+        }
+      }
       setSubscribed(status.subscribed);
       setNotificationsEnabled(status.notificationsEnabled);
       setIntervalDays(status.intervalDays);
@@ -475,14 +618,24 @@ export const PushPreferenceWidget: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    refreshStatus();
-    const onOnline = () => setIsOnline(true);
+    void refreshStatus();
+    const onOnline = () => {
+      setIsOnline(true);
+      void refreshStatus();
+    };
     const onOffline = () => setIsOnline(false);
+    const onPushUpdated = () => {
+      void refreshStatus();
+    };
     window.addEventListener('online', onOnline);
     window.addEventListener('offline', onOffline);
+    window.addEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
+    window.addEventListener('crovo:auth-updated', onPushUpdated);
     return () => {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
+      window.removeEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
+      window.removeEventListener('crovo:auth-updated', onPushUpdated);
     };
   }, [refreshStatus]);
 
@@ -556,7 +709,7 @@ export const PushPreferenceWidget: React.FC = () => {
             : !isOnline
             ? 'غير متصل'
             : subscribed
-            ? `مفعّلة (كل ${intervalDays} أيام)`
+            ? `مفعّلة تلقائياً (كل ${intervalDays} أيام)`
             : permState === 'denied'
             ? 'مرفوضة من المتصفح'
             : 'غير مفعّلة'}
@@ -607,7 +760,7 @@ export const PushPreferenceWidget: React.FC = () => {
               className="clay-apple-blue px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 font-ios shadow-sm disabled:opacity-50"
             >
               <Bell className="w-3.5 h-3.5" />
-              <span>{busy ? 'جاري التفعيل...' : 'تفعيل / إعادة تفعيل الإشعارات'}</span>
+              <span>{busy ? 'جاري التفعيل...' : 'تفعيل إشعارات العروض مرة واحدة'}</span>
             </button>
           )}
         </div>

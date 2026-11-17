@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Eye, ImagePlus, Megaphone, Save, Sparkles } from 'lucide-react';
 import { api, PublicConfig } from '../../utils/api';
+import { syncSiteConfigToCloud } from '../../utils/cloudStore';
 import { CopyAdBanner } from '../CopyAdBanner';
 
 interface AdminAdsTabProps {
@@ -37,10 +38,34 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
     config.libraryAd.templateMode || 'classic'
   );
 
+  const [cloudPortableImg, setCloudPortableImg] = useState<string | null>(null);
   const [uploadingImg, setUploadingImg] = useState(false);
   const [saving, setSaving] = useState(false);
   const [showLivePreview, setShowLivePreview] = useState(false);
   const [previewTemplate, setPreviewTemplate] = useState<'classic' | 'rich_crovo'>('rich_crovo');
+
+  const compressAdImageForCloud = (dataUrl: string): Promise<string | null> =>
+    new Promise((resolve) => {
+      const img = new Image();
+      img.onerror = () => resolve(dataUrl.length <= 280_000 ? dataUrl : null);
+      img.onload = () => {
+        try {
+          const maxDim = 800;
+          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return resolve(null);
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          const out = canvas.toDataURL('image/jpeg', 0.78);
+          resolve(out.length <= 280_000 ? out : null);
+        } catch {
+          resolve(null);
+        }
+      };
+      img.src = dataUrl;
+    });
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -57,9 +82,13 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
         reader.onload = () => resolve(String(reader.result));
         reader.readAsDataURL(file);
       });
-      const res = await api.adminUploadAdImage(dataUrl);
+      const [res, portable] = await Promise.all([
+        api.adminUploadAdImage(dataUrl),
+        compressAdImageForCloud(dataUrl),
+      ]);
       setAdImageUrl(res.imageUrl);
-      onNotice('تم رفع صورة الإعلان إلى الخادم. اضغط حفظ لتطبيقها.');
+      setCloudPortableImg(portable);
+      onNotice('تم رفع صورة الإعلان بنجاح. اضغط حفظ لتطبيقها.');
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر رفع الصورة.');
     } finally {
@@ -72,7 +101,7 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
     e.preventDefault();
     setSaving(true);
     try {
-      await api.adminUpdateSettings({
+      const res = await api.adminUpdateSettings({
         promoBanner: { enabled: promoEnabled, text: promoText },
         heroPromo: { enabled: heroEnabled, title: heroTitle, subtitle: heroSubtitle },
         libraryAd: {
@@ -88,6 +117,17 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
           templateMode: adTemplateMode,
         },
       });
+      const cloudConfig = {
+        ...res.config,
+        libraryAd: {
+          ...res.config.libraryAd,
+          imageUrl:
+            adImageUrl.startsWith('/uploads/') && cloudPortableImg
+              ? cloudPortableImg
+              : res.config.libraryAd.imageUrl,
+        },
+      };
+      void syncSiteConfigToCloud(cloudConfig);
       onNotice('تم حفظ إعدادات الإعلانات والظهور بنجاح.');
       onConfigUpdated();
     } catch (err) {

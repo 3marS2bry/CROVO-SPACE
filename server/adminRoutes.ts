@@ -67,7 +67,7 @@ export function registerExtendedAdminRoutes(
 
     const rows = db
       .prepare(
-        `SELECT u.id, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason,
+        `SELECT u.id, u.serial_number as serialNumber, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason,
                 u.last_active_at as lastActiveAt, u.created_at as createdAt,
                 (SELECT COUNT(*) FROM comments c WHERE c.user_id = u.id) as reviewsCount,
                 (SELECT COUNT(*) FROM user_poll_votes pv WHERE pv.user_id = u.id) as votesCount,
@@ -82,7 +82,7 @@ export function registerExtendedAdminRoutes(
       if (role !== 'all' && u.role !== role) return false;
       if (status !== 'all' && u.status !== status) return false;
       if (q) {
-        const hay = `${String(u.name)} ${String(u.email)} ${String(u.grade)}`.toLowerCase();
+        const hay = `${String(u.serialNumber || '')} ${String(u.name)} ${String(u.email)} ${String(u.grade)} ${String(u.id)}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -160,7 +160,7 @@ export function registerExtendedAdminRoutes(
   app.get('/api/admin/users/:id/activity', requireAdmin, (req: AdminRequestContext, res: Response) => {
     const id = req.params.id;
     const user = db
-      .prepare('SELECT id, name, email, grade, role, status, suspend_reason as suspendReason, last_active_at as lastActiveAt, created_at as createdAt FROM users WHERE id = ?')
+      .prepare('SELECT id, serial_number as serialNumber, name, email, grade, role, status, suspend_reason as suspendReason, last_active_at as lastActiveAt, created_at as createdAt FROM users WHERE id = ?')
       .get(id);
     if (!user) {
       res.status(404).json({ error: 'المستخدم غير موجود.' });
@@ -191,8 +191,17 @@ export function registerExtendedAdminRoutes(
          FROM tool_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT 20`
       )
       .all(id);
+    const activities = db
+      .prepare(
+        `SELECT id, event_type as eventType, path, grade, section, chapter_num as chapterNum, query, results_count as resultsCount, meta_json as metaJson, created_at as createdAt
+         FROM analytics_events
+         WHERE user_id = ?
+         ORDER BY created_at DESC
+         LIMIT 100`
+      )
+      .all(id);
 
-    res.json({ user, reviews, votes, orders, toolRuns });
+    res.json({ user, reviews, votes, orders, toolRuns, activities });
   });
 
   // 3. Solutions Library CMS

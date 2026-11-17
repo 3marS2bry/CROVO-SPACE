@@ -59,6 +59,7 @@ export type PagesFunction<E = Env> = (context: PagesEventContext<E>) => Response
 
 export interface AuthUser {
   id: string;
+  serialNumber?: string | null;
   name: string;
   email: string;
   grade: 'bac1' | 'bac2';

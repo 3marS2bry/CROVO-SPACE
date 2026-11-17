@@ -1,6 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Ban, CheckCircle2, Eye, Search, Shield, UserCheck, Users, X } from 'lucide-react';
 import { AdminUserItem, api } from '../../utils/api';
+import {
+  fetchUserActivitiesCloud,
+  listAllUsersAdminCloud,
+  updateUserAdminCloud,
+} from '../../utils/cloudStore';
 
 interface AdminUsersTabProps {
   onNotice: (msg: string) => void;
@@ -22,11 +27,71 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     ReturnType<typeof api.adminUserActivity>
   > | null>(null);
 
+  const [apiIdByUserId, setApiIdByUserId] = useState<Record<string, string>>({});
+
   const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await api.adminUsers({ q, role: roleFilter, status: statusFilter });
-      setUsers(res.users);
+      const [apiRes, cloudList] = await Promise.all([
+        api.adminUsers({ q, role: roleFilter, status: statusFilter }).catch(() => ({ users: [] as AdminUserItem[] })),
+        listAllUsersAdminCloud().catch(() => [] as AdminUserItem[]),
+      ]);
+
+      const mergedMap = new Map<string, AdminUserItem>();
+      const emailIndex = new Map<string, string>();
+      const nextApiIdMap: Record<string, string> = {};
+
+      for (const cu of cloudList) {
+        mergedMap.set(cu.id, cu);
+        if (cu.email) emailIndex.set(cu.email.toLowerCase(), cu.id);
+      }
+
+      for (const au of apiRes.users) {
+        const rawFbKey = au.id.startsWith('fb_') ? au.id.slice(3) : null;
+        const matchByEmailKey = au.email ? emailIndex.get(au.email.toLowerCase()) : undefined;
+        const targetKey = mergedMap.has(au.id)
+          ? au.id
+          : rawFbKey && mergedMap.has(rawFbKey)
+          ? rawFbKey
+          : matchByEmailKey;
+        if (targetKey) {
+          const cu = mergedMap.get(targetKey)!;
+          nextApiIdMap[targetKey] = au.id;
+          mergedMap.set(targetKey, {
+            ...cu,
+            serialNumber: cu.serialNumber || au.serialNumber || null,
+            name: au.name || cu.name,
+            role: cu.role === 'admin' || au.role === 'admin' ? 'admin' : 'user',
+            status: au.status === 'suspended' || cu.status === 'suspended' ? 'suspended' : 'active',
+            suspendReason: au.suspendReason || cu.suspendReason || null,
+            reviewsCount: Math.max(au.reviewsCount, cu.reviewsCount),
+            votesCount: Math.max(au.votesCount, cu.votesCount),
+            completedOrdersCount: Math.max(au.completedOrdersCount, cu.completedOrdersCount),
+            lastActiveAt: au.lastActiveAt || cu.lastActiveAt,
+          });
+        } else {
+          nextApiIdMap[au.id] = au.id;
+          mergedMap.set(au.id, au);
+        }
+      }
+
+      setApiIdByUserId(nextApiIdMap);
+
+      const needle = q.trim().toLowerCase();
+      const merged = Array.from(mergedMap.values())
+        .filter((u) => {
+          if (roleFilter !== 'all' && u.role !== roleFilter) return false;
+          if (statusFilter !== 'all' && u.status !== statusFilter) return false;
+          if (!needle) return true;
+          return (
+            u.name.toLowerCase().includes(needle) ||
+            u.email.toLowerCase().includes(needle) ||
+            (u.serialNumber || '').toLowerCase().includes(needle)
+          );
+        })
+        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+
+      setUsers(merged);
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر تحميل المستخدمين.');
     } finally {
@@ -48,7 +113,9 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
       return;
     }
     try {
-      await api.adminUpdateUser(user.id, { status: 'active' });
+      const apiTargetId = apiIdByUserId[user.id] || user.id;
+      await updateUserAdminCloud(user.id, { status: 'active' });
+      await api.adminUpdateUser(apiTargetId, { status: 'active' }).catch(() => {});
       onNotice(`تم تفعيل حساب ${user.name} بنجاح.`);
       loadUsers();
     } catch (err) {
@@ -60,10 +127,14 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     e.preventDefault();
     if (!suspendingUser) return;
     try {
-      await api.adminUpdateUser(suspendingUser.id, {
-        status: 'suspended',
-        suspendReason: suspendReason.trim() || 'مخالفة شروط الاستخدام',
-      });
+      const apiTargetId = apiIdByUserId[suspendingUser.id] || suspendingUser.id;
+      await updateUserAdminCloud(suspendingUser.id, { status: 'suspended' });
+      await api
+        .adminUpdateUser(apiTargetId, {
+          status: 'suspended',
+          suspendReason: suspendReason.trim() || 'مخالفة شروط الاستخدام',
+        })
+        .catch(() => {});
       onNotice(`تم إيقاف حساب ${suspendingUser.name}.`);
       setSuspendingUser(null);
       loadUsers();
@@ -75,7 +146,11 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
   const handleConfirmRoleChange = async () => {
     if (!confirmRoleUser) return;
     try {
-      await api.adminUpdateUser(confirmRoleUser.user.id, { role: confirmRoleUser.nextRole });
+      const apiTargetId = apiIdByUserId[confirmRoleUser.user.id] || confirmRoleUser.user.id;
+      await updateUserAdminCloud(confirmRoleUser.user.id, { role: confirmRoleUser.nextRole });
+      await api
+        .adminUpdateUser(apiTargetId, { role: confirmRoleUser.nextRole })
+        .catch(() => {});
       onNotice(`تم تعديل صلاحية ${confirmRoleUser.user.name}.`);
       setConfirmRoleUser(null);
       loadUsers();
@@ -86,8 +161,30 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
 
   const openActivity = async (id: string) => {
     try {
-      const res = await api.adminUserActivity(id);
-      setActivityModal(res);
+      const apiTargetId = apiIdByUserId[id] || id;
+      const [apiRes, cloudActs] = await Promise.all([
+        api.adminUserActivity(apiTargetId).catch(() => null),
+        fetchUserActivitiesCloud(id).catch(() => []),
+      ]);
+      const baseUser = apiRes?.user || users.find((u) => u.id === id);
+      if (!baseUser) {
+        onNotice('تعذر العثور على بيانات المستخدم.');
+        return;
+      }
+      const combinedMap = new Map<string, NonNullable<typeof apiRes>['activities'][number]>();
+      for (const ca of cloudActs) combinedMap.set(ca.id, ca);
+      for (const aa of apiRes?.activities || []) combinedMap.set(aa.id, aa);
+
+      setActivityModal({
+        user: baseUser,
+        reviews: apiRes?.reviews || [],
+        votes: apiRes?.votes || [],
+        orders: apiRes?.orders || [],
+        toolRuns: apiRes?.toolRuns || [],
+        activities: Array.from(combinedMap.values()).sort(
+          (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
+        ),
+      });
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر تحميل نشاط المستخدم.');
     }
@@ -107,10 +204,11 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
           <div className="relative">
             <input
               type="text"
+              data-testid="admin-users-search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="بحث بالاسم أو البريد..."
-              className="pl-3 pr-8 py-2 rounded-xl clay-inset border-none outline-none"
+              placeholder="بحث بالرقم التسلسلي (CRV-1001) أو الاسم أو البريد..."
+              className="pl-3 pr-8 py-2 rounded-xl clay-inset border-none outline-none min-w-[230px]"
             />
             <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-1/2 -translate-y-1/2" />
           </div>
@@ -153,6 +251,15 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
             >
               <div className="space-y-1">
                 <div className="flex flex-wrap items-center gap-2">
+                  {u.serialNumber && (
+                    <span
+                      data-testid={`user-serial-${u.id}`}
+                      dir="ltr"
+                      className="px-2 py-0.5 rounded-lg bg-indigo-600 text-white text-[10px] font-mono font-black tracking-wide"
+                    >
+                      {u.serialNumber}
+                    </span>
+                  )}
                   <span className="font-black text-slate-900">{u.name}</span>
                   <span className="font-mono text-indigo-700" dir="ltr">
                     {u.email}
@@ -317,12 +424,23 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-lg max-h-[85vh] overflow-y-auto clay-card p-5 bg-[#EEF2F7] space-y-3"
+            data-testid="user-activity-modal"
+            className="w-full max-w-2xl max-h-[85vh] overflow-y-auto clay-card p-5 bg-[#EEF2F7] space-y-3"
           >
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-black font-decorative text-slate-900">
-                سجل نشاط: {activityModal.user.name}
-              </h3>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-base font-black font-decorative text-slate-900">
+                  سجل نشاط: {activityModal.user.name}
+                </h3>
+                {activityModal.user.serialNumber && (
+                  <span
+                    dir="ltr"
+                    className="px-2 py-0.5 rounded-lg bg-indigo-600 text-white text-[11px] font-mono font-black"
+                  >
+                    {activityModal.user.serialNumber}
+                  </span>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={() => setActivityModal(null)}
@@ -331,6 +449,74 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            <div className="p-3 rounded-xl clay-inset space-y-1.5">
+              <div className="font-bold text-indigo-700">
+                السجل الكامل لنشاط المستخدم على الموقع ({activityModal.activities?.length || 0})
+              </div>
+              <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                {(activityModal.activities || []).map((act) => {
+                  const labels: Record<string, string> = {
+                    user_register: 'إنشاء الحساب',
+                    user_login: 'تسجيل الدخول',
+                    page_view: 'تصفح صفحة',
+                    library_open: 'فتح المكتبة',
+                    level_view: 'فتح مستوى في المكتبة',
+                    library_search: 'بحث داخل المكتبة',
+                    tool_view: 'فتح صفحة الأداة',
+                    question_copy: 'نسخ سؤال/حل',
+                    question_report: 'بلاغ عن سؤال',
+                    tool_like: 'إعجاب بالأداة',
+                    tool_unlike: 'إلغاء الإعجاب بالأداة',
+                    comment_like: 'إعجاب بتعليق',
+                    comment_unlike: 'إلغاء الإعجاب بتعليق',
+                    comment_create: 'كتابة تعليق',
+                    comment_edit: 'تعديل تعليق',
+                    comment_delete: 'حذف تعليق',
+                    comment_report: 'بلاغ عن تعليق',
+                    poll_vote: 'تصويت في استفتاء',
+                    order_create: 'إرسال طلب اشتراك',
+                    push_subscribe: 'تفعيل الإشعارات',
+                  };
+                  const detailParts = [
+                    act.grade === 'bac1' ? 'أولى بكالوريا' : act.grade === 'bac2' ? 'تانية بكالوريا' : act.grade,
+                    act.section,
+                    act.chapterNum ? `فصل ${act.chapterNum}` : null,
+                    act.query ? `بحث: "${act.query}"` : null,
+                    act.path,
+                  ].filter(Boolean);
+                  let formattedTime = act.createdAt;
+                  try {
+                    formattedTime = new Intl.DateTimeFormat('ar-EG', {
+                      dateStyle: 'short',
+                      timeStyle: 'short',
+                    }).format(new Date(act.createdAt));
+                  } catch {}
+                  return (
+                    <div
+                      key={act.id}
+                      className="p-2 rounded-lg clay-card bg-white/80 flex flex-col sm:flex-row sm:items-center justify-between gap-1 text-[11px]"
+                    >
+                      <div>
+                        <span className="font-black text-slate-900">
+                          {labels[act.eventType] || act.eventType}
+                        </span>
+                        {detailParts.length > 0 && (
+                          <span className="text-slate-600 mr-2">· {detailParts.join(' · ')}</span>
+                        )}
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-500 shrink-0" dir="ltr">
+                        {formattedTime}
+                      </span>
+                    </div>
+                  );
+                })}
+                {(!activityModal.activities || activityModal.activities.length === 0) && (
+                  <div className="text-slate-500">لا توجد أنشطة مسجلة بعد.</div>
+                )}
+              </div>
+            </div>
+
             <div className="p-3 rounded-xl clay-inset space-y-1">
               <div className="font-bold text-indigo-700">الطلبات ({activityModal.orders.length})</div>
               {activityModal.orders.map((o) => (

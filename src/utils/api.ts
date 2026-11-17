@@ -7,6 +7,7 @@ const ADMIN_TOKEN_STORAGE_KEY = 'crovo_admin_token';
 
 export interface AuthUser {
   id: string;
+  serialNumber?: string | null;
   name: string;
   email: string;
   grade: 'bac1' | 'bac2';
@@ -73,6 +74,8 @@ export interface CommentItem {
   content: string;
   avatarUrl: string | null;
   attachmentUrl: string | null;
+  attachmentBeforeUrl?: string | null;
+  attachmentAfterUrl?: string | null;
   contactPhone: string | null;
   showContactPublicly: boolean;
   isVerified: boolean;
@@ -81,6 +84,7 @@ export interface CommentItem {
   hasLiked: boolean;
   createdAt: string;
   updatedAt: string | null;
+  source?: 'cloud' | 'api';
 }
 
 export interface PollOptionState {
@@ -197,6 +201,7 @@ export interface AdminAnalyticsResponse {
 
 export interface AdminUserItem {
   id: string;
+  serialNumber?: string | null;
   name: string;
   email: string;
   grade: 'bac1' | 'bac2';
@@ -398,6 +403,21 @@ export const api = {
     return res;
   },
 
+  authCloudSync: async (payload: {
+    idToken: string;
+    name?: string;
+    grade?: 'bac1' | 'bac2';
+    serialNumber?: string | null;
+  }) => {
+    const res = await apiFetch<{ ok: boolean; token: string; user: AuthUser }>('/api/auth/cloud-sync', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (res.token) setStoredUserToken(res.token);
+    notifyAuthUpdated(res.user);
+    return res;
+  },
+
   authLogout: async () => {
     try {
       await apiFetch<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
@@ -495,6 +515,8 @@ export const api = {
     showContactPublicly?: boolean;
     avatarDataUrl?: string | null;
     attachmentDataUrl?: string | null;
+    attachmentBeforeDataUrl?: string | null;
+    attachmentAfterDataUrl?: string | null;
   }) =>
     apiFetch<{ comment: CommentItem }>('/api/comments', {
       method: 'POST',
@@ -583,6 +605,19 @@ export const api = {
     return res;
   },
 
+  adminFirebaseLogin: async (idToken: string) => {
+    const res = await apiFetch<{ ok: boolean; username: string; adminToken?: string; token?: string }>(
+      '/api/admin/firebase-login',
+      {
+        method: 'POST',
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (res.adminToken) setStoredAdminToken(res.adminToken);
+    if (res.token) setStoredUserToken(res.token);
+    return res;
+  },
+
   adminLogout: async () => {
     try {
       await apiFetch<{ ok: boolean }>('/api/admin/logout', { method: 'POST' });
@@ -598,6 +633,9 @@ export const api = {
       orders: Array<{
         id: string;
         orderCode: string;
+        userId?: string | null;
+        userSerialNumber?: string | null;
+        userEmail?: string | null;
         fullName: string;
         grade: OrderGrade;
         platformLabel: string;
@@ -621,6 +659,8 @@ export const api = {
         content: string;
         avatarUrl: string | null;
         attachmentUrl: string | null;
+        attachmentBeforeUrl?: string | null;
+        attachmentAfterUrl?: string | null;
         contactPhone: string | null;
         showContactPublicly: boolean;
         isVerified: boolean;
@@ -731,6 +771,18 @@ export const api = {
       votes: Array<{ pollId: string; question: string; optionKey: string; createdAt: string }>;
       orders: Array<{ id: string; orderCode: string; platformLabel: string; finalPrice: number; status: string; createdAt: string }>;
       toolRuns: Array<{ id: string; serviceKey: string; status: string; durationMs: number; errorMessage: string | null; createdAt: string }>;
+      activities: Array<{
+        id: string;
+        eventType: string;
+        path: string | null;
+        grade: string | null;
+        section: string | null;
+        chapterNum: number | null;
+        query: string | null;
+        resultsCount: number | null;
+        metaJson: string | null;
+        createdAt: string;
+      }>;
     }>(`/api/admin/users/${encodeURIComponent(id)}/activity`),
 
   adminLibrary: (params?: { grade?: string; section?: string; q?: string; incomplete?: boolean }) => {
@@ -887,6 +939,11 @@ export const api = {
         body: JSON.stringify(payload),
       }
     ),
+
+  adminDeleteOrder: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/admin/orders/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    }),
 
   adminUpdateComment: (
     id: string,

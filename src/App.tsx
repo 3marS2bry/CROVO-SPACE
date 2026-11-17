@@ -24,7 +24,16 @@ import { CommentsSection } from './components/CommentsSection';
 import { HelpCenterSection } from './components/HelpCenterSection';
 import { AcademicGrade, Chapter, SectionType } from './types';
 import { api, PublicConfig } from './utils/api';
-import { LIBRARY_AD_DELAY_MS, shouldShowTimedLibraryAd } from './utils/rules';
+import {
+  LibraryOverrideItem,
+  subscribeLibraryOverridesCloud,
+  subscribeSiteConfigCloud,
+} from './utils/cloudStore';
+import {
+  isOfferActiveClient,
+  LIBRARY_AD_DELAY_MS,
+  shouldShowTimedLibraryAd,
+} from './utils/rules';
 import { applyRouteSeo } from './utils/seo';
 
 function lazyWithRetry<T extends React.ComponentType<any>>(
@@ -122,6 +131,7 @@ function AppContent() {
   const [activeView, setActiveView] = useState<AppView>(resolveInitialView);
 
   const [siteConfig, setSiteConfig] = useState<PublicConfig | null>(null);
+  const [cloudConfigPatch, setCloudConfigPatch] = useState<Partial<PublicConfig> | null>(null);
   const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
 
   const loadSiteConfig = useCallback(async () => {
@@ -140,8 +150,31 @@ function AppContent() {
   useEffect(() => {
     loadSiteConfig();
     const timer = window.setInterval(loadSiteConfig, 60000);
-    return () => window.clearInterval(timer);
+    const unsubCloud = subscribeSiteConfigCloud((patch) => {
+      setCloudConfigPatch(patch);
+    });
+    return () => {
+      window.clearInterval(timer);
+      unsubCloud();
+    };
   }, [loadSiteConfig]);
+
+  const effectiveConfig: PublicConfig | null = React.useMemo(() => {
+    if (!siteConfig) return null;
+    if (!cloudConfigPatch) return siteConfig;
+    const merged: PublicConfig = {
+      ...siteConfig,
+      ...cloudConfigPatch,
+      libraryAd: cloudConfigPatch.libraryAd
+        ? { ...siteConfig.libraryAd, ...cloudConfigPatch.libraryAd }
+        : siteConfig.libraryAd,
+      promoBanner: cloudConfigPatch.promoBanner
+        ? { ...(siteConfig.promoBanner || { enabled: true, text: '' }), ...cloudConfigPatch.promoBanner }
+        : siteConfig.promoBanner,
+    };
+    merged.offerActive = isOfferActiveClient(merged, Date.now() + serverOffsetMs);
+    return merged;
+  }, [siteConfig, cloudConfigPatch, serverOffsetMs]);
 
   useEffect(() => {
     applyRouteSeo(activeView);
@@ -212,7 +245,38 @@ function AppContent() {
   const effectiveSection: SectionType = academicGrade === 'bac1' ? 'js' : activeSection;
   const libraryCacheRef = useRef<Map<string, Chapter[]>>(new Map());
   const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [libraryOverrides, setLibraryOverrides] = useState<LibraryOverrideItem[]>([]);
   const [loadingChapters, setLoadingChapters] = useState<boolean>(true);
+
+  useEffect(() => {
+    return subscribeLibraryOverridesCloud((items) => {
+      setLibraryOverrides(items);
+    });
+  }, []);
+
+  const effectiveChapters = React.useMemo(() => {
+    if (libraryOverrides.length === 0) return chapters;
+    const relevant = libraryOverrides.filter(
+      (item) => item.grade === academicGrade && item.section === effectiveSection
+    );
+    if (relevant.length === 0) return chapters;
+
+    const cloned = chapters.map((ch) => ({ ...ch, qs: [...ch.qs] }));
+    for (const ov of relevant) {
+      const ch = cloned.find((c) => c.num === ov.chapterNum);
+      if (!ch) continue;
+      if (ov.deleted) {
+        if (ov.qIndex >= 0 && ov.qIndex < ch.qs.length) {
+          ch.qs = ch.qs.filter((_, idx) => idx !== ov.qIndex);
+        }
+      } else if (ov.qIndex >= 0 && ov.qIndex < ch.qs.length) {
+        ch.qs[ov.qIndex] = { q: ov.qText, a: ov.aText, code: ov.isCode };
+      } else {
+        ch.qs.push({ q: ov.qText, a: ov.aText, code: ov.isCode });
+      }
+    }
+    return cloned;
+  }, [chapters, libraryOverrides, academicGrade, effectiveSection]);
 
   const loadLibrarySection = useCallback(
     async (grade: AcademicGrade, section: SectionType, signal?: AbortSignal, bypassCache = false) => {
@@ -281,8 +345,8 @@ function AppContent() {
   const [hasShownAdThisVisit, setHasShownAdThisVisit] = useState(isPreviewRichAd);
 
   const delayMs =
-    typeof siteConfig?.libraryAd?.delaySeconds === 'number' && siteConfig.libraryAd.delaySeconds >= 5
-      ? siteConfig.libraryAd.delaySeconds * 1000
+    typeof effectiveConfig?.libraryAd?.delaySeconds === 'number' && effectiveConfig.libraryAd.delaySeconds >= 5
+      ? effectiveConfig.libraryAd.delaySeconds * 1000
       : LIBRARY_AD_DELAY_MS;
 
   useEffect(() => {
@@ -306,11 +370,11 @@ function AppContent() {
     }
 
     const canShow = shouldShowTimedLibraryAd({
-      enabled: siteConfig?.libraryAd.enabled ?? true,
+      enabled: effectiveConfig?.libraryAd.enabled ?? true,
       isAdminView: activeView === 'admin',
       hasOtherModalOpen: isSubModalOpen || isQuranModalOpen,
       lastDismissedAtMs,
-      cooldownHours: siteConfig?.libraryAd?.cooldownHours,
+      cooldownHours: effectiveConfig?.libraryAd?.cooldownHours,
     });
 
     if (canShow) {
@@ -320,8 +384,8 @@ function AppContent() {
   }, [
     hasReachedAdDelay,
     hasShownAdThisVisit,
-    siteConfig?.libraryAd.enabled,
-    siteConfig?.libraryAd?.cooldownHours,
+    effectiveConfig?.libraryAd.enabled,
+    effectiveConfig?.libraryAd?.cooldownHours,
     activeView,
     isSubModalOpen,
     isQuranModalOpen,
@@ -426,24 +490,26 @@ function AppContent() {
 
   return (
     <div className="min-h-screen bg-[#EEF2F7] text-slate-800 font-['iOS15Arabic',_'Cairo',_sans-serif] flex flex-col relative selection:bg-indigo-500 selection:text-white">
-      {activeView !== 'admin' && (
-        <div className="sticky top-0 z-50 w-full shadow-xs">
-          <PromoTopBanner
-            config={siteConfig}
-            serverOffsetMs={serverOffsetMs}
-            onOpenSubscription={openSubscriptionModal}
+      <div className="sticky top-0 z-40 w-full">
+        {activeView !== 'admin' && (
+          <div className="w-full shadow-xs">
+            <PromoTopBanner
+              config={effectiveConfig}
+              serverOffsetMs={serverOffsetMs}
+              onOpenSubscription={openSubscriptionModal}
+            />
+          </div>
+        )}
+
+        <div className="w-full">
+          <Navbar
+            activeView={activeView}
+            onSelectView={navigateToView}
+            onOpenHelp={scrollToHelp}
+            xp={xp}
+            level={currentLevel}
           />
         </div>
-      )}
-
-      <div className="sticky top-[28px] sm:top-[36px] z-40 w-full">
-        <Navbar
-          activeView={activeView}
-          onSelectView={navigateToView}
-          onOpenHelp={scrollToHelp}
-          xp={xp}
-          level={currentLevel}
-        />
       </div>
 
       <main className="flex-1">
@@ -461,7 +527,7 @@ function AppContent() {
               <LazyErrorBoundary>
                 <Suspense fallback={<SectionSkeleton />}>
                   <ToolDetailsPage
-                    config={siteConfig}
+                    config={effectiveConfig}
                     onBackToLibrary={() => navigateToView('library')}
                     onOpenSubscription={openSubscriptionModal}
                   />
@@ -477,14 +543,14 @@ function AppContent() {
                 />
 
                 <HeroPromoSection
-                  config={siteConfig}
+                  config={effectiveConfig}
                   onExploreTool={openToolDetails}
                   onOpenSubscription={openSubscriptionModal}
                   onOpenReviews={openReviewsPage}
                 />
 
                 <SolutionsLibrary
-                  chapters={chapters}
+                  chapters={effectiveChapters}
                   loadingChapters={loadingChapters}
                   academicGrade={academicGrade}
                   onSelectGrade={handleSelectGrade}
@@ -504,7 +570,7 @@ function AppContent() {
             <CommentsSection onOpenAllReviews={openReviewsPage} />
 
             <HelpCenterSection
-              adminWhatsappDisplay={siteConfig?.adminWhatsappDisplay || '201550324450'}
+              adminWhatsappDisplay={effectiveConfig?.adminWhatsappDisplay || '201550324450'}
               onOpenToolDetails={openToolDetails}
               onOpenSubscription={openSubscriptionModal}
             />
@@ -524,13 +590,13 @@ function AppContent() {
       />
 
       {activeView !== 'admin' && (
-        <NotificationPrompt notificationsEnabled={siteConfig?.notificationsEnabled ?? true} />
+        <NotificationPrompt notificationsEnabled={effectiveConfig?.notificationsEnabled ?? true} />
       )}
 
       <CopyAdBanner
         isVisible={showCopyAd}
         onClose={handleCloseTimedLibraryAd}
-        adConfig={siteConfig?.libraryAd}
+        adConfig={effectiveConfig?.libraryAd}
         onLearnMore={openToolDetails}
         onOpenSubscription={openSubscriptionModal}
         forceTemplateMode={isPreviewRichAd ? 'rich_crovo' : undefined}
@@ -546,7 +612,7 @@ function AppContent() {
             <SubscriptionModal
               isOpen={isSubModalOpen}
               onClose={() => setIsSubModalOpen(false)}
-              config={siteConfig}
+              config={effectiveConfig}
               serverOffsetMs={serverOffsetMs}
             />
           </Suspense>

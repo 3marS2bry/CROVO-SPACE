@@ -125,7 +125,101 @@ export async function setSetting(db: D1Database, key: string, value: string): Pr
     .run();
 }
 
+let commentImageColsChecked = false;
+
+export async function ensureCommentImageColumns(db: D1Database): Promise<void> {
+  if (commentImageColsChecked) return;
+  commentImageColsChecked = true;
+  for (const colDef of ['attachment_before_url TEXT', 'attachment_after_url TEXT']) {
+    try {
+      await db.prepare(`ALTER TABLE comments ADD COLUMN ${colDef}`).run();
+    } catch {
+      // Column already exists
+    }
+  }
+}
+
+let serialSchemaChecked = false;
+
+export async function ensureUserSerialNumberSchema(db: D1Database): Promise<void> {
+  if (!serialSchemaChecked) {
+    serialSchemaChecked = true;
+    try {
+      await db.prepare('ALTER TABLE users ADD COLUMN serial_number TEXT').run();
+    } catch {
+      // Column already exists
+    }
+    try {
+      await db
+        .prepare(
+          'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_serial_number ON users(serial_number) WHERE serial_number IS NOT NULL'
+        )
+        .run();
+    } catch {
+      // Index already exists
+    }
+    try {
+      await db
+        .prepare('CREATE INDEX IF NOT EXISTS idx_analytics_user_created ON analytics_events(user_id, created_at DESC)')
+        .run();
+    } catch {
+      // Index already exists
+    }
+  }
+
+  try {
+    const missing = await db
+      .prepare(
+        `SELECT id FROM users
+         WHERE serial_number IS NULL OR trim(serial_number) = ''
+         ORDER BY created_at ASC
+         LIMIT 200`
+      )
+      .all<{ id: string }>();
+    for (const row of missing.results || []) {
+      const serial = await allocateNextUserSerial(db);
+      await db.prepare('UPDATE users SET serial_number = ? WHERE id = ?').bind(serial, row.id).run();
+    }
+  } catch {
+    // Best-effort backfill
+  }
+}
+
+export async function allocateNextUserSerial(db: D1Database): Promise<string> {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = 'user_serial_seq'").first<{ value: string }>();
+  let seq = Number(row?.value);
+  if (!Number.isFinite(seq) || seq < 1000) {
+    seq = 1000;
+  }
+
+  try {
+    const maxRow = await db
+      .prepare(
+        `SELECT MAX(CAST(REPLACE(serial_number, 'CRV-', '') AS INTEGER)) as maxNum
+         FROM users
+         WHERE serial_number LIKE 'CRV-%'`
+      )
+      .first<{ maxNum: number | null }>();
+    if (maxRow && typeof maxRow.maxNum === 'number' && maxRow.maxNum > seq) {
+      seq = maxRow.maxNum;
+    }
+  } catch {
+    // Ignore if serial_number column is just being created
+  }
+
+  let candidate = '';
+  do {
+    seq += 1;
+    candidate = `CRV-${seq}`;
+  } while (await db.prepare('SELECT 1 FROM users WHERE serial_number = ?').bind(candidate).first());
+
+  await setSetting(db, 'user_serial_seq', String(seq));
+  return candidate;
+}
+
 export async function ensureDefaultSettingsIfNeeded(db: D1Database, env?: Env): Promise<void> {
+  await ensureCommentImageColumns(db);
+  await ensureUserSerialNumberSchema(db);
   const marker = await getSetting(db, 'tracking_started_at');
   if (marker) return;
 
@@ -270,22 +364,9 @@ export async function getSiteConfig(db: D1Database): Promise<PublicSiteConfig> {
   };
 }
 
-export async function purgeExpiredOrderCredentials(db: D1Database, maxAgeHours = 168): Promise<number> {
-  const cutoffIso = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
-  const res = await db
-    .prepare(
-      `UPDATE orders
-       SET encrypted_password = NULL,
-           password_iv = NULL,
-           password_auth_tag = NULL,
-           credentials_purged = 1,
-           updated_at = ?
-       WHERE credentials_purged = 0
-         AND (status IN ('completed', 'cancelled') OR created_at < ?)`
-    )
-    .bind(new Date().toISOString(), cutoffIso)
-    .run();
-  return Number(res.meta?.changes || 0);
+export async function purgeExpiredOrderCredentials(_db: D1Database, _maxAgeHours = 168): Promise<number> {
+  // Never auto-purge orders or credentials; kept permanently until admin explicitly deletes/purges them.
+  return 0;
 }
 
 export async function getPollSummary(db: D1Database, userId?: string | null, pollIdArg?: string) {
@@ -478,8 +559,12 @@ export async function migrateVisitorActivityToUser(
 
     await db.batch([
       db.prepare('UPDATE comments SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL').bind(userId, visitorId),
+      db.prepare('UPDATE orders SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL').bind(userId, visitorId),
       db
         .prepare('UPDATE push_subscriptions SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL')
+        .bind(userId, visitorId),
+      db
+        .prepare('UPDATE analytics_events SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL')
         .bind(userId, visitorId),
     ]);
   } catch {

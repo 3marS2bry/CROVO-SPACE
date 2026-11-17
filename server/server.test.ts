@@ -52,7 +52,7 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   const cookieA = extractCookies(cfgRes.headers.getSetCookie());
   assert.ok(cookieA.includes('crovo_visitor='));
 
-  // 2. Visitor A creates comment with image persisted in SQLite uploaded_media
+  // 2. Visitor A creates comment with before & after images persisted in SQLite uploaded_media
   const cmtCreateRes = await fetch(`${baseUrl}/api/comments`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookieA },
@@ -64,7 +64,8 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
       showContactPublicly: true,
       contactPhone: '01012345678',
       avatarDataUrl: TINY_PNG_DATA_URL,
-      attachmentDataUrl: TINY_PNG_DATA_URL,
+      attachmentBeforeDataUrl: TINY_PNG_DATA_URL,
+      attachmentAfterDataUrl: TINY_PNG_DATA_URL,
       isVerified: true,
     }),
   });
@@ -74,6 +75,8 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   assert.equal(cmtJson.comment.contactPhone, null, 'Phone number must never be exposed publicly');
   assert.equal(cmtJson.comment.showContactPublicly, false);
   assert.ok(cmtJson.comment.avatarUrl?.startsWith('/uploads/'));
+  assert.ok(cmtJson.comment.attachmentBeforeUrl?.startsWith('/uploads/'));
+  assert.ok(cmtJson.comment.attachmentAfterUrl?.startsWith('/uploads/'));
 
   // Empty phone optional comment works smoothly
   const cmtNoPhoneRes = await fetch(`${baseUrl}/api/comments`, {
@@ -89,10 +92,16 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   });
   assert.equal(cmtNoPhoneRes.status, 201);
 
-  // Image is served cleanly from SQLite uploaded_media blob table
-  const mediaRes = await fetch(`${baseUrl}${cmtJson.comment.avatarUrl}`);
-  assert.equal(mediaRes.status, 200);
-  assert.equal(mediaRes.headers.get('content-type'), 'image/png');
+  // Images are served cleanly from SQLite uploaded_media blob table
+  for (const imgPath of [
+    cmtJson.comment.avatarUrl,
+    cmtJson.comment.attachmentBeforeUrl,
+    cmtJson.comment.attachmentAfterUrl,
+  ]) {
+    const mediaRes = await fetch(`${baseUrl}${imgPath}`);
+    assert.equal(mediaRes.status, 200);
+    assert.equal(mediaRes.headers.get('content-type'), 'image/png');
+  }
 
   // 3. Visitor B sees Visitor A's comment & cannot delete it, and phone is never exposed publicly
   const cfgBRes = await fetch(`${baseUrl}/api/config`);
@@ -187,6 +196,7 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   });
   assert.equal(regRes.status, 201);
   const regJson = await regRes.json();
+  assert.match(String(regJson.user.serialNumber || ''), /^CRV-\d{4,}$/);
   const authHeadersA = {
     'Content-Type': 'application/json',
     Cookie: cookieA,
@@ -357,7 +367,7 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   );
   assert.equal(resolveReportRes.status, 200);
 
-  // Complete order -> automatically purges encrypted credentials!
+  // Complete order -> MUST NOT auto-purge encrypted credentials or delete the order!
   const completeRes = await fetch(`${baseUrl}/api/admin/orders/${overview.orders[0].id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
@@ -365,7 +375,44 @@ test('Full-stack API enforces shared comments (SQLite images), likes, poll, copy
   });
   assert.equal(completeRes.status, 200);
   const completeBody = await completeRes.json();
-  assert.equal(completeBody.credentialsPurged, true);
+  assert.equal(completeBody.credentialsPurged, false);
+
+  const overviewAfterComplete = await (
+    await fetch(`${baseUrl}/api/admin/overview`, { headers: { Cookie: adminCookie } })
+  ).json();
+  assert.equal(overviewAfterComplete.orders.length, 1);
+  assert.equal(overviewAfterComplete.orders[0].platformPassword, 'SecretPassword!123');
+
+  // Admin can search users by serialNumber and inspect full activity timeline
+  const userSearchRes = await fetch(
+    `${baseUrl}/api/admin/users?q=${encodeURIComponent(regJson.user.serialNumber)}`,
+    { headers: { Cookie: adminCookie } }
+  );
+  assert.equal(userSearchRes.status, 200);
+  const userSearchJson = await userSearchRes.json();
+  assert.equal(userSearchJson.users.length, 1);
+  assert.equal(userSearchJson.users[0].serialNumber, regJson.user.serialNumber);
+
+  const activityRes = await fetch(`${baseUrl}/api/admin/users/${regJson.user.id}/activity`, {
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(activityRes.status, 200);
+  const activityJson = await activityRes.json();
+  assert.ok(Array.isArray(activityJson.activities));
+  const eventTypes = new Set(activityJson.activities.map((a: { eventType: string }) => a.eventType));
+  assert.ok(eventTypes.has('user_register'));
+  assert.ok(eventTypes.has('poll_vote'));
+
+  // Explicit order deletion by Admin removes it permanently
+  const deleteOrderRes = await fetch(`${baseUrl}/api/admin/orders/${overview.orders[0].id}`, {
+    method: 'DELETE',
+    headers: { Cookie: adminCookie },
+  });
+  assert.equal(deleteOrderRes.status, 200);
+  const overviewAfterDelete = await (
+    await fetch(`${baseUrl}/api/admin/overview`, { headers: { Cookie: adminCookie } })
+  ).json();
+  assert.equal(overviewAfterDelete.orders.length, 0);
 
   // Admin updates PromoTopBanner text & toggle -> reflected on public /api/config
   const updSettingsRes = await fetch(`${baseUrl}/api/admin/settings`, {

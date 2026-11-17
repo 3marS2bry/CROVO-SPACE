@@ -56,7 +56,7 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4 text-indigo-600" />
             <h2 className="text-base font-black font-decorative">
-              حماية قاعدة البيانات والنسخ الاحتياطي (SQLite)
+              حماية البيانات والنسخ الاحتياطي
             </h2>
           </div>
 
@@ -72,7 +72,7 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
         </div>
 
         <div className="p-3 rounded-xl clay-inset flex flex-wrap items-center justify-between gap-2">
-          <span className="font-bold">فحص سلامة قاعدة البيانات (PRAGMA integrity_check):</span>
+          <span className="font-bold">فحص سلامة واستقرار التخزين:</span>
           <span className={`font-black font-mono ${dbIntegrity.ok ? 'text-indigo-700' : 'text-rose-600'}`}>
             {dbIntegrity.ok ? 'سليمة ✓ (OK)' : dbIntegrity.detail}
           </span>

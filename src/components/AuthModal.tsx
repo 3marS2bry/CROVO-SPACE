@@ -1,32 +1,171 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Lock, Mail, Sparkles, User, X } from 'lucide-react';
 import { api } from '../utils/api';
+import {
+  getFirebaseIdToken,
+  launchInstantGoogleChooser,
+  registerWithEmailCloud,
+  signInWithEmailCloud,
+} from '../utils/cloudStore';
 import { useAuth } from '../context/AuthContext';
 
+const GoogleMark: React.FC = () => (
+  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+    <path
+      fill="#4285F4"
+      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+    />
+    <path
+      fill="#34A853"
+      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+    />
+    <path
+      fill="#FBBC05"
+      d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+    />
+    <path
+      fill="#EA4335"
+      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+    />
+  </svg>
+);
+
 export const AuthModal: React.FC = () => {
-  const { isAuthModalOpen, authPromptReason, closeAuthModal, consumePendingAction } = useAuth();
+  const { isAuthModalOpen, authPromptReason, closeAuthModal, consumePendingAction, loginWithGoogle } =
+    useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('register');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [grade, setGrade] = useState<'bac1' | 'bac2'>('bac1');
   const [busy, setBusy] = useState(false);
+  const [googleBusy, setGoogleBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const consumeRef = useRef(consumePendingAction);
+  const gradeRef = useRef(grade);
+  consumeRef.current = consumePendingAction;
+  gradeRef.current = grade;
+
+  useEffect(() => {
+    if (!isAuthModalOpen) return;
+    return launchInstantGoogleChooser({
+      preferredGrade: gradeRef.current,
+      onSignedIn: (cloudUser) => {
+        consumeRef.current(cloudUser);
+      },
+    });
+  }, [isAuthModalOpen]);
 
   if (!isAuthModalOpen) return null;
 
+  const handleGoogleLogin = async () => {
+    if (googleBusy || busy) return;
+    setGoogleBusy(true);
+    setError(null);
+    try {
+      const cloudUser = await loginWithGoogle(grade);
+      consumePendingAction(cloudUser);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'تعذر تسجيل الدخول عبر Google، تأكد من السماح للنوافذ المنبثقة.'
+      );
+    } finally {
+      setGoogleBusy(false);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (busy) return;
+    if (busy || googleBusy) return;
     setBusy(true);
     setError(null);
     try {
       if (mode === 'register') {
-        const res = await api.authRegister({ name, email, password, grade });
-        consumePendingAction(res.user);
+        const cloudUser = await registerWithEmailCloud({ name, email, password, grade });
+        let finalUser = cloudUser;
+        try {
+          const res = await api.authRegister({ name, email, password, grade });
+          finalUser = res.user;
+          if (cloudUser?.serialNumber && cloudUser.serialNumber !== res.user.serialNumber) {
+            const idToken = await getFirebaseIdToken();
+            if (idToken) {
+              const synced = await api.authCloudSync({
+                idToken,
+                name,
+                grade,
+                serialNumber: cloudUser.serialNumber,
+              });
+              finalUser = synced.user;
+            }
+          }
+        } catch (regErr) {
+          if (cloudUser) {
+            const idToken = await getFirebaseIdToken();
+            if (idToken) {
+              const synced = await api.authCloudSync({
+                idToken,
+                name: cloudUser.name,
+                grade,
+                serialNumber: cloudUser.serialNumber,
+              });
+              finalUser = synced.user;
+            }
+          } else {
+            throw regErr;
+          }
+        }
+        if (!finalUser) {
+          throw new Error('تعذر إنشاء الحساب، تأكد من البيانات وجرب تاني.');
+        }
+        consumePendingAction(finalUser);
       } else {
-        const res = await api.authLogin({ email, password });
-        consumePendingAction(res.user);
+        let localRes: { ok: boolean; token: string; user: import('../utils/api').AuthUser } | null = null;
+        let localErr: unknown = null;
+        const [apiOutcome, cloudUser] = await Promise.all([
+          api.authLogin({ email, password }).catch((err) => {
+            localErr = err;
+            return null;
+          }),
+          signInWithEmailCloud({ email, password }),
+        ]);
+        localRes = apiOutcome;
+
+        if (localRes?.user) {
+          let finalUser = localRes.user;
+          if (cloudUser?.serialNumber && cloudUser.serialNumber !== finalUser.serialNumber) {
+            const idToken = await getFirebaseIdToken();
+            if (idToken) {
+              const synced = await api.authCloudSync({
+                idToken,
+                name: finalUser.name,
+                grade: finalUser.grade,
+                serialNumber: cloudUser.serialNumber,
+              }).catch(() => null);
+              if (synced?.user) finalUser = synced.user;
+            }
+          }
+          consumePendingAction(finalUser);
+        } else if (cloudUser) {
+          const idToken = await getFirebaseIdToken();
+          if (idToken) {
+            const synced = await api.authCloudSync({
+              idToken,
+              name: cloudUser.name,
+              grade: cloudUser.grade,
+              serialNumber: cloudUser.serialNumber,
+            });
+            consumePendingAction(synced.user);
+          } else {
+            consumePendingAction(cloudUser);
+          }
+        } else {
+          throw localErr instanceof Error
+            ? localErr
+            : new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+        }
       }
       setPassword('');
     } catch (err) {
@@ -46,7 +185,7 @@ export const AuthModal: React.FC = () => {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md clay-card bg-[#EEF2F7] p-5 sm:p-7 rounded-3xl border border-white/95 shadow-2xl relative text-right animate-modal-pop"
+        className="w-full max-w-md clay-card bg-[#EEF2F7] p-5 sm:p-7 rounded-3xl border border-white/95 shadow-2xl relative text-right animate-modal-pop max-h-[92vh] overflow-y-auto"
       >
         <button
           type="button"
@@ -70,6 +209,9 @@ export const AuthModal: React.FC = () => {
               {authPromptReason}
             </p>
           )}
+          <p className="mt-1 text-xs text-slate-600 font-ios">
+            سجّل حسابك برقم خاص بيك عشان تعليقاتك وطلباتك وإعجاباتك تفضل معاك دايماً.
+          </p>
         </div>
 
         {/* Mode Switcher */}
@@ -120,7 +262,7 @@ export const AuthModal: React.FC = () => {
                   data-testid="auth-name-input"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="مثال: أحمد محمد"
+                  placeholder="مثال: عمر صبري"
                   className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-semibold"
                 />
                 <User className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -191,7 +333,7 @@ export const AuthModal: React.FC = () => {
 
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || googleBusy}
             data-testid="auth-submit-btn"
             className="w-full clay-apple-blue py-3 rounded-2xl text-sm font-black text-white shadow-md disabled:opacity-60 mt-2"
           >
@@ -202,6 +344,27 @@ export const AuthModal: React.FC = () => {
               : 'تسجيل الدخول'}
           </button>
         </form>
+
+        <div className="relative flex items-center justify-center my-3.5">
+          <div className="w-full border-t border-slate-300/60" />
+          <span className="px-2.5 bg-[#EEF2F7] text-[10px] font-bold text-slate-500 font-ios whitespace-nowrap">
+            أو الدخول السريع عبر Google
+          </span>
+          <div className="w-full border-t border-slate-300/60" />
+        </div>
+
+        <button
+          type="button"
+          data-testid="auth-google-btn"
+          disabled={googleBusy || busy}
+          onClick={handleGoogleLogin}
+          className="w-full py-2.5 px-4 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 shadow-sm flex items-center justify-center gap-2.5 text-xs sm:text-sm font-black text-slate-800 font-ios transition-all disabled:opacity-60"
+        >
+          <GoogleMark />
+          <span>
+            {googleBusy ? 'جاري الربط بحساب Google...' : 'المتابعة باستخدام حساب Google'}
+          </span>
+        </button>
       </div>
     </div>
   );

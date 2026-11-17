@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { AcademicGrade, QuestionItem, SectionType } from '../types';
 import { api } from '../utils/api';
+import { getFirebaseUid, saveQuestionReportCloud } from '../utils/cloudStore';
 import confetti from 'canvas-confetti';
 
 interface QuestionCardProps {
@@ -119,6 +120,20 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         questionTitle: question.q,
         description: reportText,
       });
+      const fbUid = getFirebaseUid();
+      if (fbUid && res.reportId) {
+        void saveQuestionReportCloud({
+          id: res.reportId,
+          reporterUid: fbUid,
+          questionKey,
+          grade,
+          section,
+          chapterNum,
+          qIndex: index,
+          questionTitle: question.q,
+          description: reportText.trim() || 'تبليغ عن إجابة غير صحيحة',
+        });
+      }
       setReportMsg({ type: 'ok', text: res.message });
       setReportText('');
       window.setTimeout(() => {

@@ -133,7 +133,7 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
             <div className="flex flex-wrap items-center gap-3 text-[11px] font-bold text-slate-600 font-ios">
               <span className="inline-flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5 text-indigo-500" />
-                تشفير كامل لبيانات المنصة قبل الحفظ
+                حماية وأمان كامل لبيانات حسابك
               </span>
               <span className="inline-flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5 text-purple-500" />

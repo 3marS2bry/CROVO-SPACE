@@ -9,6 +9,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { api } from '../../utils/api';
+import { saveLibraryOverrideCloud } from '../../utils/cloudStore';
 
 interface AdminLibraryTabProps {
   onNotice: (msg: string) => void;
@@ -68,13 +69,26 @@ export const AdminLibraryTab: React.FC<AdminLibraryTabProps> = ({
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.adminCreateLibraryQuestion({
-        grade: grade === 'bac2' ? 'bac2' : 'bac1',
-        section: section === 'py' || section === 'fin' ? section : 'js',
+      const targetGrade: 'bac1' | 'bac2' = grade === 'bac2' ? 'bac2' : 'bac1';
+      const targetSection: 'js' | 'py' | 'fin' = section === 'py' || section === 'fin' ? section : 'js';
+      const created = await api.adminCreateLibraryQuestion({
+        grade: targetGrade,
+        section: targetSection,
         chapterNum: newChapterNum,
         qText: newQText,
         aText: newAText,
         isCode: newIsCode,
+      });
+      void saveLibraryOverrideCloud({
+        id: created.id,
+        grade: targetGrade,
+        section: targetSection,
+        chapterNum: newChapterNum,
+        qIndex: questions.filter((qItem) => qItem.chapterNum === newChapterNum).length,
+        qText: newQText,
+        aText: newAText,
+        isCode: newIsCode,
+        deleted: false,
       });
       setNewQText('');
       setNewAText('');
@@ -91,6 +105,17 @@ export const AdminLibraryTab: React.FC<AdminLibraryTabProps> = ({
     if (!draft) return;
     try {
       await api.adminUpdateLibraryQuestion(item.id, draft);
+      void saveLibraryOverrideCloud({
+        id: item.id,
+        grade: item.grade,
+        section: item.section,
+        chapterNum: item.chapterNum,
+        qIndex: item.qIndex,
+        qText: draft.qText,
+        aText: draft.aText,
+        isCode: draft.isCode,
+        deleted: false,
+      });
       onNotice('تم حفظ تعديل السؤال وتحديث توقيت التعديل.');
       onLibraryChanged();
       loadLibrary();
@@ -99,9 +124,20 @@ export const AdminLibraryTab: React.FC<AdminLibraryTabProps> = ({
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const handleDelete = async (item: LibraryQuestionRow) => {
     try {
-      await api.adminDeleteLibraryQuestion(id);
+      await api.adminDeleteLibraryQuestion(item.id);
+      void saveLibraryOverrideCloud({
+        id: item.id,
+        grade: item.grade,
+        section: item.section,
+        chapterNum: item.chapterNum,
+        qIndex: item.qIndex,
+        qText: item.qText,
+        aText: item.aText,
+        isCode: item.isCode,
+        deleted: true,
+      });
       setConfirmDeleteId(null);
       onNotice('تم حذف السؤال من المكتبة.');
       onLibraryChanged();
@@ -381,7 +417,7 @@ export const AdminLibraryTab: React.FC<AdminLibraryTabProps> = ({
                       <>
                         <button
                           type="button"
-                          onClick={() => handleDelete(item.id)}
+                          onClick={() => handleDelete(item)}
                           className="px-3 py-1.5 rounded-xl bg-rose-600 text-white font-bold"
                         >
                           تأكيد الحذف

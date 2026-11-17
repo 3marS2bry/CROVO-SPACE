@@ -99,6 +99,7 @@ export function createDatabase(dbPath: string): DatabaseSync {
     -- Registered Users & RBAC
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
+      serial_number TEXT,
       name TEXT NOT NULL,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
@@ -135,6 +136,8 @@ export function createDatabase(dbPath: string): DatabaseSync {
       content TEXT NOT NULL,
       avatar_url TEXT,
       attachment_url TEXT,
+      attachment_before_url TEXT,
+      attachment_after_url TEXT,
       contact_phone TEXT,
       show_contact_publicly INTEGER NOT NULL DEFAULT 0,
       is_verified INTEGER NOT NULL DEFAULT 0,
@@ -407,8 +410,11 @@ export function createDatabase(dbPath: string): DatabaseSync {
   `);
 
   // Safe migrations on existing DB columns
+  safeAddColumn(db, 'users', 'serial_number TEXT');
   safeAddColumn(db, 'comments', 'user_id TEXT');
   safeAddColumn(db, 'comments', 'moderation_note TEXT');
+  safeAddColumn(db, 'comments', 'attachment_before_url TEXT');
+  safeAddColumn(db, 'comments', 'attachment_after_url TEXT');
   safeAddColumn(db, 'likes', 'user_id TEXT');
   safeAddColumn(db, 'orders', 'user_id TEXT');
   safeAddColumn(db, 'push_subscriptions', 'user_id TEXT');
@@ -417,6 +423,8 @@ export function createDatabase(dbPath: string): DatabaseSync {
   safeAddColumn(db, 'notification_logs', 'error_detail TEXT');
 
   try {
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_serial_number ON users(serial_number) WHERE serial_number IS NOT NULL`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_analytics_user_created ON analytics_events(user_id, created_at DESC)`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_comments_user ON comments(user_id)`);
     db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_likes_item_user ON likes(item_key, user_id) WHERE user_id IS NOT NULL`);
   } catch {
@@ -456,6 +464,7 @@ export function createDatabase(dbPath: string): DatabaseSync {
     ['admin_whatsapp_display', process.env.ADMIN_WHATSAPP_NUMBER || '201550324450'],
     ['tracking_started_at', nowIso],
     ['phase2_test_cleanup_done', nowIso],
+    ['user_serial_seq', '1000'],
   ];
 
   const insertSetting = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)');
@@ -463,7 +472,57 @@ export function createDatabase(dbPath: string): DatabaseSync {
     insertSetting.run(k, v);
   }
 
+  backfillMissingUserSerialNumbers(db);
+
   return db;
+}
+
+export function allocateNextUserSerial(db: DatabaseSync): string {
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'user_serial_seq'").get() as
+    | { value?: string }
+    | undefined;
+  let seq = Number(row?.value);
+  if (!Number.isFinite(seq) || seq < 1000) {
+    seq = 1000;
+  }
+
+  const maxExisting = db
+    .prepare(
+      `SELECT MAX(CAST(REPLACE(serial_number, 'CRV-', '') AS INTEGER)) as maxNum
+       FROM users
+       WHERE serial_number LIKE 'CRV-%'`
+    )
+    .get() as { maxNum?: number | null } | undefined;
+  if (maxExisting && typeof maxExisting.maxNum === 'number' && maxExisting.maxNum > seq) {
+    seq = maxExisting.maxNum;
+  }
+
+  let candidate = '';
+  do {
+    seq += 1;
+    candidate = `CRV-${seq}`;
+  } while (db.prepare('SELECT 1 FROM users WHERE serial_number = ?').get(candidate));
+
+  setSetting(db, 'user_serial_seq', String(seq));
+  return candidate;
+}
+
+export function backfillMissingUserSerialNumbers(db: DatabaseSync): void {
+  const missing = db
+    .prepare(
+      `SELECT id FROM users
+       WHERE serial_number IS NULL OR trim(serial_number) = ''
+       ORDER BY created_at ASC`
+    )
+    .all() as Array<{ id: string }>;
+
+  if (missing.length === 0) return;
+
+  const updateStmt = db.prepare('UPDATE users SET serial_number = ? WHERE id = ?');
+  for (const row of missing) {
+    const serial = allocateNextUserSerial(db);
+    updateStmt.run(serial, row.id);
+  }
 }
 
 export function getSetting(db: DatabaseSync, key: string): string | null {
@@ -560,21 +619,9 @@ export function getSiteConfig(db: DatabaseSync): PublicSiteConfig {
   };
 }
 
-export function purgeExpiredOrderCredentials(db: DatabaseSync, maxAgeHours = 168): number {
-  const cutoffIso = new Date(Date.now() - maxAgeHours * 60 * 60 * 1000).toISOString();
-  const result = db
-    .prepare(
-      `UPDATE orders
-       SET encrypted_password = NULL,
-           password_iv = NULL,
-           password_auth_tag = NULL,
-           credentials_purged = 1,
-           updated_at = ?
-       WHERE credentials_purged = 0
-         AND (status IN ('completed', 'cancelled') OR created_at < ?)`
-    )
-    .run(new Date().toISOString(), cutoffIso);
-  return Number(result.changes || 0);
+export function purgeExpiredOrderCredentials(_db: DatabaseSync, _maxAgeHours = 168): number {
+  // Never auto-purge orders or credentials; kept permanently until admin explicitly deletes/purges them.
+  return 0;
 }
 
 export function checkDatabaseIntegrity(db: DatabaseSync): { ok: boolean; detail: string } {

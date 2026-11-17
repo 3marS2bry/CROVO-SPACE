@@ -8,7 +8,7 @@ import {
   createDatabase,
   getSiteConfig,
   setSetting,
-  purgeExpiredOrderCredentials,
+  allocateNextUserSerial,
   withTransaction,
   checkDatabaseIntegrity,
   createDatabaseBackup,
@@ -47,9 +47,11 @@ import {
   logAdminAudit,
   type AdminRequestContext,
 } from './server/adminRoutes.ts';
+import { verifyFirebaseIdToken } from './functions/_lib/firebaseJwt.ts';
 
 interface AuthUser {
   id: string;
+  serialNumber: string | null;
   name: string;
   email: string;
   grade: 'bac1' | 'bac2';
@@ -266,7 +268,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       const sessionRow = db
         .prepare(
           `SELECT s.id as sessionId, s.expires_at as expiresAt,
-                  u.id, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason
+                  u.id, u.serial_number as serialNumber, u.name, u.email, u.grade, u.role, u.status, u.suspend_reason as suspendReason
            FROM user_sessions s
            JOIN users u ON u.id = s.user_id
            WHERE s.token_hash = ?`
@@ -276,6 +278,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
             sessionId: string;
             expiresAt: string;
             id: string;
+            serialNumber: string | null;
             name: string;
             email: string;
             grade: 'bac1' | 'bac2';
@@ -289,6 +292,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         if (sessionRow.status === 'active') {
           req.currentUser = {
             id: sessionRow.id,
+            serialNumber: sessionRow.serialNumber || null,
             name: sessionRow.name,
             email: sessionRow.email,
             grade: sessionRow.grade,
@@ -400,7 +404,15 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         userId,
         visitorId
       );
+      db.prepare('UPDATE orders SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL').run(
+        userId,
+        visitorId
+      );
       db.prepare('UPDATE push_subscriptions SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL').run(
+        userId,
+        visitorId
+      );
+      db.prepare('UPDATE analytics_events SET user_id = ? WHERE visitor_id = ? AND user_id IS NULL').run(
         userId,
         visitorId
       );
@@ -471,13 +483,23 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     const id = generateId('usr');
     const nowIso = new Date().toISOString();
     const passHash = hashPassword(password);
+    let serialNumber = '';
 
     withTransaction(db, () => {
+      serialNumber = allocateNextUserSerial(db);
       db.prepare(
-        `INSERT INTO users (id, name, email, password_hash, grade, role, status, last_active_at, created_at)
-         VALUES (?, ?, ?, ?, ?, 'user', 'active', ?, ?)`
-      ).run(id, name, email, passHash, grade, nowIso, nowIso);
+        `INSERT INTO users (id, serial_number, name, email, password_hash, grade, role, status, last_active_at, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'user', 'active', ?, ?)`
+      ).run(id, serialNumber, name, email, passHash, grade, nowIso, nowIso);
       migrateVisitorActivityToUser(req.visitorId!, id);
+      recordAnalyticsEvent(db, {
+        eventType: 'user_register',
+        visitorId: req.visitorId!,
+        userId: id,
+        path: '/auth/register',
+        grade,
+        meta: { serialNumber, email },
+      });
     });
 
     const token = createUserSession(req, res, id);
@@ -486,7 +508,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     res.status(201).json({
       ok: true,
       token,
-      user: { id, name, email, grade, role: 'user', status: 'active' },
+      user: { id, serialNumber, name, email, grade, role: 'user', status: 'active' },
     });
   });
 
@@ -505,10 +527,11 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     }
 
     const userRow = db
-      .prepare('SELECT id, name, email, password_hash, grade, role, status, suspend_reason FROM users WHERE email = ?')
+      .prepare('SELECT id, serial_number, name, email, password_hash, grade, role, status, suspend_reason FROM users WHERE email = ?')
       .get(email) as
       | {
           id: string;
+          serial_number: string | null;
           name: string;
           email: string;
           password_hash: string;
@@ -532,9 +555,23 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     }
 
     const nowIso = new Date().toISOString();
+    let serialNumber = userRow.serial_number;
     withTransaction(db, () => {
-      db.prepare('UPDATE users SET last_active_at = ? WHERE id = ?').run(nowIso, userRow.id);
+      if (!serialNumber) {
+        serialNumber = allocateNextUserSerial(db);
+        db.prepare('UPDATE users SET serial_number = ?, last_active_at = ? WHERE id = ?').run(serialNumber, nowIso, userRow.id);
+      } else {
+        db.prepare('UPDATE users SET last_active_at = ? WHERE id = ?').run(nowIso, userRow.id);
+      }
       migrateVisitorActivityToUser(req.visitorId!, userRow.id);
+      recordAnalyticsEvent(db, {
+        eventType: 'user_login',
+        visitorId: req.visitorId!,
+        userId: userRow.id,
+        path: '/auth/login',
+        grade: userRow.grade,
+        meta: { serialNumber, email: userRow.email },
+      });
     });
 
     const token = createUserSession(req, res, userRow.id);
@@ -545,6 +582,7 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       token,
       user: {
         id: userRow.id,
+        serialNumber,
         name: userRow.name,
         email: userRow.email,
         grade: userRow.grade,
@@ -552,6 +590,150 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         status: userRow.status,
       },
     });
+  });
+
+  app.post('/api/auth/cloud-sync', async (req: RequestWithContext, res: Response) => {
+    const idToken = typeof req.body?.idToken === 'string' ? req.body.idToken.trim() : '';
+    if (!idToken) {
+      res.status(400).json({ error: 'بيانات التحقق مطلوبة.' });
+      return;
+    }
+
+    let fbUser;
+    try {
+      fbUser = await verifyFirebaseIdToken(idToken);
+    } catch {
+      fbUser = null;
+    }
+
+    if (!fbUser || !fbUser.email) {
+      res.status(401).json({ error: 'تعذر التحقق من الحساب. سجل دخول تاني.' });
+      return;
+    }
+
+    const reqGrade = req.body?.grade === 'bac2' ? 'bac2' : req.body?.grade === 'bac1' ? 'bac1' : null;
+    const reqName =
+      typeof req.body?.name === 'string' && req.body.name.trim().length >= 2
+        ? req.body.name.trim().slice(0, 60)
+        : fbUser.name && fbUser.name.length >= 2
+        ? fbUser.name.slice(0, 60)
+        : fbUser.email.split('@')[0] || 'طالب';
+    const reqSerial =
+      typeof req.body?.serialNumber === 'string' && /^CRV-\d{3,10}$/.test(req.body.serialNumber.trim())
+        ? req.body.serialNumber.trim()
+        : null;
+    const isBootstrapAdmin = fbUser.email === '3mars7bry@gmail.com' && fbUser.emailVerified;
+
+    const existingRow = db
+      .prepare('SELECT id, serial_number, name, email, grade, role, status, suspend_reason FROM users WHERE email = ?')
+      .get(fbUser.email) as
+      | {
+          id: string;
+          serial_number: string | null;
+          name: string;
+          email: string;
+          grade: 'bac1' | 'bac2';
+          role: 'user' | 'admin';
+          status: 'active' | 'suspended';
+          suspend_reason: string | null;
+        }
+      | undefined;
+
+    if (existingRow && existingRow.status === 'suspended') {
+      res.status(403).json({
+        error: `تم إيقاف هذا الحساب مؤقتًا: ${existingRow.suspend_reason || 'تواصل مع الإدارة'}.`,
+      });
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    let finalUser: {
+      id: string;
+      serialNumber: string;
+      name: string;
+      email: string;
+      grade: 'bac1' | 'bac2';
+      role: 'user' | 'admin';
+      status: 'active' | 'suspended';
+    };
+
+    withTransaction(db, () => {
+      if (!existingRow) {
+        const id = `fb_${fbUser.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || generateId('usr')}`;
+        const serialConflict = reqSerial
+          ? db.prepare('SELECT id FROM users WHERE serial_number = ?').get(reqSerial)
+          : null;
+        const serialNumber = reqSerial && !serialConflict ? reqSerial : allocateNextUserSerial(db);
+        const role: 'user' | 'admin' = isBootstrapAdmin ? 'admin' : 'user';
+        const grade: 'bac1' | 'bac2' = reqGrade || 'bac1';
+        const placeholderPass = hashPassword(crypto.randomBytes(24).toString('hex'));
+
+        db.prepare(
+          `INSERT INTO users (id, serial_number, name, email, password_hash, grade, role, status, last_active_at, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+        ).run(id, serialNumber, reqName, fbUser.email, placeholderPass, grade, role, nowIso, nowIso);
+
+        migrateVisitorActivityToUser(req.visitorId!, id);
+        recordAnalyticsEvent(db, {
+          eventType: 'user_login',
+          visitorId: req.visitorId!,
+          userId: id,
+          path: '/auth/cloud-sync',
+          grade,
+          meta: { serialNumber, email: fbUser.email },
+        });
+
+        finalUser = { id, serialNumber, name: reqName, email: fbUser.email, grade, role, status: 'active' };
+      } else {
+        const nextRole: 'user' | 'admin' = isBootstrapAdmin ? 'admin' : existingRow.role;
+        const nextGrade: 'bac1' | 'bac2' = reqGrade || existingRow.grade;
+        const nextName =
+          typeof req.body?.name === 'string' && req.body.name.trim().length >= 2
+            ? req.body.name.trim().slice(0, 60)
+            : existingRow.name;
+        let serialNumber = existingRow.serial_number || '';
+        if (reqSerial && reqSerial !== serialNumber) {
+          const serialConflict = db
+            .prepare('SELECT id FROM users WHERE serial_number = ? AND id != ?')
+            .get(reqSerial, existingRow.id);
+          if (!serialConflict) {
+            serialNumber = reqSerial;
+          }
+        }
+        if (!serialNumber) {
+          serialNumber = allocateNextUserSerial(db);
+        }
+
+        db.prepare(
+          'UPDATE users SET serial_number = ?, name = ?, grade = ?, role = ?, last_active_at = ? WHERE id = ?'
+        ).run(serialNumber, nextName, nextGrade, nextRole, nowIso, existingRow.id);
+
+        migrateVisitorActivityToUser(req.visitorId!, existingRow.id);
+        recordAnalyticsEvent(db, {
+          eventType: 'user_login',
+          visitorId: req.visitorId!,
+          userId: existingRow.id,
+          path: '/auth/cloud-sync',
+          grade: nextGrade,
+          meta: { serialNumber, email: existingRow.email },
+        });
+
+        finalUser = {
+          id: existingRow.id,
+          serialNumber,
+          name: nextName,
+          email: existingRow.email,
+          grade: nextGrade,
+          role: nextRole,
+          status: existingRow.status,
+        };
+      }
+    });
+
+    const token = createUserSession(req, res, finalUser!.id);
+    checkpointDatabase(db);
+
+    res.json({ ok: true, token, user: finalUser! });
   });
 
   app.post('/api/auth/logout', (req: Request, res: Response) => {
@@ -576,7 +758,6 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
 
   // 1. Public Config & Countdown
   app.get('/api/config', (_req: Request, res: Response) => {
-    purgeExpiredOrderCredentials(db);
     const config = getSiteConfig(db);
     const nowMs = Date.now();
     const offerActive = isOfferCurrentlyActive(config, nowMs);
@@ -739,6 +920,17 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       return Number(row?.copy_count || 1);
     });
 
+    recordAnalyticsEvent(db, {
+      eventType: 'question_copy',
+      visitorId: req.visitorId!,
+      userId: req.currentUser?.id || null,
+      path: '/#solutions-library',
+      grade,
+      section,
+      chapterNum,
+      meta: { questionKey, questionTitle },
+    });
+
     res.json({ ok: true, questionKey, copyCount });
   });
 
@@ -775,6 +967,17 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         res.status(409).json({ error: 'أنت بلغت عن السؤال ده قبل كده بالفعل، والبلاغ تحت المراجعة.' });
         return;
       }
+
+      recordAnalyticsEvent(db, {
+        eventType: 'question_report',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: '/#solutions-library',
+        grade: input.grade,
+        section: input.section,
+        chapterNum: input.chapterNum,
+        meta: { questionKey: input.questionKey, questionTitle: input.questionTitle },
+      });
 
       res.status(201).json({
         ok: true,
@@ -841,6 +1044,13 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
          last_error = NULL,
          updated_at = excluded.updated_at`
     ).run(id, req.visitorId!, req.currentUser?.id || null, endpoint, p256dh, auth, nowIso, nowIso);
+
+    recordAnalyticsEvent(db, {
+      eventType: 'push_subscribe',
+      visitorId: req.visitorId!,
+      userId: req.currentUser?.id || null,
+      path: '/push',
+    });
 
     checkpointDatabase(db);
     res.status(201).json({ ok: true, subscribed: true });
@@ -913,7 +1123,8 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     const rows = db
       .prepare(
         `SELECT id, visitor_id, user_id, author_name, grade, rating, content, avatar_url, attachment_url,
-                contact_phone, show_contact_publicly, is_verified, status, reports_count, created_at, updated_at
+                attachment_before_url, attachment_after_url, contact_phone, show_contact_publicly,
+                is_verified, status, reports_count, created_at, updated_at
          FROM comments
          WHERE status = 'approved'
          ORDER BY created_at DESC
@@ -951,6 +1162,8 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       const isOwner =
         (req.currentUser && r.user_id && r.user_id === req.currentUser.id) ||
         r.visitor_id === req.visitorId;
+      const beforeUrl = (r.attachment_before_url || r.attachment_url || null) as string | null;
+      const afterUrl = (r.attachment_after_url || null) as string | null;
       return {
         id: r.id,
         authorName: r.author_name,
@@ -958,7 +1171,9 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         rating: r.rating,
         content: r.content,
         avatarUrl: r.avatar_url || null,
-        attachmentUrl: r.attachment_url || null,
+        attachmentUrl: beforeUrl,
+        attachmentBeforeUrl: beforeUrl,
+        attachmentAfterUrl: afterUrl,
         contactPhone: null,
         showContactPublicly: false,
         isVerified: r.is_verified === 1,
@@ -1003,7 +1218,8 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         .get(req.visitorId!, req.currentUser?.id || '');
 
       const avatarUrl = saveUploadedImage(validated.avatarImage);
-      const attachmentUrl = saveUploadedImage(validated.attachmentImage);
+      const attachmentBeforeUrl = saveUploadedImage(validated.attachmentBeforeImage);
+      const attachmentAfterUrl = saveUploadedImage(validated.attachmentAfterImage);
       const id = generateId('cmt');
       const nowIso = new Date().toISOString();
       const isVerified = completedOrder ? 1 : 0;
@@ -1011,9 +1227,10 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       db.prepare(
         `INSERT INTO comments (
           id, visitor_id, user_id, author_name, grade, rating, content,
-          avatar_url, attachment_url, contact_phone, show_contact_publicly,
+          avatar_url, attachment_url, attachment_before_url, attachment_after_url,
+          contact_phone, show_contact_publicly,
           is_verified, status, reports_count, content_hash, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 0, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', 0, ?, ?)`
       ).run(
         id,
         req.visitorId!,
@@ -1023,13 +1240,24 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         validated.rating,
         validated.content,
         avatarUrl,
-        attachmentUrl,
+        attachmentBeforeUrl,
+        attachmentBeforeUrl,
+        attachmentAfterUrl,
         validated.contactPhone,
         validated.showContactPublicly ? 1 : 0,
         isVerified,
         contentHash,
         nowIso
       );
+
+      recordAnalyticsEvent(db, {
+        eventType: 'comment_create',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: '/reviews',
+        grade: validated.grade,
+        meta: { commentId: id, rating: validated.rating },
+      });
 
       checkpointDatabase(db);
 
@@ -1041,7 +1269,9 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
           rating: validated.rating,
           content: validated.content,
           avatarUrl,
-          attachmentUrl,
+          attachmentUrl: attachmentBeforeUrl,
+          attachmentBeforeUrl,
+          attachmentAfterUrl,
           contactPhone: null,
           showContactPublicly: false,
           isVerified: isVerified === 1,
@@ -1108,6 +1338,15 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         id
       );
 
+      recordAnalyticsEvent(db, {
+        eventType: 'comment_edit',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: '/reviews',
+        grade: validated.grade,
+        meta: { commentId: id },
+      });
+
       checkpointDatabase(db);
       res.json({ ok: true, updatedAt: nowIso });
     } catch (err) {
@@ -1134,6 +1373,13 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     }
 
     db.prepare('DELETE FROM comments WHERE id = ?').run(id);
+    recordAnalyticsEvent(db, {
+      eventType: 'comment_delete',
+      visitorId: req.visitorId!,
+      userId: req.currentUser?.id || null,
+      path: '/reviews',
+      meta: { commentId: id },
+    });
     checkpointDatabase(db);
     res.json({ ok: true });
   });
@@ -1173,6 +1419,14 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
           id
         );
         return nextStatus === 'flagged';
+      });
+
+      recordAnalyticsEvent(db, {
+        eventType: 'comment_report',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: '/reviews',
+        meta: { commentId: id, reason },
       });
 
       res.json({
@@ -1279,6 +1533,20 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
           .get(itemKey) as { cnt: number };
 
         return { count: Number(countRow?.cnt || 0), liked };
+      });
+
+      recordAnalyticsEvent(db, {
+        eventType: isToolKey
+          ? result.liked
+            ? 'tool_like'
+            : 'tool_unlike'
+          : result.liked
+          ? 'comment_like'
+          : 'comment_unlike',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: isToolKey ? '/' : '/reviews',
+        meta: { itemKey },
       });
 
       checkpointDatabase(db);
@@ -1476,6 +1744,14 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       return;
     }
 
+    recordAnalyticsEvent(db, {
+      eventType: 'poll_vote',
+      visitorId: req.visitorId!,
+      userId: req.currentUser.id,
+      path: '/#poll-section',
+      meta: { pollId, choice },
+    });
+
     checkpointDatabase(db);
     res.status(201).json(getPollSummary(req.currentUser.id, pollId));
   });
@@ -1575,6 +1851,20 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
         nowIso
       );
 
+      recordAnalyticsEvent(db, {
+        eventType: 'order_create',
+        visitorId: req.visitorId!,
+        userId: req.currentUser?.id || null,
+        path: '/#subscribe-modal',
+        grade: input.grade,
+        meta: {
+          orderCode,
+          platformLabel: pricing.platformLabel,
+          finalPrice: pricing.finalPrice,
+          paymentMethod: input.paymentMethod,
+        },
+      });
+
       checkpointDatabase(db);
 
       res.status(201).json({
@@ -1669,6 +1959,82 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     res.json({ ok: true, username: verifiedAdminName, adminToken: token });
   });
 
+  app.post('/api/admin/firebase-login', async (req: RequestWithContext, res: Response) => {
+    const idToken = typeof req.body?.idToken === 'string' ? req.body.idToken.trim() : '';
+    if (!idToken) {
+      res.status(400).json({ error: 'بيانات التحقق مطلوبة.' });
+      return;
+    }
+
+    let fbUser;
+    try {
+      fbUser = await verifyFirebaseIdToken(idToken);
+    } catch {
+      fbUser = null;
+    }
+
+    if (!fbUser || !fbUser.email || !fbUser.emailVerified) {
+      res.status(401).json({ error: 'تعذر التحقق من حساب الإدارة.' });
+      return;
+    }
+
+    const dbAdmin = db
+      .prepare("SELECT id, email, role, status FROM users WHERE email = ? AND role = 'admin'")
+      .get(fbUser.email) as { id: string; email: string; role: string; status: string } | undefined;
+
+    const isAllowedAdmin =
+      fbUser.email === '3mars7bry@gmail.com' ||
+      Boolean(dbAdmin && dbAdmin.status === 'active');
+
+    if (!isAllowedAdmin) {
+      res.status(403).json({ error: 'الحساب ده مش مصرح له بدخول لوحة الإدارة.' });
+      return;
+    }
+
+    let userId = dbAdmin?.id || '';
+    if (!userId) {
+      const existingByEmail = db
+        .prepare('SELECT id FROM users WHERE email = ?')
+        .get(fbUser.email) as { id: string } | undefined;
+      const nowIso = new Date().toISOString();
+      if (existingByEmail) {
+        db.prepare("UPDATE users SET role = 'admin', status = 'active', last_active_at = ? WHERE id = ?").run(
+          nowIso,
+          existingByEmail.id
+        );
+        userId = existingByEmail.id;
+      } else {
+        userId = `fb_${fbUser.uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || generateId('adm')}`;
+        const serialNumber = allocateNextUserSerial(db);
+        const placeholderPass = hashPassword(crypto.randomBytes(24).toString('hex'));
+        db.prepare(
+          `INSERT INTO users (id, serial_number, name, email, password_hash, grade, role, status, last_active_at, created_at)
+           VALUES (?, ?, ?, ?, ?, 'bac1', 'admin', 'active', ?, ?)`
+        ).run(userId, serialNumber, fbUser.name || 'إدارة الموقع', fbUser.email, placeholderPass, nowIso, nowIso);
+      }
+    }
+
+    const adminToken = signToken(
+      {
+        role: 'admin',
+        username: fbUser.email,
+        exp: Date.now() + 12 * 60 * 60 * 1000,
+      },
+      sessionSecret
+    );
+    const userToken = createUserSession(req, res, userId);
+    res.cookie('crovo_admin', adminToken, buildCookieOptions(req, 12 * 60 * 60 * 1000));
+    logAdminAudit(db, {
+      actorUsername: fbUser.email,
+      action: 'admin_firebase_login',
+      targetType: 'session',
+      ipHash: req.ipHash,
+    });
+    checkpointDatabase(db);
+
+    res.json({ ok: true, username: fbUser.email, adminToken, token: userToken });
+  });
+
   app.post('/api/admin/logout', (req: Request, res: Response) => {
     res.clearCookie('crovo_admin', buildCookieOptions(req, 0));
     res.json({ ok: true });
@@ -1684,10 +2050,14 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
   });
 
   app.get('/api/admin/overview', requireAdmin, (_req: Request, res: Response) => {
-    purgeExpiredOrderCredentials(db);
-
     const orderRows = db
-      .prepare('SELECT * FROM orders ORDER BY created_at DESC LIMIT 200')
+      .prepare(
+        `SELECT o.*, u.serial_number as user_serial_number, u.email as user_email
+         FROM orders o
+         LEFT JOIN users u ON u.id = o.user_id
+         ORDER BY o.created_at DESC
+         LIMIT 200`
+      )
       .all() as Array<Record<string, unknown>>;
 
     const orders = orderRows.map((o) => {
@@ -1715,6 +2085,9 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       return {
         id: o.id,
         orderCode: o.order_code,
+        userId: o.user_id || null,
+        userSerialNumber: o.user_serial_number || null,
+        userEmail: o.user_email || null,
         fullName: o.full_name,
         grade: o.grade,
         platformLabel: o.platform_label,
@@ -1755,23 +2128,29 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
       commentLikesMap.set(lr.item_key, Number(lr.cnt || 0));
     }
 
-    const comments = commentRows.map((c) => ({
-      id: c.id,
-      authorName: c.author_name,
-      grade: c.grade,
-      rating: c.rating,
-      content: c.content,
-      avatarUrl: c.avatar_url || null,
-      attachmentUrl: c.attachment_url || null,
-      contactPhone: c.contact_phone || null,
-      showContactPublicly: c.show_contact_publicly === 1,
-      isVerified: c.is_verified === 1,
-      status: c.status,
-      likesCount: commentLikesMap.get(`comment:${String(c.id)}`) || 0,
-      reportsCount: c.reports_count,
-      reports: reportsByComment.get(String(c.id)) || [],
-      createdAt: c.created_at,
-    }));
+    const comments = commentRows.map((c) => {
+      const beforeUrl = (c.attachment_before_url || c.attachment_url || null) as string | null;
+      const afterUrl = (c.attachment_after_url || null) as string | null;
+      return {
+        id: c.id,
+        authorName: c.author_name,
+        grade: c.grade,
+        rating: c.rating,
+        content: c.content,
+        avatarUrl: c.avatar_url || null,
+        attachmentUrl: beforeUrl,
+        attachmentBeforeUrl: beforeUrl,
+        attachmentAfterUrl: afterUrl,
+        contactPhone: c.contact_phone || null,
+        showContactPublicly: c.show_contact_publicly === 1,
+        isVerified: c.is_verified === 1,
+        status: c.status,
+        likesCount: commentLikesMap.get(`comment:${String(c.id)}`) || 0,
+        reportsCount: c.reports_count,
+        reports: reportsByComment.get(String(c.id)) || [],
+        createdAt: c.created_at,
+      };
+    });
 
     const questionReportRows = db
       .prepare('SELECT * FROM question_reports ORDER BY created_at DESC LIMIT 200')
@@ -1874,8 +2253,8 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     const status = req.body?.status;
     const allowedStatuses = ['new', 'reviewing', 'completed', 'cancelled'];
     const nextStatus = allowedStatuses.includes(status) ? status : existing.status;
-    const purgeCredentials =
-      req.body?.purgeCredentials === true || nextStatus === 'completed' || nextStatus === 'cancelled';
+    // Never auto-purge passwords on completion/cancellation; only purge when admin explicitly passes purgeCredentials: true
+    const purgeCredentials = req.body?.purgeCredentials === true;
     const nowIso = new Date().toISOString();
 
     withTransaction(db, () => {
@@ -1910,6 +2289,33 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
 
     checkpointDatabase(db);
     res.json({ ok: true, status: nextStatus, credentialsPurged: purgeCredentials });
+  });
+
+  app.delete('/api/admin/orders/:id', requireAdmin, (req: AdminRequestContext, res: Response) => {
+    const id = req.params.id;
+    const existing = db.prepare('SELECT id, order_code, full_name FROM orders WHERE id = ?').get(id) as
+      | { id: string; order_code: string; full_name: string }
+      | undefined;
+
+    if (!existing) {
+      res.status(404).json({ error: 'الطلب غير موجود.' });
+      return;
+    }
+
+    withTransaction(db, () => {
+      db.prepare('DELETE FROM orders WHERE id = ?').run(id);
+      logAdminAudit(db, {
+        actorUsername: req.adminUsername || 'admin',
+        action: 'order_delete',
+        targetType: 'order',
+        targetId: id,
+        details: { orderCode: existing.order_code, fullName: existing.full_name },
+        ipHash: req.ipHash,
+      });
+    });
+
+    checkpointDatabase(db);
+    res.json({ ok: true });
   });
 
   app.patch('/api/admin/comments/:id', requireAdmin, (req: AdminRequestContext, res: Response) => {

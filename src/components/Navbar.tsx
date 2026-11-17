@@ -117,11 +117,20 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center gap-1">
               <span
                 data-testid="nav-user-pill"
-                title={user.email}
-                className="inline-flex items-center gap-1 px-1.5 sm:px-2.5 py-1 sm:py-1.5 rounded-full clay-inset text-[9.5px] sm:text-xs font-bold text-indigo-700 font-ios max-w-[54px] sm:max-w-[130px] truncate min-h-[30px] sm:min-h-[38px]"
+                title={`${user.name}${user.serialNumber ? ` · ${user.serialNumber}` : ''} · ${user.email}`}
+                className="inline-flex items-center gap-1 px-1.5 sm:px-2.5 py-1 sm:py-1.5 rounded-full clay-inset text-[9.5px] sm:text-xs font-bold text-indigo-700 font-ios max-w-[96px] sm:max-w-[200px] truncate min-h-[30px] sm:min-h-[38px]"
               >
                 <User className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0 text-indigo-600" />
                 <span className="truncate">{user.name.split(' ')[0]}</span>
+                {user.serialNumber && (
+                  <span
+                    data-testid="nav-user-serial"
+                    dir="ltr"
+                    className="hidden sm:inline-block px-1.5 py-0.5 rounded-md bg-indigo-100/90 text-[10px] font-mono font-black text-indigo-700 shrink-0"
+                  >
+                    {user.serialNumber}
+                  </span>
+                )}
               </span>
               <button
                 type="button"

@@ -15,6 +15,8 @@ import {
 } from 'lucide-react';
 import { WhatsAppIcon } from './SocialIcons';
 import { api, OrderReceipt, PublicConfig } from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import { getFirebaseUid, logCloudActivity, saveOrderMetadataCloud } from '../utils/cloudStore';
 import {
   buildClientWhatsappUrl,
   calculateClientPricing,
@@ -88,6 +90,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   config,
   serverOffsetMs,
 }) => {
+  const { user } = useAuth();
   const activeConfig = config || FALLBACK_CONFIG;
 
   const [step, setStep] = useState<WizardStep>('grade');
@@ -111,7 +114,10 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
-  }, [isOpen]);
+    if (user?.name && !fullName.trim()) {
+      setFullName(user.name);
+    }
+  }, [isOpen, user?.name]);
 
   if (!isOpen) return null;
 
@@ -239,6 +245,24 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
       // Clear raw password input field immediately
       setPlatformPassword('');
       setStep('receipt');
+
+      const fbUid = getFirebaseUid();
+      if (fbUid) {
+        void saveOrderMetadataCloud({
+          order: res.order,
+          authorUid: fbUid,
+          userSerialNumber: user?.serialNumber || null,
+          userEmail: user?.email || null,
+          platformUsername: platformUsername.trim(),
+          credentialsPurged: false,
+        });
+        void logCloudActivity(fbUid, {
+          eventType: 'order_create',
+          label: `طلب اشتراك جديد #${res.order.orderCode}`,
+          path: '/subscribe',
+          detail: `${res.order.platformLabel} (${res.order.finalPrice} ج)`,
+        });
+      }
 
       // Launch WhatsApp Click-to-Chat link directly without window.open popup abuse
       const anchor = document.createElement('a');
@@ -837,7 +861,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               <div className="flex items-start gap-2 text-[11px] text-emerald-700 font-ios leading-relaxed pt-1">
                 <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5 text-emerald-500" />
                 <span>
-                  كلمة السر بتتشفّر بـ AES-256-GCM قبل حفظ الطلب في قاعدة البيانات ومبتتخزنش في المتصفح أو سجلات الخادم وبتتمسح بمجرد انتهاء التنفيذ.
+                  كلمة السر بتتحفظ بتشفير خاص وآمن طوال فترة تنفيذ طلبك فقط ومبتظهرش لأي طرف خارجي وبتتمسح فور انتهاء التنفيذ.
                 </span>
               </div>
             </div>
@@ -1038,7 +1062,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               }}
               className="w-full clay-btn py-2.5 rounded-xl text-xs font-bold text-slate-600 font-ios"
             >
-              إغلاق ومسح الجلسة
+              إغلاق
             </button>
           </div>
         )}

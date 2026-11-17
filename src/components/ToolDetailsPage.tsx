@@ -3,6 +3,8 @@ import { ArrowLeft, Play, ShieldCheck, Zap, Sparkles, Flame, Eye, X, ThumbsUp, M
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
 import { toolVideos as fallbackVideos, toolScreenshots, examSolverFaqs } from '../data/chaptersData';
 import { api, PublicConfig } from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
 import confetti from 'canvas-confetti';
 
 interface ToolDetailsPageProps {
@@ -59,11 +61,16 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
   const safeVideoIdx = activeVideoIdx >= videosList.length ? 0 : activeVideoIdx;
   const activeVideo = videosList[safeVideoIdx] || videosList[0];
 
-  // Real shared DB likes counter synced across Hero & ToolDetailsPage
-  const [likesCount, setLikesCount] = useState<number>(0);
-  const [hasLiked, setHasLiked] = useState<boolean>(false);
+  const { user, isCloudUser } = useAuth();
+  const [cloudLikesCount, setCloudLikesCount] = useState<number>(0);
+  const [cloudHasLiked, setCloudHasLiked] = useState<boolean>(false);
+  const [apiLikesCount, setApiLikesCount] = useState<number>(0);
+  const [apiHasLiked, setApiHasLiked] = useState<boolean>(false);
   const [liking, setLiking] = useState<boolean>(false);
   const [likeError, setLikeError] = useState<string | null>(null);
+
+  const likesCount = Math.max(apiLikesCount, cloudLikesCount);
+  const hasLiked = isCloudUser ? (apiHasLiked || cloudHasLiked) : apiHasLiked;
 
   useEffect(() => {
     let mounted = true;
@@ -71,35 +78,68 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       .getLikes('tool')
       .then((res) => {
         if (!mounted) return;
-        setLikesCount(res.count);
-        setHasLiked(res.liked);
+        setApiLikesCount(res.count);
+        setApiHasLiked(res.liked);
       })
       .catch(() => {});
+
+    const unsubCloud = subscribeToolLikesCloud(
+      isCloudUser ? getFirebaseUid() : null,
+      (state) => {
+        if (!mounted) return;
+        setCloudLikesCount(state.count);
+        setCloudHasLiked(state.liked);
+      }
+    );
 
     const onLikesUpdated = (ev: Event) => {
       const detail = (ev as CustomEvent<{ itemKey: string; count: number; liked: boolean }>).detail;
       if (detail?.itemKey === 'tool') {
-        setLikesCount(detail.count);
-        setHasLiked(detail.liked);
+        setApiLikesCount(detail.count);
+        setApiHasLiked(detail.liked);
       }
     };
     window.addEventListener('crovo:likes-updated', onLikesUpdated);
     return () => {
       mounted = false;
+      unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
-  }, []);
+  }, [isCloudUser, user?.id]);
 
   const handleToggleLike = async () => {
     if (liking) return;
     setLiking(true);
     setLikeError(null);
+    const nextDesired = !hasLiked;
     try {
-      const res = await api.toggleLike('tool', !hasLiked);
-      setLikesCount(res.count);
-      setHasLiked(res.liked);
+      let nextLiked = nextDesired;
+      try {
+        const res = await api.toggleLike('tool', nextDesired);
+        setApiLikesCount(res.count);
+        setApiHasLiked(res.liked);
+        nextLiked = res.liked;
+      } catch (apiErr) {
+        const fbUid = getFirebaseUid();
+        if (!fbUid) throw apiErr;
+      }
 
-      if (res.liked) {
+      const fbUid = getFirebaseUid();
+      if (fbUid) {
+        try {
+          const cloudRes = await toggleToolLikeCloud(fbUid, nextLiked);
+          setCloudLikesCount(cloudRes.count);
+          setCloudHasLiked(cloudRes.liked);
+          nextLiked = cloudRes.liked;
+        } catch {}
+        void logCloudActivity(fbUid, {
+          eventType: nextLiked ? 'tool_like' : 'tool_unlike',
+          label: nextLiked ? 'إعجاب بالأداة' : 'إلغاء الإعجاب بالأداة',
+          path: '/tool',
+        });
+      }
+
+      if (nextLiked) {
         try {
           confetti({
             particleCount: 25,
@@ -254,13 +294,13 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         <div className="text-right max-w-3xl mb-3">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full clay-inset text-indigo-700 text-[11px] font-bold mb-1 font-decorative">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-            <span>الأمان التام وتشفير البيانات لكوكيز ومحاكاة السلوك البشري 100%</span>
+            <span>الأمان التام وحماية الحساب ومحاكاة السلوك البشري 100%</span>
           </div>
           <h2 className="text-base sm:text-xl font-black font-decorative text-slate-900">
             الميكانيزم شغال إزاي؟ (ليه المنصة تحلف إنه أنت؟)
           </h2>
           <p className="text-[11px] sm:text-xs text-slate-600 font-ios mt-0.5 leading-relaxed">
-            مش مجرد سكربت أعمى بيرمي حلول؛ بياناتك بيتم تشفيرها مباشرة لكوكيز جلسة آمنة (Session Cookies) مع محاكاة دقيقة لحركة وتفكير الطالب البشري.
+            مش مجرد سكربت أعمى بيرمي حلول؛ بيانات دخولك بتتحول لجلسة دخول آمنة مع محاكاة دقيقة لحركة وتفكير الطالب البشري.
           </p>
         </div>
 
@@ -272,11 +312,11 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
                 1
               </div>
               <h3 className="text-xs sm:text-sm font-bold font-ios text-slate-900">
-                تشفير البيانات لكوكيز آمنة
+                دخول آمن بدون كشف البيانات
               </h3>
             </div>
             <p className="text-[11px] text-slate-600 font-ios leading-normal">
-              بياناتك بتتشفر مباشرة لكوكيز جلسة مؤقتة (Encrypted Cookies) وتسجل دخول كأنك أنت بالظبط من متصفحك الطبيعي بدون أي حفظ أو كشف لكلمة السر.
+              دخولك بيتأمّن بجلسة مؤقتة وبتسجل دخول كأنك أنت بالظبط من متصفحك الطبيعي بدون أي كشف لكلمة السر.
             </p>
           </div>
 
@@ -304,7 +344,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
               </h3>
             </div>
             <p className="text-[11px] text-slate-600 font-ios leading-normal">
-              الامتحان كله بيتحل بـ 50ج فقط في أقل من 4 دقايق، وبتاخد درجاتك كاملة 100% ورادار المهارات متقفل وأنت مروّق جمجمتك.
+              الامتحان كله بيتحل بـ {config?.qureoOfferPrice ?? 50}ج فقط في أقل من 4 دقايق، وبتاخد درجاتك كاملة 100% ورادار المهارات متقفل وأنت مروّق جمجمتك.
             </p>
           </div>
         </div>

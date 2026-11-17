@@ -289,6 +289,8 @@ export interface ValidatedCommentInput {
   showContactPublicly: boolean;
   avatarImage: ValidatedImageData | null;
   attachmentImage: ValidatedImageData | null;
+  attachmentBeforeImage: ValidatedImageData | null;
+  attachmentAfterImage: ValidatedImageData | null;
 }
 
 const ALLOWED_GRADES = [
@@ -335,7 +337,13 @@ export function validateCommentPayload(raw: Record<string, unknown>): ValidatedC
   }
 
   const avatarImage = raw.avatarDataUrl ? validateBase64Image(raw.avatarDataUrl, 1_000_000) : null;
-  const attachmentImage = raw.attachmentDataUrl ? validateBase64Image(raw.attachmentDataUrl, 1_500_000) : null;
+  const legacyAttachment = raw.attachmentDataUrl ? validateBase64Image(raw.attachmentDataUrl, 1_500_000) : null;
+  const attachmentBeforeImage = raw.attachmentBeforeDataUrl
+    ? validateBase64Image(raw.attachmentBeforeDataUrl, 1_500_000)
+    : legacyAttachment;
+  const attachmentAfterImage = raw.attachmentAfterDataUrl
+    ? validateBase64Image(raw.attachmentAfterDataUrl, 1_500_000)
+    : null;
 
   return {
     authorName,
@@ -345,7 +353,9 @@ export function validateCommentPayload(raw: Record<string, unknown>): ValidatedC
     contactPhone,
     showContactPublicly,
     avatarImage,
-    attachmentImage,
+    attachmentImage: attachmentBeforeImage,
+    attachmentBeforeImage,
+    attachmentAfterImage,
   };
 }
 

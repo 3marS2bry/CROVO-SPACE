@@ -1,11 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { BarChart3, CheckCircle2, Lock, LogIn, ShieldCheck } from 'lucide-react';
 import { api, ApiError, PollState } from '../utils/api';
+import {
+  getFirebaseUid,
+  subscribeActivePollCloud,
+  votePollCloud,
+} from '../utils/cloudStore';
 import { useAuth } from '../context/AuthContext';
 
 export const PollSection: React.FC = () => {
   const { user, openAuthModal } = useAuth();
   const [poll, setPoll] = useState<PollState | null>(null);
+  const [cloudPoll, setCloudPoll] = useState<PollState | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -24,21 +30,51 @@ export const PollSection: React.FC = () => {
 
   useEffect(() => {
     loadPoll();
+    const unsubCloud = subscribeActivePollCloud(getFirebaseUid(), (cp) => {
+      setCloudPoll(cp);
+      setLoading(false);
+    });
     const onAuthChanged = () => {
       loadPoll();
     };
     window.addEventListener('crovo:auth-updated', onAuthChanged);
-    return () => window.removeEventListener('crovo:auth-updated', onAuthChanged);
-  }, [loadPoll]);
+    return () => {
+      unsubCloud();
+      window.removeEventListener('crovo:auth-updated', onAuthChanged);
+    };
+  }, [loadPoll, user?.id]);
+
+  const activePoll: PollState | null = React.useMemo(() => {
+    if (cloudPoll && (!poll || cloudPoll.pollId === poll.pollId)) {
+      const mergedUserChoice = cloudPoll.userChoice || poll?.userChoice || null;
+      if (!poll) return cloudPoll;
+      return cloudPoll.totalVotes >= poll.totalVotes
+        ? { ...cloudPoll, userChoice: mergedUserChoice }
+        : { ...poll, userChoice: mergedUserChoice };
+    }
+    return cloudPoll || poll;
+  }, [cloudPoll, poll]);
 
   const submitVote = useCallback(
     async (choiceKey: string) => {
-      if (!poll || poll.closed || poll.userChoice || submitting) return;
+      if (!activePoll || activePoll.closed || activePoll.userChoice || submitting) return;
       setSubmitting(choiceKey);
       setError(null);
       try {
-        const updated = await api.votePoll(choiceKey, poll.pollId);
-        setPoll(updated);
+        const fbUid = getFirebaseUid();
+        let cloudRes: PollState | null = null;
+        if (fbUid && activePoll.pollId) {
+          cloudRes = await votePollCloud(activePoll.pollId, fbUid, choiceKey);
+        }
+        try {
+          const updated = await api.votePoll(choiceKey, activePoll.pollId);
+          setPoll(updated);
+        } catch (apiErr) {
+          if (!cloudRes) throw apiErr;
+        }
+        if (cloudRes) {
+          setCloudPoll(cloudRes);
+        }
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           openAuthModal(
@@ -55,11 +91,11 @@ export const PollSection: React.FC = () => {
         setSubmitting(null);
       }
     },
-    [poll, submitting, openAuthModal, loadPoll]
+    [activePoll, submitting, openAuthModal, loadPoll]
   );
 
   const handleOptionClick = (choiceKey: string) => {
-    if (!poll || poll.closed || poll.userChoice || submitting) return;
+    if (!activePoll || activePoll.closed || activePoll.userChoice || submitting) return;
     if (!user) {
       openAuthModal(
         'التصويت متاح لأصحاب الحسابات فقط لمنع تكرار الأصوات. سجل دخول أو أنشئ حسابًا في ثواني!',
@@ -67,9 +103,15 @@ export const PollSection: React.FC = () => {
           try {
             const latest = await api.getPoll();
             setPoll(latest);
-            if (!latest.closed && !latest.userChoice) {
-              const updated = await api.votePoll(choiceKey, latest.pollId);
-              setPoll(updated);
+            const targetPoll = cloudPoll || latest;
+            if (!targetPoll.closed && !targetPoll.userChoice) {
+              const fbUid = getFirebaseUid();
+              if (fbUid && targetPoll.pollId) {
+                const cloudRes = await votePollCloud(targetPoll.pollId, fbUid, choiceKey).catch(() => null);
+                if (cloudRes) setCloudPoll(cloudRes);
+              }
+              const updated = await api.votePoll(choiceKey, targetPoll.pollId).catch(() => null);
+              if (updated) setPoll(updated);
             }
           } catch (err) {
             setError(err instanceof Error ? err.message : 'تعذر تسجيل صوتك.');
@@ -82,26 +124,28 @@ export const PollSection: React.FC = () => {
     submitVote(choiceKey);
   };
 
+  const pollToRender = activePoll;
+
   const options =
-    poll?.options && poll.options.length > 0
-      ? poll.options
+    pollToRender?.options && pollToRender.options.length > 0
+      ? pollToRender.options
       : [
           {
             key: 'extend',
             label: 'أيوه، نمد العرض.',
-            count: poll?.extendCount || 0,
-            percent: poll?.extendPercent || 0,
+            count: pollToRender?.extendCount || 0,
+            percent: pollToRender?.extendPercent || 0,
           },
           {
             key: 'enough',
             label: 'لا، العرض كفاية.',
-            count: poll?.enoughCount || 0,
-            percent: poll?.enoughPercent || 0,
+            count: pollToRender?.enoughCount || 0,
+            percent: pollToRender?.enoughPercent || 0,
           },
         ];
 
-  const isClosed = Boolean(poll?.closed);
-  const alreadyVoted = Boolean(poll?.userChoice);
+  const isClosed = Boolean(pollToRender?.closed);
+  const alreadyVoted = Boolean(pollToRender?.userChoice);
 
   return (
     <section
@@ -136,7 +180,7 @@ export const PollSection: React.FC = () => {
             </div>
 
             <h2 className="text-xl sm:text-2xl font-black font-decorative text-slate-900 pt-1">
-              {poll?.question || 'إيه رأيكم نمد العرض؟'}
+              {pollToRender?.question || 'إيه رأيكم نمد العرض؟'}
             </h2>
             <p className="text-xs text-slate-600 font-ios">
               صوت واحد فقط لكل حساب مسجّل — النتائج والنسب المئوية تتحدث مباشرة بشفافية كاملة.
@@ -149,7 +193,7 @@ export const PollSection: React.FC = () => {
               className="px-3.5 py-1.5 rounded-2xl clay-inset text-xs font-bold text-slate-700 font-mono tabular-nums"
             >
               إجمالي الأصوات:{' '}
-              <span className="text-indigo-700 font-black">{poll ? poll.totalVotes : 0}</span>
+              <span className="text-indigo-700 font-black">{pollToRender ? pollToRender.totalVotes : 0}</span>
             </div>
           </div>
         </div>
@@ -183,7 +227,7 @@ export const PollSection: React.FC = () => {
           </div>
         )}
 
-        {loading && !poll ? (
+        {loading && !pollToRender ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             <div className="h-24 rounded-2xl clay-inset animate-pulse" />
             <div className="h-24 rounded-2xl clay-inset animate-pulse" />
@@ -193,7 +237,7 @@ export const PollSection: React.FC = () => {
             {/* Choice Cards */}
             <div className={`grid grid-cols-1 ${options.length >= 2 ? 'sm:grid-cols-2' : ''} gap-3.5`}>
               {options.map((opt, idx) => {
-                const isSelected = poll?.userChoice === opt.key;
+                const isSelected = pollToRender?.userChoice === opt.key;
                 const isClickable = !isClosed && !alreadyVoted && !submitting;
                 const accentBar =
                   idx % 2 === 0
@@ -256,7 +300,7 @@ export const PollSection: React.FC = () => {
             </div>
 
             {/* Summary Distribution Chart Strip */}
-            {poll && poll.totalVotes > 0 && (
+            {pollToRender && pollToRender.totalVotes > 0 && (
               <div className="clay-inset p-3 rounded-2xl space-y-1.5">
                 <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 font-ios">
                   <span>توزيع النسب المئوية المباشر</span>
@@ -287,7 +331,7 @@ export const PollSection: React.FC = () => {
             className="mt-4 p-3 rounded-2xl bg-indigo-50/90 border border-indigo-200/80 flex items-center gap-2 text-xs font-bold text-indigo-800 font-ios"
           >
             <CheckCircle2 className="w-4 h-4 text-indigo-600 shrink-0" />
-            <span>سبق لك التصويت في هذا الاستفتاء ✓ صوتك محفوظ ومرتبط بحسابك ولا يمكن تكراره.</span>
+            <span>تم تسجيل صوتك بنجاح ومرتبط بحسابك ولا يمكن تكراره.</span>
           </div>
         )}
       </div>

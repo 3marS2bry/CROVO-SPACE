@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { ArrowDown, Zap, CheckCircle2, ShieldCheck, Sparkles, BookOpen, ThumbsUp } from 'lucide-react';
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
 import { api } from '../utils/api';
+import { useAuth } from '../context/AuthContext';
+import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
 
 interface HeroSectionProps {
   onScrollToLibrary: () => void;
@@ -14,10 +16,16 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   onOpenToolDetails,
   onOpenSubscription,
 }) => {
-  const [likesCount, setLikesCount] = useState(0);
-  const [hasLiked, setHasLiked] = useState(false);
+  const { user, isCloudUser } = useAuth();
+  const [cloudLikesCount, setCloudLikesCount] = useState(0);
+  const [cloudHasLiked, setCloudHasLiked] = useState(false);
+  const [apiLikesCount, setApiLikesCount] = useState(0);
+  const [apiHasLiked, setApiHasLiked] = useState(false);
   const [liking, setLiking] = useState(false);
   const [browseBurst, setBrowseBurst] = useState(false);
+
+  const likesCount = Math.max(apiLikesCount, cloudLikesCount);
+  const hasLiked = isCloudUser ? (apiHasLiked || cloudHasLiked) : apiHasLiked;
 
   useEffect(() => {
     let mounted = true;
@@ -25,24 +33,34 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
       .getLikes('tool')
       .then((res) => {
         if (!mounted) return;
-        setLikesCount(res.count);
-        setHasLiked(res.liked);
+        setApiLikesCount(res.count);
+        setApiHasLiked(res.liked);
       })
       .catch(() => {});
+
+    const unsubCloud = subscribeToolLikesCloud(
+      isCloudUser ? getFirebaseUid() : null,
+      (state) => {
+        if (!mounted) return;
+        setCloudLikesCount(state.count);
+        setCloudHasLiked(state.liked);
+      }
+    );
 
     const onLikesUpdated = (ev: Event) => {
       const detail = (ev as CustomEvent<{ itemKey: string; count: number; liked: boolean }>).detail;
       if (detail?.itemKey === 'tool') {
-        setLikesCount(detail.count);
-        setHasLiked(detail.liked);
+        setApiLikesCount(detail.count);
+        setApiHasLiked(detail.liked);
       }
     };
     window.addEventListener('crovo:likes-updated', onLikesUpdated);
     return () => {
       mounted = false;
+      unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
-  }, []);
+  }, [isCloudUser, user?.id]);
 
   // Finite attention bursts for "تصفح مكتبة الحلول المجانية" (plays 4 times spaced apart, then rests naturally)
   useEffect(() => {
@@ -78,12 +96,34 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   const handleToggleLike = async () => {
     if (liking) return;
     setLiking(true);
+    const nextDesired = !hasLiked;
     try {
-      const res = await api.toggleLike('tool', !hasLiked);
-      setLikesCount(res.count);
-      setHasLiked(res.liked);
+      const res = await api.toggleLike('tool', nextDesired);
+      setApiLikesCount(res.count);
+      setApiHasLiked(res.liked);
+      const fbUid = getFirebaseUid();
+      if (fbUid) {
+        toggleToolLikeCloud(fbUid, res.liked)
+          .then((cloudRes) => {
+            setCloudLikesCount(cloudRes.count);
+            setCloudHasLiked(cloudRes.liked);
+          })
+          .catch(() => {});
+        void logCloudActivity(fbUid, {
+          eventType: res.liked ? 'tool_like' : 'tool_unlike',
+          label: res.liked ? 'إعجاب بالأداة' : 'إلغاء الإعجاب بالأداة',
+          path: '/',
+        });
+      }
     } catch {
-      // ignore transient error
+      const fbUid = getFirebaseUid();
+      if (fbUid) {
+        try {
+          const cloudRes = await toggleToolLikeCloud(fbUid, nextDesired);
+          setCloudLikesCount(cloudRes.count);
+          setCloudHasLiked(cloudRes.liked);
+        } catch {}
+      }
     } finally {
       setLiking(false);
     }

@@ -1,0 +1,806 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered student or admin profile stored privately per user UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128,
+          "description": "Firebase Authentication UID matching document ID."
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80,
+          "description": "Display name of the student."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160,
+          "description": "Verified account email address (PII - owner and admin only)."
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["bac1", "bac2"],
+          "maxLength": 10,
+          "description": "Academic year (bac1 or bac2)."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "admin"],
+          "maxLength": 10,
+          "description": "RBAC role; non-admin users may only register with role 'user'."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "suspended"],
+          "maxLength": 15,
+          "description": "Account status."
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500,
+          "description": "Optional profile avatar URL from OAuth provider."
+        },
+        "serialNumber": {
+          "type": "string",
+          "pattern": "^[A-Z0-9\\-]+$",
+          "maxLength": 32,
+          "description": "Unique human-readable user serial number (e.g. CRV-1001)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of user registration."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last profile update."
+        }
+      },
+      "required": ["uid", "name", "email", "grade", "role", "status", "createdAt", "updatedAt"]
+    },
+    "AdminMarker": {
+      "title": "AdminMarker",
+      "description": "Trusted administrator lookup document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    },
+    "Comment": {
+      "title": "Comment",
+      "description": "Public student review/comment with optional avatar and before/after solution images.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 80
+        },
+        "authorUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "authorName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "grade": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "rating": {
+          "type": "integer"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 600
+        },
+        "avatarDataUrl": {
+          "type": "string",
+          "maxLength": 120000,
+          "description": "Compressed data URL for optional avatar."
+        },
+        "attachmentBeforeDataUrl": {
+          "type": "string",
+          "maxLength": 320000,
+          "description": "Compressed data URL for 'before solution' screenshot."
+        },
+        "attachmentAfterDataUrl": {
+          "type": "string",
+          "maxLength": 320000,
+          "description": "Compressed data URL for 'after solution' screenshot."
+        },
+        "isVerified": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["approved", "hidden", "flagged"],
+          "maxLength": 16
+        },
+        "likesCount": {
+          "type": "integer"
+        },
+        "reportsCount": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "authorUid", "authorName", "grade", "rating", "content", "isVerified", "status", "likesCount", "reportsCount", "createdAt"]
+    },
+    "CommentPrivateContact": {
+      "title": "CommentPrivateContact",
+      "description": "Optional verification phone number isolated from public comment reads (PII).",
+      "type": "object",
+      "properties": {
+        "commentId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 80
+        },
+        "authorUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "contactPhone": {
+          "type": "string",
+          "pattern": "^\\+?\\d{8,15}$",
+          "minLength": 8,
+          "maxLength": 16
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["commentId", "authorUid", "contactPhone", "createdAt"]
+    },
+    "CommentLike": {
+      "title": "CommentLike",
+      "description": "One-per-user like marker on a comment, coupled atomically with Comment.likesCount.",
+      "type": "object",
+      "properties": {
+        "commentId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 80
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["commentId", "userId", "createdAt"]
+    },
+    "CommentReport": {
+      "title": "CommentReport",
+      "description": "One-per-user abuse report on a comment.",
+      "type": "object",
+      "properties": {
+        "commentId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 80
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["commentId", "userId", "reason", "createdAt"]
+    },
+    "ToolCounter": {
+      "title": "ToolCounter",
+      "description": "Public aggregate counter document (e.g. tool likes count).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 64
+        },
+        "count": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "count", "updatedAt"]
+    },
+    "ToolLike": {
+      "title": "ToolLike",
+      "description": "One-per-user like marker for the CROVO automation tool.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["userId", "createdAt"]
+    },
+    "UserActivity": {
+      "title": "UserActivity",
+      "description": "Immutable per-user site activity entry visible to the user and admins.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 80
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 128
+        },
+        "eventType": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 48
+        },
+        "label": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "path": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "detail": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "eventType", "label", "createdAt"]
+    },
+    "SiteConfigPublic": {
+      "title": "SiteConfigPublic",
+      "description": "Public site pricing, countdown, promo banner, library ad, notifications schedule, tool services, and tool videos synced across deployments.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "enum": ["public"],
+          "maxLength": 16
+        },
+        "qureoOldPrice": {
+          "type": "integer"
+        },
+        "qureoOfferPrice": {
+          "type": "integer"
+        },
+        "bundleOldPrice": {
+          "type": "integer"
+        },
+        "bundleOfferPrice": {
+          "type": "integer"
+        },
+        "offerDurationHours": {
+          "type": "number"
+        },
+        "offerEndsAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "whatsappNumber": {
+          "type": "string",
+          "maxLength": 24
+        },
+        "offerText": {
+          "type": "string",
+          "maxLength": 400
+        },
+        "notificationsEnabled": {
+          "type": "boolean"
+        },
+        "notificationsIntervalDays": {
+          "type": "integer"
+        },
+        "promoBanner": {
+          "type": "object"
+        },
+        "libraryAd": {
+          "type": "object"
+        },
+        "toolServices": {
+          "type": "array"
+        },
+        "toolVideos": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "qureoOldPrice",
+        "qureoOfferPrice",
+        "bundleOldPrice",
+        "bundleOfferPrice",
+        "offerDurationHours",
+        "offerEndsAt",
+        "whatsappNumber",
+        "notificationsEnabled",
+        "notificationsIntervalDays",
+        "updatedAt"
+      ]
+    },
+    "Poll": {
+      "title": "Poll",
+      "description": "Interactive community poll with options and aggregate vote total.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "question": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 240
+        },
+        "options": {
+          "type": "array"
+        },
+        "totalVotes": {
+          "type": "integer"
+        },
+        "isOpen": {
+          "type": "boolean"
+        },
+        "startsAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "endsAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "question", "options", "totalVotes", "isOpen", "createdAt", "updatedAt"]
+    },
+    "PollVote": {
+      "title": "PollVote",
+      "description": "Single vote record per user per poll.",
+      "type": "object",
+      "properties": {
+        "pollId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 80
+        },
+        "userId": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "choice": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["pollId", "userId", "choice", "createdAt"]
+    },
+    "OrderRecord": {
+      "title": "OrderRecord",
+      "description": "Persistent subscription order metadata without plaintext platform credentials.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "minLength": 4,
+          "maxLength": 80
+        },
+        "orderCode": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 40
+        },
+        "authorUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "userSerialNumber": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "userEmail": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "fullName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["bac1", "bac2"],
+          "maxLength": 10
+        },
+        "platformLabel": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "sectionDetails": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "platformUsername": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "credentialsPurged": {
+          "type": "boolean"
+        },
+        "oldPrice": {
+          "type": "integer"
+        },
+        "finalPrice": {
+          "type": "integer"
+        },
+        "offerApplied": {
+          "type": "boolean"
+        },
+        "paymentMethod": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["new", "reviewing", "completed", "cancelled"],
+          "maxLength": 20
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "orderCode",
+        "authorUid",
+        "fullName",
+        "grade",
+        "platformLabel",
+        "sectionDetails",
+        "platformUsername",
+        "credentialsPurged",
+        "oldPrice",
+        "finalPrice",
+        "offerApplied",
+        "paymentMethod",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "QuestionStat": {
+      "title": "QuestionStat",
+      "description": "Cumulative copy count per library question.",
+      "type": "object",
+      "properties": {
+        "questionKey": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["bac1", "bac2"],
+          "maxLength": 10
+        },
+        "section": {
+          "type": "string",
+          "enum": ["js", "py", "fin"],
+          "maxLength": 10
+        },
+        "chapterNum": {
+          "type": "integer"
+        },
+        "qIndex": {
+          "type": "integer"
+        },
+        "questionTitle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "copyCount": {
+          "type": "integer"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["questionKey", "grade", "section", "chapterNum", "qIndex", "questionTitle", "copyCount", "updatedAt"]
+    },
+    "QuestionReport": {
+      "title": "QuestionReport",
+      "description": "User-submitted report on an incorrect or unclear library question.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 80
+        },
+        "reporterUid": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "questionKey": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 128
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["bac1", "bac2"],
+          "maxLength": 10
+        },
+        "section": {
+          "type": "string",
+          "enum": ["js", "py", "fin"],
+          "maxLength": 10
+        },
+        "chapterNum": {
+          "type": "integer"
+        },
+        "qIndex": {
+          "type": "integer"
+        },
+        "questionTitle": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "description": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 600
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "reviewed", "resolved", "dismissed"],
+          "maxLength": 20
+        },
+        "adminNote": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "reporterUid",
+        "questionKey",
+        "grade",
+        "section",
+        "chapterNum",
+        "qIndex",
+        "questionTitle",
+        "description",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LibraryOverride": {
+      "title": "LibraryOverride",
+      "description": "Admin edits, additions, or removals for curriculum library questions.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "maxLength": 80
+        },
+        "grade": {
+          "type": "string",
+          "enum": ["bac1", "bac2"],
+          "maxLength": 10
+        },
+        "section": {
+          "type": "string",
+          "enum": ["js", "py", "fin"],
+          "maxLength": 10
+        },
+        "chapterNum": {
+          "type": "integer"
+        },
+        "qIndex": {
+          "type": "integer"
+        },
+        "qText": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "aText": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000
+        },
+        "isCode": {
+          "type": "boolean"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "grade", "section", "chapterNum", "qIndex", "qText", "aText", "isCode", "deleted", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private student/user account profile isolated to owner or admin."
+    },
+    "/users/{userId}/activities/{activityId}": {
+      "schema": { "$ref": "#/entities/UserActivity" },
+      "description": "Per-user chronological site activity history."
+    },
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Read-only admin authorization lookup collection."
+    },
+    "/comments/{commentId}": {
+      "schema": { "$ref": "#/entities/Comment" },
+      "description": "Public reviews with optional before/after solution images and atomic like/report counters."
+    },
+    "/comments/{commentId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/CommentPrivateContact" },
+      "description": "Isolated optional contact phone number visible only to author and admin."
+    },
+    "/comments/{commentId}/likes/{userId}": {
+      "schema": { "$ref": "#/entities/CommentLike" },
+      "description": "Per-user comment like subcollection enforcing single-like-per-user atomically."
+    },
+    "/comments/{commentId}/reports/{userId}": {
+      "schema": { "$ref": "#/entities/CommentReport" },
+      "description": "Per-user comment report subcollection."
+    },
+    "/counters/{counterId}": {
+      "schema": { "$ref": "#/entities/ToolCounter" },
+      "description": "Aggregate tool likes and user serial counters."
+    },
+    "/tool_likes/{userId}": {
+      "schema": { "$ref": "#/entities/ToolLike" },
+      "description": "Per-user like marker for the CROVO tool."
+    },
+    "/site_config/{docId}": {
+      "schema": { "$ref": "#/entities/SiteConfigPublic" },
+      "description": "Public site configuration synced across deployments."
+    },
+    "/polls/{pollId}": {
+      "schema": { "$ref": "#/entities/Poll" },
+      "description": "Community polls synced across deployments."
+    },
+    "/polls/{pollId}/votes/{userId}": {
+      "schema": { "$ref": "#/entities/PollVote" },
+      "description": "One-per-user poll votes."
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/OrderRecord" },
+      "description": "Persistent subscription order history without plaintext credentials."
+    },
+    "/question_stats/{questionKey}": {
+      "schema": { "$ref": "#/entities/QuestionStat" },
+      "description": "Cumulative copy count statistics per question."
+    },
+    "/question_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/QuestionReport" },
+      "description": "Student-submitted question error reports."
+    },
+    "/library_overrides/{itemId}": {
+      "schema": { "$ref": "#/entities/LibraryOverride" },
+      "description": "Admin modifications to library questions."
+    }
+  }
+}
