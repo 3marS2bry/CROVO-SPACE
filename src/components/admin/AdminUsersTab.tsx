@@ -1,11 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Ban, CheckCircle2, Eye, Search, Shield, UserCheck, Users, X } from 'lucide-react';
 import { AdminUserItem, api } from '../../utils/api';
-import {
-  fetchUserActivitiesCloud,
-  listAllUsersAdminCloud,
-  updateUserAdminCloud,
-} from '../../utils/cloudStore';
 
 interface AdminUsersTabProps {
   onNotice: (msg: string) => void;
@@ -27,71 +22,11 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     ReturnType<typeof api.adminUserActivity>
   > | null>(null);
 
-  const [apiIdByUserId, setApiIdByUserId] = useState<Record<string, string>>({});
-
   const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
-      const [apiRes, cloudList] = await Promise.all([
-        api.adminUsers({ q, role: roleFilter, status: statusFilter }).catch(() => ({ users: [] as AdminUserItem[] })),
-        listAllUsersAdminCloud().catch(() => [] as AdminUserItem[]),
-      ]);
-
-      const mergedMap = new Map<string, AdminUserItem>();
-      const emailIndex = new Map<string, string>();
-      const nextApiIdMap: Record<string, string> = {};
-
-      for (const cu of cloudList) {
-        mergedMap.set(cu.id, cu);
-        if (cu.email) emailIndex.set(cu.email.toLowerCase(), cu.id);
-      }
-
-      for (const au of apiRes.users) {
-        const rawFbKey = au.id.startsWith('fb_') ? au.id.slice(3) : null;
-        const matchByEmailKey = au.email ? emailIndex.get(au.email.toLowerCase()) : undefined;
-        const targetKey = mergedMap.has(au.id)
-          ? au.id
-          : rawFbKey && mergedMap.has(rawFbKey)
-          ? rawFbKey
-          : matchByEmailKey;
-        if (targetKey) {
-          const cu = mergedMap.get(targetKey)!;
-          nextApiIdMap[targetKey] = au.id;
-          mergedMap.set(targetKey, {
-            ...cu,
-            serialNumber: cu.serialNumber || au.serialNumber || null,
-            name: au.name || cu.name,
-            role: cu.role === 'admin' || au.role === 'admin' ? 'admin' : 'user',
-            status: au.status === 'suspended' || cu.status === 'suspended' ? 'suspended' : 'active',
-            suspendReason: au.suspendReason || cu.suspendReason || null,
-            reviewsCount: Math.max(au.reviewsCount, cu.reviewsCount),
-            votesCount: Math.max(au.votesCount, cu.votesCount),
-            completedOrdersCount: Math.max(au.completedOrdersCount, cu.completedOrdersCount),
-            lastActiveAt: au.lastActiveAt || cu.lastActiveAt,
-          });
-        } else {
-          nextApiIdMap[au.id] = au.id;
-          mergedMap.set(au.id, au);
-        }
-      }
-
-      setApiIdByUserId(nextApiIdMap);
-
-      const needle = q.trim().toLowerCase();
-      const merged = Array.from(mergedMap.values())
-        .filter((u) => {
-          if (roleFilter !== 'all' && u.role !== roleFilter) return false;
-          if (statusFilter !== 'all' && u.status !== statusFilter) return false;
-          if (!needle) return true;
-          return (
-            u.name.toLowerCase().includes(needle) ||
-            u.email.toLowerCase().includes(needle) ||
-            (u.serialNumber || '').toLowerCase().includes(needle)
-          );
-        })
-        .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-
-      setUsers(merged);
+      const apiRes = await api.adminUsers({ q, role: roleFilter, status: statusFilter });
+      setUsers(apiRes.users);
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر تحميل المستخدمين.');
     } finally {
@@ -113,9 +48,7 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
       return;
     }
     try {
-      const apiTargetId = apiIdByUserId[user.id] || user.id;
-      await updateUserAdminCloud(user.id, { status: 'active' });
-      await api.adminUpdateUser(apiTargetId, { status: 'active' }).catch(() => {});
+      await api.adminUpdateUser(user.id, { status: 'active' });
       onNotice(`تم تفعيل حساب ${user.name} بنجاح.`);
       loadUsers();
     } catch (err) {
@@ -127,14 +60,10 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     e.preventDefault();
     if (!suspendingUser) return;
     try {
-      const apiTargetId = apiIdByUserId[suspendingUser.id] || suspendingUser.id;
-      await updateUserAdminCloud(suspendingUser.id, { status: 'suspended' });
-      await api
-        .adminUpdateUser(apiTargetId, {
-          status: 'suspended',
-          suspendReason: suspendReason.trim() || 'مخالفة شروط الاستخدام',
-        })
-        .catch(() => {});
+      await api.adminUpdateUser(suspendingUser.id, {
+        status: 'suspended',
+        suspendReason: suspendReason.trim() || 'مخالفة شروط الاستخدام',
+      });
       onNotice(`تم إيقاف حساب ${suspendingUser.name}.`);
       setSuspendingUser(null);
       loadUsers();
@@ -146,11 +75,7 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
   const handleConfirmRoleChange = async () => {
     if (!confirmRoleUser) return;
     try {
-      const apiTargetId = apiIdByUserId[confirmRoleUser.user.id] || confirmRoleUser.user.id;
-      await updateUserAdminCloud(confirmRoleUser.user.id, { role: confirmRoleUser.nextRole });
-      await api
-        .adminUpdateUser(apiTargetId, { role: confirmRoleUser.nextRole })
-        .catch(() => {});
+      await api.adminUpdateUser(confirmRoleUser.user.id, { role: confirmRoleUser.nextRole });
       onNotice(`تم تعديل صلاحية ${confirmRoleUser.user.name}.`);
       setConfirmRoleUser(null);
       loadUsers();
@@ -161,30 +86,8 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
 
   const openActivity = async (id: string) => {
     try {
-      const apiTargetId = apiIdByUserId[id] || id;
-      const [apiRes, cloudActs] = await Promise.all([
-        api.adminUserActivity(apiTargetId).catch(() => null),
-        fetchUserActivitiesCloud(id).catch(() => []),
-      ]);
-      const baseUser = apiRes?.user || users.find((u) => u.id === id);
-      if (!baseUser) {
-        onNotice('تعذر العثور على بيانات المستخدم.');
-        return;
-      }
-      const combinedMap = new Map<string, NonNullable<typeof apiRes>['activities'][number]>();
-      for (const ca of cloudActs) combinedMap.set(ca.id, ca);
-      for (const aa of apiRes?.activities || []) combinedMap.set(aa.id, aa);
-
-      setActivityModal({
-        user: baseUser,
-        reviews: apiRes?.reviews || [],
-        votes: apiRes?.votes || [],
-        orders: apiRes?.orders || [],
-        toolRuns: apiRes?.toolRuns || [],
-        activities: Array.from(combinedMap.values()).sort(
-          (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
-        ),
-      });
+      const apiRes = await api.adminUserActivity(id);
+      setActivityModal(apiRes);
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر تحميل نشاط المستخدم.');
     }

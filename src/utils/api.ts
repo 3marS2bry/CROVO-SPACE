@@ -1,9 +1,9 @@
 import type { ClientPricingConfig, OrderGrade, PlatformChoice, QureoSectionChoice } from './rules';
 import type { AcademicGrade, Chapter, SectionType } from '../types';
+import { getFirebaseIdToken } from './cloudStore';
 
 const VISITOR_TOKEN_STORAGE_KEY = 'crovo_visitor_token';
-const USER_TOKEN_STORAGE_KEY = 'crovo_user_token';
-const ADMIN_TOKEN_STORAGE_KEY = 'crovo_admin_token';
+const OFFLINE_QUEUE_STORAGE_KEY = 'crovo_offline_queue';
 
 export interface AuthUser {
   id: string;
@@ -199,6 +199,15 @@ export interface AdminAnalyticsResponse {
   }>;
 }
 
+export interface BootstrapResponse {
+  config: PublicConfig;
+  likes: LikesState;
+  library: { grade: AcademicGrade; section: SectionType; chapters: Chapter[] };
+  poll: PollState;
+  comments: CommentItem[];
+  questionStats: QuestionStatsResponse;
+}
+
 export interface AdminUserItem {
   id: string;
   serialNumber?: string | null;
@@ -260,20 +269,83 @@ function writeStorage(key: string, value: string | null): void {
   }
 }
 
-export function setStoredUserToken(token: string | null): void {
-  writeStorage(USER_TOKEN_STORAGE_KEY, token);
-}
-
-export function getStoredUserToken(): string | null {
-  return readStorage(USER_TOKEN_STORAGE_KEY);
-}
-
-export function setStoredAdminToken(token: string | null): void {
-  writeStorage(ADMIN_TOKEN_STORAGE_KEY, token);
-}
-
 export function getStoredVisitorToken(): string | null {
   return readStorage(VISITOR_TOKEN_STORAGE_KEY);
+}
+
+interface QueuedTelemetryEvent {
+  url: string;
+  body: string;
+  queuedAt: number;
+}
+
+function readOfflineQueue(): QueuedTelemetryEvent[] {
+  const raw = readStorage(OFFLINE_QUEUE_STORAGE_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.slice(-30) : [];
+  } catch {
+    return [];
+  }
+}
+
+function enqueueOfflineEvent(url: string, body: string): void {
+  const queue = readOfflineQueue();
+  queue.push({ url, body, queuedAt: Date.now() });
+  writeStorage(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(queue.slice(-30)));
+}
+
+let flushingQueue = false;
+async function flushOfflineQueue(): Promise<void> {
+  if (flushingQueue || (typeof navigator !== 'undefined' && !navigator.onLine)) return;
+  const queue = readOfflineQueue();
+  if (queue.length === 0) return;
+  flushingQueue = true;
+  try {
+    const remaining: QueuedTelemetryEvent[] = [];
+    const idToken = await getFirebaseIdToken();
+    const visitorToken = readStorage(VISITOR_TOKEN_STORAGE_KEY);
+    for (let i = 0; i < queue.length; i += 1) {
+      const item = queue[i];
+      if (Date.now() - item.queuedAt > 7 * 86_400_000) continue;
+      try {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (visitorToken) headers['X-Crovo-Visitor'] = visitorToken;
+        if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+        const res = await fetch(item.url, {
+          method: 'POST',
+          credentials: 'include',
+          headers,
+          body: item.body,
+        });
+        if (!res.ok && res.status >= 500) {
+          remaining.push(item);
+        }
+      } catch {
+        remaining.push(...queue.slice(i));
+        break;
+      }
+    }
+    writeStorage(
+      OFFLINE_QUEUE_STORAGE_KEY,
+      remaining.length > 0 ? JSON.stringify(remaining.slice(-30)) : null
+    );
+  } finally {
+    flushingQueue = false;
+  }
+}
+
+if (typeof window !== 'undefined') {
+  try {
+    window.localStorage.removeItem('crovo_user_token');
+    window.localStorage.removeItem('crovo_admin_token');
+  } catch {
+    // ignore storage errors
+  }
+  window.addEventListener('online', () => {
+    void flushOfflineQueue();
+  });
 }
 
 export class ApiError extends Error {
@@ -311,12 +383,10 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const execute = async (): Promise<T> => {
     const extraHeaders: Record<string, string> = {};
     const visitorToken = readStorage(VISITOR_TOKEN_STORAGE_KEY);
-    const userToken = readStorage(USER_TOKEN_STORAGE_KEY);
-    const adminToken = readStorage(ADMIN_TOKEN_STORAGE_KEY);
+    const idToken = await getFirebaseIdToken();
 
     if (visitorToken) extraHeaders['X-Crovo-Visitor'] = visitorToken;
-    if (userToken) extraHeaders['Authorization'] = `Bearer ${userToken}`;
-    if (adminToken) extraHeaders['X-Crovo-Admin-Token'] = adminToken;
+    if (idToken) extraHeaders['Authorization'] = `Bearer ${idToken}`;
 
     let response: Response;
     try {
@@ -375,33 +445,8 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  // User Account Auth
+  // User Account Auth (Firebase Authentication Only)
   authMe: () => apiFetch<{ authenticated: boolean; user: AuthUser | null }>('/api/auth/me'),
-
-  authRegister: async (payload: {
-    name: string;
-    email: string;
-    password: string;
-    grade: 'bac1' | 'bac2';
-  }) => {
-    const res = await apiFetch<{ ok: boolean; token: string; user: AuthUser }>('/api/auth/register', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    if (res.token) setStoredUserToken(res.token);
-    notifyAuthUpdated(res.user);
-    return res;
-  },
-
-  authLogin: async (payload: { email: string; password: string }) => {
-    const res = await apiFetch<{ ok: boolean; token: string; user: AuthUser }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
-    if (res.token) setStoredUserToken(res.token);
-    notifyAuthUpdated(res.user);
-    return res;
-  },
 
   authCloudSync: async (payload: {
     idToken: string;
@@ -409,11 +454,11 @@ export const api = {
     grade?: 'bac1' | 'bac2';
     serialNumber?: string | null;
   }) => {
-    const res = await apiFetch<{ ok: boolean; token: string; user: AuthUser }>('/api/auth/cloud-sync', {
+    const res = await apiFetch<{ ok: boolean; token?: string; user: AuthUser }>('/api/auth/cloud-sync', {
       method: 'POST',
+      headers: payload.idToken ? { Authorization: `Bearer ${payload.idToken}` } : undefined,
       body: JSON.stringify(payload),
     });
-    if (res.token) setStoredUserToken(res.token);
     notifyAuthUpdated(res.user);
     return res;
   },
@@ -422,12 +467,16 @@ export const api = {
     try {
       await apiFetch<{ ok: boolean }>('/api/auth/logout', { method: 'POST' });
     } finally {
-      setStoredUserToken(null);
       notifyAuthUpdated(null);
     }
   },
 
-  // Public Config & Dynamic Library
+  // Public Config, Dynamic Library & Batched Bootstrap
+  getBootstrap: (grade: AcademicGrade, section: SectionType) =>
+    apiFetch<BootstrapResponse>(
+      `/api/bootstrap?grade=${encodeURIComponent(grade)}&section=${encodeURIComponent(section)}`
+    ),
+
   getConfig: () => apiFetch<PublicConfig>('/api/config'),
 
   getLibrary: (grade: AcademicGrade, section: SectionType, signal?: AbortSignal) =>
@@ -436,7 +485,7 @@ export const api = {
       signal ? { signal } : undefined
     ),
 
-  trackEvent: (payload: {
+  trackEvent: async (payload: {
     eventType: 'page_view' | 'library_open' | 'level_view' | 'library_search' | 'tool_view';
     sessionId?: string;
     path?: string;
@@ -445,11 +494,20 @@ export const api = {
     chapterNum?: number;
     query?: string;
     resultsCount?: number;
-  }) =>
-    apiFetch<{ ok: boolean }>('/api/analytics/event', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }).catch(() => ({ ok: false })),
+  }) => {
+    const body = JSON.stringify(payload);
+    try {
+      return await apiFetch<{ ok: boolean }>('/api/analytics/event', {
+        method: 'POST',
+        body,
+      });
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 0 || err.status >= 500)) {
+        enqueueOfflineEvent('/api/analytics/event', body);
+      }
+      return { ok: false };
+    }
+  },
 
   getQuestionStats: () => apiFetch<QuestionStatsResponse>('/api/questions/stats'),
 
@@ -481,10 +539,15 @@ export const api = {
     }),
 
   getVapidPublicKey: () =>
-    apiFetch<{ publicKey: string; enabled: boolean; intervalDays: number }>('/api/push/vapid-public-key'),
+    apiFetch<{ publicKey: string; enabled: boolean; intervalDays: number; error?: string }>(
+      '/api/push/vapid-public-key'
+    ),
 
-  getPushStatus: () =>
-    apiFetch<{ subscribed: boolean; notificationsEnabled: boolean; intervalDays: number }>('/api/push/status'),
+  getPushStatus: (endpoint?: string) =>
+    apiFetch<{ subscribed: boolean; notificationsEnabled: boolean; intervalDays: number }>(
+      '/api/push/status',
+      endpoint ? { headers: { 'X-Crovo-Push-Endpoint': endpoint } } : undefined
+    ),
 
   subscribePush: (subscription: { endpoint: string; keys: { p256dh: string; auth: string } }) =>
     apiFetch<{ ok: boolean; subscribed: boolean }>('/api/push/subscribe', {
@@ -498,11 +561,20 @@ export const api = {
       body: JSON.stringify({ endpoint }),
     }),
 
-  logPushError: (payload: { stage: string; errorCode: string; detail?: string }) =>
-    apiFetch<{ ok: boolean }>('/api/push/log-error', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }).catch(() => ({ ok: false })),
+  logPushError: async (payload: { stage: string; errorCode: string; detail?: string }) => {
+    const body = JSON.stringify(payload);
+    try {
+      return await apiFetch<{ ok: boolean }>('/api/push/log-error', {
+        method: 'POST',
+        body,
+      });
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 0 || err.status >= 500)) {
+        enqueueOfflineEvent('/api/push/log-error', body);
+      }
+      return { ok: false };
+    }
+  },
 
   getComments: () => apiFetch<{ comments: CommentItem[] }>('/api/comments'),
 
@@ -591,42 +663,31 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  // Admin Session
-  adminLogin: async (username: string, password: string) => {
-    const res = await apiFetch<{ ok: boolean; username: string; adminToken?: string; token?: string }>(
-      '/api/admin/login',
-      {
-        method: 'POST',
-        body: JSON.stringify({ username, password }),
-      }
-    );
-    if (res.adminToken) setStoredAdminToken(res.adminToken);
-    if (res.token) setStoredUserToken(res.token);
-    return res;
-  },
+  // Admin Session (Username/Password + Google/Firebase Auth)
+  adminLogin: (username: string, password: string) =>
+    apiFetch<{ ok: boolean; username: string; hasFirebaseToken?: boolean }>('/api/admin/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
 
   adminFirebaseLogin: async (idToken: string) => {
-    const res = await apiFetch<{ ok: boolean; username: string; adminToken?: string; token?: string }>(
+    const res = await apiFetch<{ ok: boolean; username: string; user?: AuthUser; hasFirebaseToken?: boolean }>(
       '/api/admin/firebase-login',
       {
         method: 'POST',
+        headers: idToken ? { Authorization: `Bearer ${idToken}` } : undefined,
         body: JSON.stringify({ idToken }),
       }
     );
-    if (res.adminToken) setStoredAdminToken(res.adminToken);
-    if (res.token) setStoredUserToken(res.token);
+    if (res.user) notifyAuthUpdated(res.user);
     return res;
   },
 
   adminLogout: async () => {
-    try {
-      await apiFetch<{ ok: boolean }>('/api/admin/logout', { method: 'POST' });
-    } finally {
-      setStoredAdminToken(null);
-    }
+    await apiFetch<{ ok: boolean }>('/api/admin/logout', { method: 'POST' });
   },
 
-  adminMe: () => apiFetch<{ authenticated: boolean; username?: string }>('/api/admin/me'),
+  adminMe: () => apiFetch<{ authenticated: boolean; username?: string; hasFirebaseToken?: boolean }>('/api/admin/me'),
 
   adminOverview: () =>
     apiFetch<{
@@ -706,6 +767,7 @@ export const api = {
         dbIntegrity: { ok: boolean; detail: string };
         backups: Array<{ filename: string; sizeBytes: number; createdAt: string }>;
         isEphemeralStorageNotice: string;
+        requiresFirebaseLink?: boolean;
       };
       notifications: {
         enabled: boolean;
@@ -996,7 +1058,13 @@ export const api = {
       ok: boolean;
       backup: { filename: string; sizeBytes: number; createdAt: string };
       backups: Array<{ filename: string; sizeBytes: number; createdAt: string }>;
+      snapshot?: Record<string, unknown>;
     }>('/api/admin/backup', {
+      method: 'POST',
+    }),
+
+  adminMigrateLegacy: () =>
+    apiFetch<{ ok: boolean; seeded: Record<string, number> }>('/api/admin/migrate-legacy', {
       method: 'POST',
     }),
 

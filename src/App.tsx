@@ -30,6 +30,15 @@ import {
   subscribeSiteConfigCloud,
 } from './utils/cloudStore';
 import {
+  ensureBootstrap,
+  getCachedConfig,
+  getCachedLibrary,
+  prefetchOtherLibrarySections,
+  setFastConfig,
+  setFastLibrary,
+  subscribeFastStore,
+} from './utils/fastStore';
+import {
   isOfferActiveClient,
   LIBRARY_AD_DELAY_MS,
   shouldShowTimedLibraryAd,
@@ -130,13 +139,21 @@ const SectionSkeleton: React.FC = () => (
 function AppContent() {
   const [activeView, setActiveView] = useState<AppView>(resolveInitialView);
 
-  const [siteConfig, setSiteConfig] = useState<PublicConfig | null>(null);
+  const [siteConfig, setSiteConfig] = useState<PublicConfig | null>(() => getCachedConfig());
   const [cloudConfigPatch, setCloudConfigPatch] = useState<Partial<PublicConfig> | null>(null);
-  const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
+  const [serverOffsetMs, setServerOffsetMs] = useState<number>(() => {
+    const cached = getCachedConfig();
+    if (cached?.serverTime) {
+      const ms = Date.parse(cached.serverTime);
+      if (Number.isFinite(ms)) return ms - Date.now();
+    }
+    return 0;
+  });
 
   const loadSiteConfig = useCallback(async () => {
     try {
       const cfg = await api.getConfig();
+      setFastConfig(cfg);
       setSiteConfig(cfg);
       const serverMs = Date.parse(cfg.serverTime);
       if (Number.isFinite(serverMs)) {
@@ -148,16 +165,40 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    loadSiteConfig();
+    const unsubFast = subscribeFastStore(() => {
+      const cfg = getCachedConfig();
+      if (cfg) {
+        setSiteConfig(cfg);
+        const serverMs = Date.parse(cfg.serverTime);
+        if (Number.isFinite(serverMs)) {
+          setServerOffsetMs(serverMs - Date.now());
+        }
+      }
+    });
     const timer = window.setInterval(loadSiteConfig, 60000);
     const unsubCloud = subscribeSiteConfigCloud((patch) => {
       setCloudConfigPatch(patch);
     });
     return () => {
+      unsubFast();
       window.clearInterval(timer);
       unsubCloud();
     };
   }, [loadSiteConfig]);
+
+  // Idle-preload secondary lazy views (ToolDetailsPage, SubscriptionModal) so switching pages is instantaneous
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const preloadPages = () => {
+      void import('./components/ToolDetailsPage').catch(() => {});
+      void import('./components/SubscriptionModal').catch(() => {});
+      if (activeView === 'admin') {
+        void import('./components/AdminDashboard').catch(() => {});
+      }
+    };
+    const timer = window.setTimeout(preloadPages, 350);
+    return () => window.clearTimeout(timer);
+  }, [activeView]);
 
   const effectiveConfig: PublicConfig | null = React.useMemo(() => {
     if (!siteConfig) return null;
@@ -241,12 +282,20 @@ function AppContent() {
 
   const [activeSection, setActiveSection] = useState<SectionType>('js');
 
-  // Dynamic Library Loader with AbortController cancelling stale switches + memory cache
+  // Dynamic Library Loader with SWR cache + memory cache + single-request initial bootstrap
   const effectiveSection: SectionType = academicGrade === 'bac1' ? 'js' : activeSection;
   const libraryCacheRef = useRef<Map<string, Chapter[]>>(new Map());
-  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const sessionSyncedSectionsRef = useRef<Set<string>>(new Set());
+  const initialBootstrapRanRef = useRef<boolean>(false);
+
+  const [chapters, setChapters] = useState<Chapter[]>(() => {
+    return getCachedLibrary(academicGrade, effectiveSection) || [];
+  });
   const [libraryOverrides, setLibraryOverrides] = useState<LibraryOverrideItem[]>([]);
-  const [loadingChapters, setLoadingChapters] = useState<boolean>(true);
+  const [loadingChapters, setLoadingChapters] = useState<boolean>(() => {
+    const cached = getCachedLibrary(academicGrade, effectiveSection);
+    return !(cached && cached.length > 0);
+  });
 
   useEffect(() => {
     return subscribeLibraryOverridesCloud((items) => {
@@ -281,21 +330,47 @@ function AppContent() {
   const loadLibrarySection = useCallback(
     async (grade: AcademicGrade, section: SectionType, signal?: AbortSignal, bypassCache = false) => {
       const cacheKey = `${grade}:${section}`;
-      if (!bypassCache && libraryCacheRef.current.has(cacheKey)) {
-        setChapters(libraryCacheRef.current.get(cacheKey) || []);
+      const memHit = !bypassCache ? libraryCacheRef.current.get(cacheKey) : undefined;
+      const swrHit = !bypassCache ? memHit || getCachedLibrary(grade, section) : undefined;
+
+      if (swrHit && swrHit.length > 0) {
+        libraryCacheRef.current.set(cacheKey, swrHit);
+        setChapters(swrHit);
         setLoadingChapters(false);
-        return;
+        if (sessionSyncedSectionsRef.current.has(cacheKey)) {
+          return;
+        }
+      } else {
+        setLoadingChapters(true);
       }
 
-      setLoadingChapters(true);
       try {
+        if (!bypassCache && !initialBootstrapRanRef.current) {
+          initialBootstrapRanRef.current = true;
+          const boot = await ensureBootstrap(grade, section);
+          if (signal?.aborted) return;
+          libraryCacheRef.current.set(cacheKey, boot.library.chapters);
+          sessionSyncedSectionsRef.current.add(cacheKey);
+          setChapters(boot.library.chapters);
+          setLoadingChapters(false);
+          prefetchOtherLibrarySections(grade, section);
+          return;
+        }
+
         const res = await api.getLibrary(grade, section, signal);
         if (signal?.aborted) return;
         libraryCacheRef.current.set(cacheKey, res.chapters);
+        sessionSyncedSectionsRef.current.add(cacheKey);
+        setFastLibrary(grade, section, res.chapters);
         setChapters(res.chapters);
         setLoadingChapters(false);
+        prefetchOtherLibrarySections(grade, section);
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return;
+        if (swrHit && swrHit.length > 0) {
+          if (!signal?.aborted) setLoadingChapters(false);
+          return;
+        }
         // Fallback: lazily import static data module only if API unavailable
         try {
           const mod = await import('./data/chaptersData');
@@ -321,11 +396,16 @@ function AppContent() {
   );
 
   useEffect(() => {
-    if (activeView === 'admin') return;
+    if (activeView === 'admin') {
+      if (!siteConfig) {
+        void loadSiteConfig();
+      }
+      return;
+    }
     const controller = new AbortController();
     loadLibrarySection(academicGrade, effectiveSection, controller.signal);
     return () => controller.abort();
-  }, [academicGrade, effectiveSection, activeView, loadLibrarySection]);
+  }, [academicGrade, effectiveSection, activeView, loadLibrarySection, siteConfig, loadSiteConfig]);
 
   const [isSubModalOpen, setIsSubModalOpen] = useState(false);
   const [isQuranModalOpen, setIsQuranModalOpen] = useState(false);

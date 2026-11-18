@@ -123,39 +123,15 @@ export const FirstVisitWelcomeModal: React.FC = () => {
       if (mode === 'register') {
         const cloudUser = await registerWithEmailCloud({ name, email, password, grade });
         let finalUser = cloudUser;
-        try {
-          const res = await api.authRegister({ name, email, password, grade });
-          finalUser = res.user;
-          if (cloudUser?.serialNumber && cloudUser.serialNumber !== res.user.serialNumber) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name,
-                grade,
-                serialNumber: cloudUser.serialNumber,
-              });
-              finalUser = synced.user;
-            }
-          }
-        } catch (regErr) {
-          if (cloudUser) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name: cloudUser.name,
-                grade,
-                serialNumber: cloudUser.serialNumber,
-              });
-              finalUser = synced.user;
-            }
-          } else {
-            throw regErr;
-          }
-        }
-        if (!finalUser) {
-          throw new Error('تعذر إنشاء الحساب، تأكد من البيانات وجرب تاني.');
+        const idToken = await getFirebaseIdToken();
+        if (idToken) {
+          const synced = await api.authCloudSync({
+            idToken,
+            name: cloudUser.name,
+            grade,
+            serialNumber: cloudUser.serialNumber,
+          });
+          finalUser = synced.user;
         }
         try {
           localStorage.setItem(VISIT_MODE_STORAGE_KEY, 'registered');
@@ -163,60 +139,23 @@ export const FirstVisitWelcomeModal: React.FC = () => {
         consumePendingAction(finalUser);
         setIsOpen(false);
       } else {
-        let localErr: unknown = null;
-        const [localRes, cloudUser] = await Promise.all([
-          api.authLogin({ email, password }).catch((err) => {
-            localErr = err;
-            return null;
-          }),
-          signInWithEmailCloud({ email, password }),
-        ]);
-
-        if (localRes?.user) {
-          let finalUser = localRes.user;
-          if (cloudUser?.serialNumber && cloudUser.serialNumber !== finalUser.serialNumber) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name: finalUser.name,
-                grade: finalUser.grade,
-                serialNumber: cloudUser.serialNumber,
-              }).catch(() => null);
-              if (synced?.user) finalUser = synced.user;
-            }
-          }
-          try {
-            localStorage.setItem(VISIT_MODE_STORAGE_KEY, 'registered');
-          } catch {}
-          consumePendingAction(finalUser);
-          setIsOpen(false);
-        } else if (cloudUser) {
-          const idToken = await getFirebaseIdToken();
-          if (idToken) {
-            const synced = await api.authCloudSync({
-              idToken,
-              name: cloudUser.name,
-              grade: cloudUser.grade,
-              serialNumber: cloudUser.serialNumber,
-            });
-            try {
-              localStorage.setItem(VISIT_MODE_STORAGE_KEY, 'registered');
-            } catch {}
-            consumePendingAction(synced.user);
-            setIsOpen(false);
-          } else {
-            try {
-              localStorage.setItem(VISIT_MODE_STORAGE_KEY, 'registered');
-            } catch {}
-            consumePendingAction(cloudUser);
-            setIsOpen(false);
-          }
-        } else {
-          throw localErr instanceof Error
-            ? localErr
-            : new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+        const cloudUser = await signInWithEmailCloud({ email, password });
+        let finalUser = cloudUser;
+        const idToken = await getFirebaseIdToken();
+        if (idToken) {
+          const synced = await api.authCloudSync({
+            idToken,
+            name: cloudUser.name,
+            grade: cloudUser.grade,
+            serialNumber: cloudUser.serialNumber,
+          });
+          finalUser = synced.user;
         }
+        try {
+          localStorage.setItem(VISIT_MODE_STORAGE_KEY, 'registered');
+        } catch {}
+        consumePendingAction(finalUser);
+        setIsOpen(false);
       }
       setPassword('');
     } catch (err) {

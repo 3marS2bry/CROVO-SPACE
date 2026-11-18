@@ -19,6 +19,12 @@ import {
   incrementQuestionCopyCloud,
 } from '../utils/cloudStore';
 import {
+  getCachedQuestionStats,
+  hasCompletedInitialBootstrap,
+  setFastQuestionStats,
+  subscribeFastStore,
+} from '../utils/fastStore';
+import {
   buildQuestionKey,
   filterAndSortLibraryQuestions,
   getLibrarySectionTotals,
@@ -71,43 +77,36 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
   }, [questionSearch]);
 
   // Real DB stats (total copy counts per question + top copied questions)
-  const [stats, setStats] = useState<QuestionStatsResponse>({
-    totalCopies: 0,
-    copyCounts: {},
-    topQuestions: [],
-  });
+  const [stats, setStats] = useState<QuestionStatsResponse>(
+    () =>
+      getCachedQuestionStats() || {
+        totalCopies: 0,
+        copyCounts: {},
+        topQuestions: [],
+      }
+  );
 
   const loadStats = useCallback(async () => {
     try {
-      const [apiRes, cloudRes] = await Promise.all([
-        api.getQuestionStats().catch(() => null),
-        fetchQuestionStatsCloud().catch(() => null),
-      ]);
-      if (!apiRes && !cloudRes) return;
-      const mergedCounts: Record<string, number> = { ...(cloudRes?.copyCounts || {}) };
-      for (const [k, v] of Object.entries(apiRes?.copyCounts || {})) {
-        mergedCounts[k] = Math.max(mergedCounts[k] || 0, v);
+      const statsData = await api.getQuestionStats().catch(() => fetchQuestionStatsCloud());
+      if (statsData) {
+        setStats(statsData);
+        setFastQuestionStats(statsData);
       }
-      const totalCopies = Object.values(mergedCounts).reduce((a, b) => a + b, 0);
-      const topMap = new Map<string, QuestionStatsResponse['topQuestions'][number]>();
-      for (const item of [...(cloudRes?.topQuestions || []), ...(apiRes?.topQuestions || [])]) {
-        const existing = topMap.get(item.questionKey);
-        const count = mergedCounts[item.questionKey] || item.copyCount;
-        if (!existing || count > existing.copyCount) {
-          topMap.set(item.questionKey, { ...item, copyCount: count });
-        }
-      }
-      const topQuestions = Array.from(topMap.values())
-        .sort((a, b) => b.copyCount - a.copyCount)
-        .slice(0, 6);
-      setStats({ totalCopies, copyCounts: mergedCounts, topQuestions });
     } catch {
       // Keep previous stats safely
     }
   }, []);
 
   useEffect(() => {
-    loadStats();
+    const unsubFast = subscribeFastStore(() => {
+      const cached = getCachedQuestionStats();
+      if (cached) setStats(cached);
+    });
+    if (hasCompletedInitialBootstrap() && !getCachedQuestionStats()) {
+      void loadStats();
+    }
+    return unsubFast;
   }, [loadStats]);
 
   // Finite attention highlight on Choose Level button when entering or switching grade/section
@@ -237,14 +236,6 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
     }
 
     try {
-      void incrementQuestionCopyCloud({
-        questionKey,
-        grade: academicGrade,
-        section: activeSection,
-        chapterNum,
-        qIndex,
-        questionTitle,
-      });
       const saved = await api.recordQuestionCopy({
         questionKey,
         grade: academicGrade,
@@ -262,7 +253,14 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
       }));
       void loadStats();
     } catch {
-      // Offline / transient network error doesn't block user copy
+      void incrementQuestionCopyCloud({
+        questionKey,
+        grade: academicGrade,
+        section: activeSection,
+        chapterNum,
+        qIndex,
+        questionTitle,
+      });
     }
   };
 

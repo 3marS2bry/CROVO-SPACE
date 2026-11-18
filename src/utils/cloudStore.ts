@@ -47,8 +47,6 @@ import type {
   QuestionStatsResponse,
 } from './api';
 
-const ADMIN_BOOTSTRAP_EMAIL = '3mars7bry@gmail.com';
-
 function isValidFirestoreId(id: string): boolean {
   return /^[a-zA-Z0-9_-]{1,128}$/.test(id);
 }
@@ -108,6 +106,18 @@ let pendingPreferredGrade: 'bac1' | 'bac2' | null = null;
 
 const SERIAL_NUMBER_REGEX = /^CRV-[0-9]{4,}$/;
 
+function isOfflineOrUnavailableError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code || '';
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    msg.includes('the client is offline') ||
+    msg.includes('client is offline') ||
+    msg.includes('could not reach cloud firestore backend') ||
+    msg.includes('unavailable')
+  );
+}
+
 function normalizeSerialNumber(val: unknown): string | null {
   return typeof val === 'string' && SERIAL_NUMBER_REGEX.test(val.trim()) ? val.trim() : null;
 }
@@ -160,14 +170,16 @@ export async function syncCloudUserProfile(
       try {
         existingSnap = await getDocFromServer(userRef);
       } catch (serverErr) {
-        const msg = serverErr instanceof Error ? serverErr.message : String(serverErr);
-        if (msg.includes('offline') || msg.includes('unavailable')) {
+        if (isOfflineOrUnavailableError(serverErr)) {
           existingSnap = await getDoc(userRef);
         } else {
           throw serverErr;
         }
       }
     } catch (err) {
+      if (isOfflineOrUnavailableError(err)) {
+        return buildImmediateAuthUser(fbUser, effectiveGrade);
+      }
       handleFirestoreError(err, OperationType.GET, userPath);
     }
 
@@ -176,10 +188,29 @@ export async function syncCloudUserProfile(
       .trim()
       .slice(0, 80);
     const safeName = displayName.length >= 2 ? displayName : `${displayName} طالب`;
-    const isAdminBootstrap = normalizedEmail === ADMIN_BOOTSTRAP_EMAIL && fbUser.emailVerified;
+    const safeEmail = normalizedEmail.length >= 3 ? normalizedEmail : `${uid}@users.crovo.local`.slice(0, 160);
+
+    let isAdminBootstrap = false;
+    try {
+      const adminMarkerRef = doc(db, 'admins', uid);
+      const adminMarkerSnap = await getDoc(adminMarkerRef);
+      if (adminMarkerSnap.exists()) {
+        isAdminBootstrap = true;
+      } else if (fbUser.emailVerified) {
+        // Probe list /admins: only succeeds if firestore.rules isAdmin() passes for this verified user
+        await getDocs(query(collection(db, 'admins'), limit(1)));
+        isAdminBootstrap = true;
+        await setDoc(adminMarkerRef, {
+          uid,
+          email: safeEmail,
+          createdAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    } catch {
+      isAdminBootstrap = false;
+    }
 
     if (!existingSnap.exists()) {
-      const safeEmail = normalizedEmail.length >= 3 ? normalizedEmail : `${uid}@users.crovo.local`.slice(0, 160);
       const basePayload: Record<string, unknown> = {
         uid,
         name: safeName,
@@ -231,7 +262,10 @@ export async function syncCloudUserProfile(
               return mapUserProfileDoc(uid, recheckSnap.data(), safeName, safeEmail, isAdminBootstrap);
             }
           } catch {
-            // Fall through to structured error reporting below
+            // Fall through to offline/structured error handling below
+          }
+          if (isOfflineOrUnavailableError(err)) {
+            return buildImmediateAuthUser(fbUser, effectiveGrade);
           }
           handleFirestoreError(err, OperationType.CREATE, userPath);
         }
@@ -288,13 +322,35 @@ export async function syncCloudUserProfile(
   }
 }
 
+function mapFirebaseAuthError(err: unknown): Error {
+  const code = (err as { code?: string })?.code || '';
+  switch (code) {
+    case 'auth/email-already-in-use':
+      return new Error('البريد الإلكتروني مستخدم بالفعل. جرّب تسجيل الدخول أو التحقق من كلمة المرور.');
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found':
+      return new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+    case 'auth/weak-password':
+      return new Error('كلمة المرور ضعيفة، يجب أن تكون 6 أحرف أو أرقام على الأقل.');
+    case 'auth/invalid-email':
+      return new Error('صيغة البريد الإلكتروني غير صحيحة.');
+    case 'auth/too-many-requests':
+      return new Error('تم حظر المحاولات مؤقتاً بسبب كثرة التجارب، حاول بعد دقائق.');
+    case 'auth/network-request-failed':
+      return new Error('تعذر الاتصال بخدمة المصادقة. تأكد من اتصالك بالإنترنت وحاول تاني.');
+    default:
+      return err instanceof Error ? err : new Error('تعذر إتمام عملية المصادقة عبر Firebase.');
+  }
+}
+
 export async function registerWithEmailCloud(payload: {
   name: string;
   email: string;
   password: string;
   grade: 'bac1' | 'bac2';
   serialNumber?: string | null;
-}): Promise<AuthUser | null> {
+}): Promise<AuthUser> {
   try {
     let user: User;
     try {
@@ -306,15 +362,15 @@ export async function registerWithEmailCloud(payload: {
         const cred = await signInWithEmailAndPassword(auth, payload.email.trim(), payload.password);
         user = cred.user;
       } else {
-        return null;
+        throw err;
       }
     }
     if (payload.name.trim()) {
       await updateProfile(user, { displayName: payload.name.trim().slice(0, 80) }).catch(() => {});
     }
     return await syncCloudUserProfile(user, payload.grade, payload.serialNumber, payload.name);
-  } catch {
-    return null;
+  } catch (err) {
+    throw mapFirebaseAuthError(err);
   }
 }
 
@@ -324,12 +380,12 @@ export async function signInWithEmailCloud(payload: {
   serialNumber?: string | null;
   name?: string;
   grade?: 'bac1' | 'bac2';
-}): Promise<AuthUser | null> {
+}): Promise<AuthUser> {
   try {
     const cred = await signInWithEmailAndPassword(auth, payload.email.trim(), payload.password);
     return await syncCloudUserProfile(cred.user, payload.grade, payload.serialNumber, payload.name);
-  } catch {
-    return null;
+  } catch (err) {
+    throw mapFirebaseAuthError(err);
   }
 }
 
@@ -387,14 +443,13 @@ function buildImmediateAuthUser(fbUser: User, preferredGrade: 'bac1' | 'bac2' = 
     .trim()
     .slice(0, 80);
   const safeName = displayName.length >= 2 ? displayName : `${displayName} طالب`;
-  const isAdminBootstrap = normalizedEmail === ADMIN_BOOTSTRAP_EMAIL && fbUser.emailVerified;
   return {
     id: fbUser.uid,
     serialNumber: null,
     name: safeName,
     email: normalizedEmail,
     grade: preferredGrade,
-    role: isAdminBootstrap ? 'admin' : 'user',
+    role: 'user',
     status: 'active',
     suspendReason: null,
   };
@@ -526,7 +581,7 @@ export function subscribeFirebaseAuth(
           name: fbUser.displayName || 'طالب CROVO',
           email: fbUser.email || '',
           grade: 'bac1',
-          role: fbUser.email === ADMIN_BOOTSTRAP_EMAIL && fbUser.emailVerified ? 'admin' : 'user',
+          role: 'user',
           status: 'active',
         },
         fbUser
@@ -537,29 +592,64 @@ export function subscribeFirebaseAuth(
 
 // ==================== TOOL LIKES (FIRESTORE) ====================
 
+let sharedToolCount = 0;
+let hasSharedToolCount = false;
+const toolCountSubscribers = new Set<(count: number) => void>();
+let sharedToolCounterUnsub: (() => void) | null = null;
+
+function subscribeSharedToolCounter(cb: (count: number) => void): () => void {
+  toolCountSubscribers.add(cb);
+  if (hasSharedToolCount) {
+    cb(sharedToolCount);
+  }
+  if (!sharedToolCounterUnsub) {
+    sharedToolCounterUnsub = onSnapshot(
+      doc(db, 'counters', 'tool'),
+      (snap) => {
+        if (snap.exists()) {
+          const raw = Number(snap.data().count);
+          sharedToolCount = Number.isFinite(raw) && raw >= 0 ? raw : 0;
+        } else {
+          sharedToolCount = 0;
+        }
+        hasSharedToolCount = true;
+        for (const fn of toolCountSubscribers) {
+          try {
+            fn(sharedToolCount);
+          } catch {
+            // ignore subscriber error
+          }
+        }
+      },
+      (err) => {
+        if (!isOfflineOrUnavailableError(err)) {
+          handleFirestoreError(err, OperationType.GET, 'counters/tool');
+        }
+      }
+    );
+  }
+
+  return () => {
+    toolCountSubscribers.delete(cb);
+    if (toolCountSubscribers.size === 0 && sharedToolCounterUnsub) {
+      sharedToolCounterUnsub();
+      sharedToolCounterUnsub = null;
+    }
+  };
+}
+
 export function subscribeToolLikesCloud(
   uid: string | null,
   onUpdate: (state: { count: number; liked: boolean }) => void
 ): () => void {
-  let latestCount = 0;
+  let latestCount = hasSharedToolCount ? sharedToolCount : 0;
   let latestLiked = false;
   const emit = () => onUpdate({ count: latestCount, liked: latestLiked });
 
-  const unsubCounter = onSnapshot(
-    doc(db, 'counters', 'tool'),
-    (snap) => {
-      if (snap.exists()) {
-        const raw = Number(snap.data().count);
-        latestCount = Number.isFinite(raw) && raw >= 0 ? raw : 0;
-      } else {
-        latestCount = 0;
-      }
-      emit();
-    },
-    (err) => {
-      handleFirestoreError(err, OperationType.GET, 'counters/tool');
-    }
-  );
+  const unsubCounter = subscribeSharedToolCounter((count) => {
+    latestCount = count;
+    emit();
+  });
 
   const verifiedUid = resolveVerifiedUid(uid);
   let unsubLike: (() => void) | null = null;
@@ -571,7 +661,9 @@ export function subscribeToolLikesCloud(
         emit();
       },
       (err) => {
-        handleFirestoreError(err, OperationType.GET, `tool_likes/${verifiedUid}`);
+        if (!isOfflineOrUnavailableError(err)) {
+          handleFirestoreError(err, OperationType.GET, `tool_likes/${verifiedUid}`);
+        }
       }
     );
   }
@@ -588,8 +680,7 @@ async function getFreshSnap(ref: ReturnType<typeof doc>) {
   try {
     return await getDocFromServer(ref);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('offline') || msg.includes('unavailable')) {
+    if (isOfflineOrUnavailableError(err)) {
       return getDoc(ref);
     }
     throw err;
@@ -756,6 +847,10 @@ export function subscribeCloudComments(
       }
     },
     (err) => {
+      if (isOfflineOrUnavailableError(err)) {
+        if (onError) onError(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       try {
         handleFirestoreError(err, OperationType.LIST, 'comments');
       } catch (wrapped) {

@@ -5,86 +5,28 @@
       "description": "Registered student or admin profile stored privately per user UID.",
       "type": "object",
       "properties": {
-        "uid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128,
-          "description": "Firebase Authentication UID matching document ID."
-        },
-        "name": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 80,
-          "description": "Display name of the student."
-        },
-        "email": {
-          "type": "string",
-          "format": "email",
-          "maxLength": 160,
-          "description": "Verified account email address (PII - owner and admin only)."
-        },
-        "grade": {
-          "type": "string",
-          "enum": ["bac1", "bac2"],
-          "maxLength": 10,
-          "description": "Academic year (bac1 or bac2)."
-        },
-        "role": {
-          "type": "string",
-          "enum": ["user", "admin"],
-          "maxLength": 10,
-          "description": "RBAC role; non-admin users may only register with role 'user'."
-        },
-        "status": {
-          "type": "string",
-          "enum": ["active", "suspended"],
-          "maxLength": 15,
-          "description": "Account status."
-        },
-        "photoUrl": {
-          "type": "string",
-          "maxLength": 500,
-          "description": "Optional profile avatar URL from OAuth provider."
-        },
-        "serialNumber": {
-          "type": "string",
-          "pattern": "^[A-Z0-9\\-]+$",
-          "maxLength": 32,
-          "description": "Unique human-readable user serial number (e.g. CRV-1001)."
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server timestamp of user registration."
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time",
-          "description": "Server timestamp of last profile update."
-        }
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 80 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "role": { "type": "string", "enum": ["user", "admin"], "maxLength": 10 },
+        "status": { "type": "string", "enum": ["active", "suspended"], "maxLength": 15 },
+        "suspendReason": { "type": "string", "maxLength": 240 },
+        "photoUrl": { "type": "string", "maxLength": 500 },
+        "serialNumber": { "type": "string", "pattern": "^[A-Z0-9\\-]+$", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "name", "email", "grade", "role", "status", "createdAt", "updatedAt"]
     },
     "AdminMarker": {
       "title": "AdminMarker",
-      "description": "Trusted administrator lookup document.",
+      "description": "Trusted administrator authorization lookup document.",
       "type": "object",
       "properties": {
-        "uid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "email": {
-          "type": "string",
-          "format": "email",
-          "maxLength": 160
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "uid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 160 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "createdAt"]
     },
@@ -93,73 +35,21 @@
       "description": "Public student review/comment with optional avatar and before/after solution images.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 80
-        },
-        "authorUid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128
-        },
-        "authorName": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 60
-        },
-        "grade": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 60
-        },
-        "rating": {
-          "type": "integer"
-        },
-        "content": {
-          "type": "string",
-          "minLength": 4,
-          "maxLength": 600
-        },
-        "avatarDataUrl": {
-          "type": "string",
-          "maxLength": 120000,
-          "description": "Compressed data URL for optional avatar."
-        },
-        "attachmentBeforeDataUrl": {
-          "type": "string",
-          "maxLength": 320000,
-          "description": "Compressed data URL for 'before solution' screenshot."
-        },
-        "attachmentAfterDataUrl": {
-          "type": "string",
-          "maxLength": 320000,
-          "description": "Compressed data URL for 'after solution' screenshot."
-        },
-        "isVerified": {
-          "type": "boolean"
-        },
-        "status": {
-          "type": "string",
-          "enum": ["approved", "hidden", "flagged"],
-          "maxLength": 16
-        },
-        "likesCount": {
-          "type": "integer"
-        },
-        "reportsCount": {
-          "type": "integer"
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 80 },
+        "authorUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "authorName": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "grade": { "type": "string", "minLength": 2, "maxLength": 60 },
+        "rating": { "type": "integer" },
+        "content": { "type": "string", "minLength": 4, "maxLength": 600 },
+        "avatarDataUrl": { "type": "string", "maxLength": 120000 },
+        "attachmentBeforeDataUrl": { "type": "string", "maxLength": 320000 },
+        "attachmentAfterDataUrl": { "type": "string", "maxLength": 320000 },
+        "isVerified": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["approved", "hidden", "flagged"], "maxLength": 16 },
+        "likesCount": { "type": "integer" },
+        "reportsCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "authorUid", "authorName", "grade", "rating", "content", "isVerified", "status", "likesCount", "reportsCount", "createdAt"]
     },
@@ -168,26 +58,10 @@
       "description": "Optional verification phone number isolated from public comment reads (PII).",
       "type": "object",
       "properties": {
-        "commentId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 80
-        },
-        "authorUid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "contactPhone": {
-          "type": "string",
-          "pattern": "^\\+?\\d{8,15}$",
-          "minLength": 8,
-          "maxLength": 16
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "commentId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "authorUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "contactPhone": { "type": "string", "pattern": "^\\+?\\d{8,15}$", "minLength": 8, "maxLength": 16 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["commentId", "authorUid", "contactPhone", "createdAt"]
     },
@@ -196,22 +70,9 @@
       "description": "One-per-user like marker on a comment, coupled atomically with Comment.likesCount.",
       "type": "object",
       "properties": {
-        "commentId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 80
-        },
-        "userId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "commentId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 80 },
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["commentId", "userId", "createdAt"]
     },
@@ -220,47 +81,21 @@
       "description": "One-per-user abuse report on a comment.",
       "type": "object",
       "properties": {
-        "commentId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 80
-        },
-        "userId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128
-        },
-        "reason": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 120
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "commentId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 80 },
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["commentId", "userId", "reason", "createdAt"]
     },
     "ToolCounter": {
       "title": "ToolCounter",
-      "description": "Public aggregate counter document (e.g. tool likes count).",
+      "description": "Public aggregate counter document (tool likes count and user serial sequence).",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 64
-        },
-        "count": {
-          "type": "integer"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 64 },
+        "count": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "count", "updatedAt"]
     },
@@ -269,16 +104,8 @@
       "description": "One-per-user like marker for the CROVO automation tool.",
       "type": "object",
       "properties": {
-        "userId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId", "createdAt"]
     },
@@ -287,102 +114,45 @@
       "description": "Immutable per-user site activity entry visible to the user and admins.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 80
-        },
-        "userId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 128
-        },
-        "eventType": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 48
-        },
-        "label": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 120
-        },
-        "path": {
-          "type": "string",
-          "maxLength": 120
-        },
-        "detail": {
-          "type": "string",
-          "maxLength": 300
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 80 },
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 128 },
+        "eventType": { "type": "string", "minLength": 2, "maxLength": 48 },
+        "label": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "path": { "type": "string", "maxLength": 120 },
+        "detail": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "userId", "eventType", "label", "createdAt"]
     },
     "SiteConfigPublic": {
       "title": "SiteConfigPublic",
-      "description": "Public site pricing, countdown, promo banner, library ad, notifications schedule, tool services, and tool videos synced across deployments.",
+      "description": "Canonical public site configuration including pricing, banners, tool services, and videos.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "enum": ["public"],
-          "maxLength": 16
-        },
-        "qureoOldPrice": {
-          "type": "integer"
-        },
-        "qureoOfferPrice": {
-          "type": "integer"
-        },
-        "bundleOldPrice": {
-          "type": "integer"
-        },
-        "bundleOfferPrice": {
-          "type": "integer"
-        },
-        "offerDurationHours": {
-          "type": "number"
-        },
-        "offerEndsAt": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "whatsappNumber": {
-          "type": "string",
-          "maxLength": 24
-        },
-        "offerText": {
-          "type": "string",
-          "maxLength": 400
-        },
-        "notificationsEnabled": {
-          "type": "boolean"
-        },
-        "notificationsIntervalDays": {
-          "type": "integer"
-        },
-        "promoBanner": {
-          "type": "object"
-        },
-        "libraryAd": {
-          "type": "object"
-        },
-        "toolServices": {
-          "type": "array"
-        },
-        "toolVideos": {
-          "type": "array"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "enum": ["public"], "maxLength": 16 },
+        "qureoOldPrice": { "type": "integer" },
+        "qureoOfferPrice": { "type": "integer" },
+        "finOldPrice": { "type": "integer" },
+        "finOfferPrice": { "type": "integer" },
+        "bundleOldPrice": { "type": "integer" },
+        "bundleOfferPrice": { "type": "integer" },
+        "offerDurationHours": { "type": "number" },
+        "offerEndsAt": { "type": "string", "maxLength": 64 },
+        "afterOfferMode": { "type": "string", "enum": ["regular_price", "extended_offer"], "maxLength": 32 },
+        "ordersEnabled": { "type": "boolean" },
+        "pollClosed": { "type": "boolean" },
+        "whatsappNumber": { "type": "string", "maxLength": 24 },
+        "adminWhatsappDisplay": { "type": "string", "maxLength": 24 },
+        "offerText": { "type": "string", "maxLength": 400 },
+        "notificationsEnabled": { "type": "boolean" },
+        "notificationsIntervalDays": { "type": "integer" },
+        "heroPromo": { "type": "object" },
+        "promoBanner": { "type": "object" },
+        "libraryAd": { "type": "object" },
+        "toolServices": { "type": "array" },
+        "toolVideos": { "type": "array" },
+        "trackingStartedAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
         "id",
@@ -403,42 +173,16 @@
       "description": "Interactive community poll with options and aggregate vote total.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 2,
-          "maxLength": 80
-        },
-        "question": {
-          "type": "string",
-          "minLength": 3,
-          "maxLength": 240
-        },
-        "options": {
-          "type": "array"
-        },
-        "totalVotes": {
-          "type": "integer"
-        },
-        "isOpen": {
-          "type": "boolean"
-        },
-        "startsAt": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "endsAt": {
-          "type": "string",
-          "maxLength": 64
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 2, "maxLength": 80 },
+        "slug": { "type": "string", "maxLength": 80 },
+        "question": { "type": "string", "minLength": 3, "maxLength": 240 },
+        "options": { "type": "array" },
+        "totalVotes": { "type": "integer" },
+        "isOpen": { "type": "boolean" },
+        "startsAt": { "type": "string", "maxLength": 64 },
+        "endsAt": { "type": "string", "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "question", "options", "totalVotes", "isOpen", "createdAt", "updatedAt"]
     },
@@ -447,126 +191,46 @@
       "description": "Single vote record per user per poll.",
       "type": "object",
       "properties": {
-        "pollId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 80
-        },
-        "userId": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "choice": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "pollId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "userId": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "choice": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["pollId", "userId", "choice", "createdAt"]
     },
     "OrderRecord": {
       "title": "OrderRecord",
-      "description": "Persistent subscription order metadata without plaintext platform credentials.",
+      "description": "Persistent subscription order with AES-256-GCM encrypted credentials accessible only to admin.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "minLength": 4,
-          "maxLength": 80
-        },
-        "orderCode": {
-          "type": "string",
-          "minLength": 3,
-          "maxLength": 40
-        },
-        "authorUid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "userSerialNumber": {
-          "type": "string",
-          "maxLength": 32
-        },
-        "userEmail": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "fullName": {
-          "type": "string",
-          "minLength": 2,
-          "maxLength": 120
-        },
-        "grade": {
-          "type": "string",
-          "enum": ["bac1", "bac2"],
-          "maxLength": 10
-        },
-        "platformLabel": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "sectionDetails": {
-          "type": "string",
-          "maxLength": 240
-        },
-        "platformUsername": {
-          "type": "string",
-          "maxLength": 160
-        },
-        "credentialsPurged": {
-          "type": "boolean"
-        },
-        "oldPrice": {
-          "type": "integer"
-        },
-        "finalPrice": {
-          "type": "integer"
-        },
-        "offerApplied": {
-          "type": "boolean"
-        },
-        "paymentMethod": {
-          "type": "string",
-          "maxLength": 80
-        },
-        "status": {
-          "type": "string",
-          "enum": ["new", "reviewing", "completed", "cancelled"],
-          "maxLength": 20
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "minLength": 4, "maxLength": 80 },
+        "orderCode": { "type": "string", "minLength": 3, "maxLength": 40 },
+        "clientRequestId": { "type": "string", "maxLength": 100 },
+        "authorUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "userSerialNumber": { "type": "string", "maxLength": 32 },
+        "userEmail": { "type": "string", "maxLength": 160 },
+        "fullName": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "platformLabel": { "type": "string", "maxLength": 160 },
+        "sectionDetails": { "type": "string", "maxLength": 240 },
+        "platformsJson": { "type": "string", "maxLength": 240 },
+        "platformUsername": { "type": "string", "maxLength": 160 },
+        "encryptedPassword": { "type": "string", "maxLength": 2000 },
+        "passwordIv": { "type": "string", "maxLength": 120 },
+        "passwordAuthTag": { "type": "string", "maxLength": 120 },
+        "credentialsPurged": { "type": "boolean" },
+        "oldPrice": { "type": "integer" },
+        "finalPrice": { "type": "integer" },
+        "offerApplied": { "type": "boolean" },
+        "paymentMethod": { "type": "string", "maxLength": 80 },
+        "status": { "type": "string", "enum": ["new", "reviewing", "completed", "cancelled"], "maxLength": 20 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
-        "id",
-        "orderCode",
-        "authorUid",
-        "fullName",
-        "grade",
-        "platformLabel",
-        "sectionDetails",
-        "platformUsername",
-        "credentialsPurged",
-        "oldPrice",
-        "finalPrice",
-        "offerApplied",
-        "paymentMethod",
-        "status",
-        "createdAt",
-        "updatedAt"
+        "id", "orderCode", "authorUid", "fullName", "grade", "platformLabel",
+        "sectionDetails", "platformUsername", "credentialsPurged", "oldPrice",
+        "finalPrice", "offerApplied", "paymentMethod", "status", "createdAt", "updatedAt"
       ]
     },
     "QuestionStat": {
@@ -574,38 +238,14 @@
       "description": "Cumulative copy count per library question.",
       "type": "object",
       "properties": {
-        "questionKey": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "grade": {
-          "type": "string",
-          "enum": ["bac1", "bac2"],
-          "maxLength": 10
-        },
-        "section": {
-          "type": "string",
-          "enum": ["js", "py", "fin"],
-          "maxLength": 10
-        },
-        "chapterNum": {
-          "type": "integer"
-        },
-        "qIndex": {
-          "type": "integer"
-        },
-        "questionTitle": {
-          "type": "string",
-          "maxLength": 300
-        },
-        "copyCount": {
-          "type": "integer"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "questionKey": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "section": { "type": "string", "enum": ["js", "py", "fin"], "maxLength": 10 },
+        "chapterNum": { "type": "integer" },
+        "qIndex": { "type": "integer" },
+        "questionTitle": { "type": "string", "maxLength": 300 },
+        "copyCount": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["questionKey", "grade", "section", "chapterNum", "qIndex", "questionTitle", "copyCount", "updatedAt"]
     },
@@ -614,193 +254,182 @@
       "description": "User-submitted report on an incorrect or unclear library question.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 80
-        },
-        "reporterUid": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "questionKey": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 128
-        },
-        "grade": {
-          "type": "string",
-          "enum": ["bac1", "bac2"],
-          "maxLength": 10
-        },
-        "section": {
-          "type": "string",
-          "enum": ["js", "py", "fin"],
-          "maxLength": 10
-        },
-        "chapterNum": {
-          "type": "integer"
-        },
-        "qIndex": {
-          "type": "integer"
-        },
-        "questionTitle": {
-          "type": "string",
-          "maxLength": 300
-        },
-        "description": {
-          "type": "string",
-          "minLength": 4,
-          "maxLength": 600
-        },
-        "status": {
-          "type": "string",
-          "enum": ["pending", "reviewed", "resolved", "dismissed"],
-          "maxLength": 20
-        },
-        "adminNote": {
-          "type": "string",
-          "maxLength": 500
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "reporterUid": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "questionKey": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 128 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "section": { "type": "string", "enum": ["js", "py", "fin"], "maxLength": 10 },
+        "chapterNum": { "type": "integer" },
+        "qIndex": { "type": "integer" },
+        "questionTitle": { "type": "string", "maxLength": 300 },
+        "description": { "type": "string", "minLength": 4, "maxLength": 600 },
+        "status": { "type": "string", "enum": ["pending", "reviewed", "resolved", "dismissed"], "maxLength": 20 },
+        "adminNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": [
-        "id",
-        "reporterUid",
-        "questionKey",
-        "grade",
-        "section",
-        "chapterNum",
-        "qIndex",
-        "questionTitle",
-        "description",
-        "status",
-        "createdAt",
-        "updatedAt"
+        "id", "reporterUid", "questionKey", "grade", "section", "chapterNum",
+        "qIndex", "questionTitle", "description", "status", "createdAt", "updatedAt"
       ]
+    },
+    "LibraryBundle": {
+      "title": "LibraryBundle",
+      "description": "Quota-optimized curriculum track bundle stored per grade/section in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 32 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "section": { "type": "string", "enum": ["js", "py", "fin"], "maxLength": 10 },
+        "chapters": { "type": "array" },
+        "questions": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "grade", "section", "chapters", "questions", "updatedAt"]
     },
     "LibraryOverride": {
       "title": "LibraryOverride",
       "description": "Admin edits, additions, or removals for curriculum library questions.",
       "type": "object",
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-zA-Z0-9_\\-]+$",
-          "maxLength": 80
-        },
-        "grade": {
-          "type": "string",
-          "enum": ["bac1", "bac2"],
-          "maxLength": 10
-        },
-        "section": {
-          "type": "string",
-          "enum": ["js", "py", "fin"],
-          "maxLength": 10
-        },
-        "chapterNum": {
-          "type": "integer"
-        },
-        "qIndex": {
-          "type": "integer"
-        },
-        "qText": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 2000
-        },
-        "aText": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 8000
-        },
-        "isCode": {
-          "type": "boolean"
-        },
-        "deleted": {
-          "type": "boolean"
-        },
-        "updatedAt": {
-          "type": "string",
-          "format": "date-time"
-        }
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "grade": { "type": "string", "enum": ["bac1", "bac2"], "maxLength": 10 },
+        "section": { "type": "string", "enum": ["js", "py", "fin"], "maxLength": 10 },
+        "chapterNum": { "type": "integer" },
+        "qIndex": { "type": "integer" },
+        "qText": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "aText": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "isCode": { "type": "boolean" },
+        "deleted": { "type": "boolean" },
+        "updatedBy": { "type": "string", "maxLength": 160 },
+        "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "grade", "section", "chapterNum", "qIndex", "qText", "aText", "isCode", "deleted", "updatedAt"]
+    },
+    "AnalyticsEvent": {
+      "title": "AnalyticsEvent",
+      "description": "Write-once visitor/user telemetry event readable only by administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "eventType": { "type": "string", "maxLength": 48 },
+        "visitorId": { "type": "string", "maxLength": 80 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "path": { "type": "string", "maxLength": 120 },
+        "grade": { "type": "string", "maxLength": 16 },
+        "section": { "type": "string", "maxLength": 16 },
+        "chapterNum": { "type": "integer" },
+        "query": { "type": "string", "maxLength": 160 },
+        "resultsCount": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "eventType", "visitorId", "createdAt"]
+    },
+    "AnalyticsDaily": {
+      "title": "AnalyticsDaily",
+      "description": "Historical and daily aggregated analytics rollups accessible only to administrators.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 32 },
+        "visits": { "type": "integer" },
+        "uniqueVisitors": { "type": "integer" },
+        "libraryOpens": { "type": "integer" },
+        "searches": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "visits", "libraryOpens", "searches", "updatedAt"]
+    },
+    "PushSubscriptionRecord": {
+      "title": "PushSubscriptionRecord",
+      "description": "Web Push browser subscription stored privately and readable only by admin.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "visitorId": { "type": "string", "maxLength": 80 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "endpoint": { "type": "string", "maxLength": 1000 },
+        "p256dh": { "type": "string", "maxLength": 300 },
+        "auth": { "type": "string", "maxLength": 160 },
+        "enabled": { "type": "boolean" },
+        "lastSentAt": { "type": "string", "maxLength": 64 },
+        "lastMessageId": { "type": "string", "maxLength": 80 },
+        "lastError": { "type": "string", "maxLength": 240 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "visitorId", "endpoint", "p256dh", "auth", "enabled", "createdAt", "updatedAt"]
+    },
+    "NotificationLog": {
+      "title": "NotificationLog",
+      "description": "Admin-readable log of Web Push dispatch batches.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "messageId": { "type": "string", "maxLength": 80 },
+        "category": { "type": "string", "maxLength": 32 },
+        "title": { "type": "string", "maxLength": 160 },
+        "body": { "type": "string", "maxLength": 400 },
+        "sentCount": { "type": "integer" },
+        "failedCount": { "type": "integer" },
+        "triggerType": { "type": "string", "maxLength": 32 },
+        "errorDetail": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "messageId", "category", "title", "body", "sentCount", "failedCount", "triggerType", "createdAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable administrative audit trail.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "actorUsername": { "type": "string", "maxLength": 160 },
+        "action": { "type": "string", "maxLength": 80 },
+        "targetType": { "type": "string", "maxLength": 80 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "detailsJson": { "type": "string", "maxLength": 1500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "actorUsername", "action", "targetType", "createdAt"]
+    },
+    "ToolRun": {
+      "title": "ToolRun",
+      "description": "Tool execution outcome telemetry record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$", "maxLength": 80 },
+        "serviceKey": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["success", "failed", "running"], "maxLength": 20 },
+        "durationMs": { "type": "integer" },
+        "errorMessage": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "serviceKey", "status", "durationMs", "createdAt"]
     }
   },
   "firestore": {
-    "/users/{userId}": {
-      "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Private student/user account profile isolated to owner or admin."
-    },
-    "/users/{userId}/activities/{activityId}": {
-      "schema": { "$ref": "#/entities/UserActivity" },
-      "description": "Per-user chronological site activity history."
-    },
-    "/admins/{userId}": {
-      "schema": { "$ref": "#/entities/AdminMarker" },
-      "description": "Read-only admin authorization lookup collection."
-    },
-    "/comments/{commentId}": {
-      "schema": { "$ref": "#/entities/Comment" },
-      "description": "Public reviews with optional before/after solution images and atomic like/report counters."
-    },
-    "/comments/{commentId}/private/{docId}": {
-      "schema": { "$ref": "#/entities/CommentPrivateContact" },
-      "description": "Isolated optional contact phone number visible only to author and admin."
-    },
-    "/comments/{commentId}/likes/{userId}": {
-      "schema": { "$ref": "#/entities/CommentLike" },
-      "description": "Per-user comment like subcollection enforcing single-like-per-user atomically."
-    },
-    "/comments/{commentId}/reports/{userId}": {
-      "schema": { "$ref": "#/entities/CommentReport" },
-      "description": "Per-user comment report subcollection."
-    },
-    "/counters/{counterId}": {
-      "schema": { "$ref": "#/entities/ToolCounter" },
-      "description": "Aggregate tool likes and user serial counters."
-    },
-    "/tool_likes/{userId}": {
-      "schema": { "$ref": "#/entities/ToolLike" },
-      "description": "Per-user like marker for the CROVO tool."
-    },
-    "/site_config/{docId}": {
-      "schema": { "$ref": "#/entities/SiteConfigPublic" },
-      "description": "Public site configuration synced across deployments."
-    },
-    "/polls/{pollId}": {
-      "schema": { "$ref": "#/entities/Poll" },
-      "description": "Community polls synced across deployments."
-    },
-    "/polls/{pollId}/votes/{userId}": {
-      "schema": { "$ref": "#/entities/PollVote" },
-      "description": "One-per-user poll votes."
-    },
-    "/orders/{orderId}": {
-      "schema": { "$ref": "#/entities/OrderRecord" },
-      "description": "Persistent subscription order history without plaintext credentials."
-    },
-    "/question_stats/{questionKey}": {
-      "schema": { "$ref": "#/entities/QuestionStat" },
-      "description": "Cumulative copy count statistics per question."
-    },
-    "/question_reports/{reportId}": {
-      "schema": { "$ref": "#/entities/QuestionReport" },
-      "description": "Student-submitted question error reports."
-    },
-    "/library_overrides/{itemId}": {
-      "schema": { "$ref": "#/entities/LibraryOverride" },
-      "description": "Admin modifications to library questions."
-    }
+    "/users/{userId}": { "schema": { "$ref": "#/entities/UserProfile" }, "description": "Private student/user account profile isolated to owner or admin." },
+    "/users/{userId}/activities/{activityId}": { "schema": { "$ref": "#/entities/UserActivity" }, "description": "Per-user chronological site activity history." },
+    "/admins/{userId}": { "schema": { "$ref": "#/entities/AdminMarker" }, "description": "Admin authorization marker managed by verified admins." },
+    "/comments/{commentId}": { "schema": { "$ref": "#/entities/Comment" }, "description": "Public reviews with optional before/after solution images." },
+    "/comments/{commentId}/private/{docId}": { "schema": { "$ref": "#/entities/CommentPrivateContact" }, "description": "Isolated optional contact phone number visible only to author and admin." },
+    "/comments/{commentId}/likes/{userId}": { "schema": { "$ref": "#/entities/CommentLike" }, "description": "Per-user comment like subcollection." },
+    "/comments/{commentId}/reports/{userId}": { "schema": { "$ref": "#/entities/CommentReport" }, "description": "Per-user comment report subcollection." },
+    "/counters/{counterId}": { "schema": { "$ref": "#/entities/ToolCounter" }, "description": "Aggregate tool likes and user serial counters." },
+    "/tool_likes/{userId}": { "schema": { "$ref": "#/entities/ToolLike" }, "description": "Per-user like marker for the CROVO tool." },
+    "/site_config/{docId}": { "schema": { "$ref": "#/entities/SiteConfigPublic" }, "description": "Canonical public site configuration." },
+    "/polls/{pollId}": { "schema": { "$ref": "#/entities/Poll" }, "description": "Community polls synced across deployments." },
+    "/polls/{pollId}/votes/{userId}": { "schema": { "$ref": "#/entities/PollVote" }, "description": "One-per-user poll votes." },
+    "/orders/{orderId}": { "schema": { "$ref": "#/entities/OrderRecord" }, "description": "Subscription orders with encrypted credentials." },
+    "/question_stats/{questionKey}": { "schema": { "$ref": "#/entities/QuestionStat" }, "description": "Cumulative copy count statistics per question." },
+    "/question_reports/{reportId}": { "schema": { "$ref": "#/entities/QuestionReport" }, "description": "Student-submitted question error reports." },
+    "/library_bundles/{bundleId}": { "schema": { "$ref": "#/entities/LibraryBundle" }, "description": "Bundled curriculum chapters and questions per grade/section." },
+    "/library_overrides/{itemId}": { "schema": { "$ref": "#/entities/LibraryOverride" }, "description": "Admin modifications to library questions." },
+    "/analytics_events/{eventId}": { "schema": { "$ref": "#/entities/AnalyticsEvent" }, "description": "Write-once visitor/user analytics events." },
+    "/analytics_daily/{dayKey}": { "schema": { "$ref": "#/entities/AnalyticsDaily" }, "description": "Historical and daily aggregated analytics rollups." },
+    "/push_subscriptions/{subId}": { "schema": { "$ref": "#/entities/PushSubscriptionRecord" }, "description": "Web Push browser subscriptions (admin-only reads)." },
+    "/notification_logs/{logId}": { "schema": { "$ref": "#/entities/NotificationLog" }, "description": "Web Push notification dispatch logs." },
+    "/audit_logs/{logId}": { "schema": { "$ref": "#/entities/AuditLog" }, "description": "Immutable admin action audit log." },
+    "/tool_runs/{runId}": { "schema": { "$ref": "#/entities/ToolRun" }, "description": "Tool execution run telemetry." }
   }
 }

@@ -16,7 +16,7 @@ import {
 import { WhatsAppIcon } from './SocialIcons';
 import { api, OrderReceipt, PublicConfig } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { getFirebaseUid, logCloudActivity, saveOrderMetadataCloud } from '../utils/cloudStore';
+import { getFirebaseUid, logCloudActivity } from '../utils/cloudStore';
 import {
   buildClientWhatsappUrl,
   calculateClientPricing,
@@ -248,14 +248,6 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
       const fbUid = getFirebaseUid();
       if (fbUid) {
-        void saveOrderMetadataCloud({
-          order: res.order,
-          authorUid: fbUid,
-          userSerialNumber: user?.serialNumber || null,
-          userEmail: user?.email || null,
-          platformUsername: platformUsername.trim(),
-          credentialsPurged: false,
-        });
         void logCloudActivity(fbUid, {
           eventType: 'order_create',
           label: `طلب اشتراك جديد #${res.order.orderCode}`,

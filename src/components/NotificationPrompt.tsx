@@ -162,7 +162,7 @@ async function ensureBrowserPushSubscription(): Promise<{
   if (!vapid.enabled || !vapid.publicKey) {
     return {
       ok: false,
-      message: 'الإشعارات متوقفة مؤقتاً من لوحة الإدارة.',
+      message: vapid.error || 'الإشعارات متوقفة مؤقتاً من لوحة الإدارة.',
     };
   }
 
@@ -377,193 +377,8 @@ export async function unsubscribeBrowserFromPush(): Promise<{ ok: boolean; messa
   };
 }
 
-export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = ({
-  notificationsEnabled = true,
-}) => {
-  const [visible, setVisible] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [feedback, setFeedback] = useState<{ ok: boolean; text: string; standalone?: boolean } | null>(
-    null
-  );
-
-  useEffect(() => {
-    if (!notificationsEnabled || !isPushBrowserSupported()) return;
-
-    const runSyncOrPrompt = async () => {
-      if (Notification.permission === 'granted') {
-        setVisible(false);
-        await syncPushSubscriptionSilently();
-        return true;
-      }
-      return false;
-    };
-
-    const onAuthOrOnline = () => {
-      void runSyncOrPrompt();
-    };
-    const onPushUpdated = () => {
-      if (Notification.permission === 'granted' && getStorageFlag(ACTIVATED_ONCE_KEY) === '1') {
-        setVisible((prev) => (prev ? prev : false));
-      }
-    };
-    window.addEventListener('crovo:auth-updated', onAuthOrOnline);
-    window.addEventListener('online', onAuthOrOnline);
-    window.addEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
-
-    let cancelled = false;
-    let timerId: number | null = null;
-
-    const scheduleCheck = async () => {
-      if (cancelled) return;
-      const synced = await runSyncOrPrompt();
-      if (synced || cancelled) return;
-      if (Notification.permission !== 'default') return;
-      if (getStorageFlag(OPTED_OUT_KEY) === '1') return;
-
-      const dismissedUntil = Number(getStorageFlag(DISMISS_KEY) || '0');
-      if (dismissedUntil > Date.now()) return;
-
-      const tryShow = async () => {
-        if (cancelled) return;
-        const welcomeOpen = Boolean(document.querySelector('[data-testid="first-visit-welcome-modal"]'));
-        if (welcomeOpen) {
-          timerId = window.setTimeout(() => void tryShow(), 700);
-          return;
-        }
-        try {
-          const status = await api.getPushStatus();
-          if (cancelled) return;
-          if (status.subscribed) {
-            setStorageFlag(ACTIVATED_ONCE_KEY, '1');
-            setVisible(false);
-            return;
-          }
-          if (status.notificationsEnabled && Notification.permission === 'default') {
-            setVisible(true);
-          }
-        } catch {
-          // Silent fail
-        }
-      };
-
-      timerId = window.setTimeout(() => void tryShow(), 1500);
-    };
-
-    void scheduleCheck();
-
-    return () => {
-      cancelled = true;
-      if (timerId !== null) window.clearTimeout(timerId);
-      window.removeEventListener('crovo:auth-updated', onAuthOrOnline);
-      window.removeEventListener('online', onAuthOrOnline);
-      window.removeEventListener(PUSH_UPDATED_EVENT, onPushUpdated);
-    };
-  }, [notificationsEnabled]);
-
-  const handleDismiss = () => {
-    setStorageFlag(DISMISS_KEY, String(Date.now() + DISMISS_DAYS * 86400 * 1000));
-    setVisible(false);
-  };
-
-  const handleEnable = async () => {
-    if (busy) return;
-    setBusy(true);
-    setFeedback(null);
-    try {
-      const res = await subscribeBrowserToPush();
-      setFeedback({
-        ok: res.ok,
-        text: res.message,
-        standalone: res.requiresStandaloneWindow,
-      });
-      if (res.ok) {
-        window.setTimeout(() => setVisible(false), 1100);
-      }
-    } catch (err) {
-      setFeedback({
-        ok: false,
-        text: err instanceof Error ? err.message : 'تعذر تفعيل الإشعارات.',
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (!visible) return null;
-
-  return (
-    <div
-      data-testid="notification-prompt"
-      className="fixed bottom-4 left-4 right-4 sm:left-6 sm:right-auto z-40 sm:max-w-sm animate-modal-pop"
-    >
-      <div className="clay-card p-4 bg-white border border-indigo-200/70 shadow-2xl text-right">
-        <button
-          type="button"
-          aria-label="إغلاق"
-          onClick={handleDismiss}
-          className="absolute top-3 left-3 p-1.5 rounded-xl clay-btn text-slate-400 hover:text-slate-700"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
-
-        <div className="flex items-start gap-3 pl-6">
-          <div className="w-9 h-9 rounded-2xl clay-apple-blue flex items-center justify-center text-white shrink-0 shadow-sm">
-            <Bell className="w-4 h-4" />
-          </div>
-
-          <div className="space-y-2 flex-1">
-            <h3 className="text-sm font-black font-decorative text-slate-900">
-              فعّل إشعارات العروض والخصومات
-            </h3>
-            <p className="text-[11px] text-slate-600 font-ios leading-relaxed">
-              اضغط موافقة مرة واحدة بس عشان يوصلك كل جديد وعروض المنصة أول بأول.
-            </p>
-
-            {feedback && (
-              <div
-                className={`p-2.5 rounded-xl clay-inset text-[11px] font-bold font-ios space-y-1.5 ${
-                  feedback.ok ? 'text-indigo-700' : 'text-rose-600'
-                }`}
-              >
-                <p>{feedback.text}</p>
-                {feedback.standalone && typeof window !== 'undefined' && (
-                  <a
-                    href={window.location.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-indigo-700 underline"
-                  >
-                    <span>فتح في نافذة مستقلة</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                )}
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={handleEnable}
-                data-testid="enable-notifications-btn"
-                className="clay-apple-blue px-3.5 py-2 rounded-xl text-xs font-black text-white font-ios flex-1 disabled:opacity-60"
-              >
-                {busy ? 'جاري التفعيل...' : 'تفعيل مرة واحدة الآن'}
-              </button>
-              <button
-                type="button"
-                onClick={handleDismiss}
-                data-testid="dismiss-notifications-btn"
-                className="clay-btn px-3 py-2 rounded-xl text-xs font-bold text-slate-600 font-ios"
-              >
-                مش دلوقتي
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = () => {
+  return null;
 };
 
 export const PushPreferenceWidget: React.FC = () => {
@@ -591,7 +406,20 @@ export const PushPreferenceWidget: React.FC = () => {
     setPermState(currentPerm);
 
     try {
-      const status = await api.getPushStatus();
+      let activeEndpoint: string | undefined;
+      if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+        try {
+          const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+          const sub = await reg?.pushManager.getSubscription();
+          if (sub?.endpoint) {
+            activeEndpoint = sub.endpoint;
+          }
+        } catch {
+          // Ignore SW registration read error
+        }
+      }
+
+      const status = await api.getPushStatus(activeEndpoint);
       if (
         !status.subscribed &&
         status.notificationsEnabled &&
@@ -600,7 +428,15 @@ export const PushPreferenceWidget: React.FC = () => {
       ) {
         const synced = await syncPushSubscriptionSilently();
         if (synced) {
-          const updated = await api.getPushStatus();
+          let syncedEndpoint = activeEndpoint;
+          try {
+            const reg = await navigator.serviceWorker.getRegistration('/sw.js');
+            const sub = await reg?.pushManager.getSubscription();
+            if (sub?.endpoint) syncedEndpoint = sub.endpoint;
+          } catch {
+            // ignore
+          }
+          const updated = await api.getPushStatus(syncedEndpoint);
           setSubscribed(updated.subscribed);
           setNotificationsEnabled(updated.notificationsEnabled);
           setIntervalDays(updated.intervalDays);
@@ -611,7 +447,7 @@ export const PushPreferenceWidget: React.FC = () => {
       setNotificationsEnabled(status.notificationsEnabled);
       setIntervalDays(status.intervalDays);
     } catch {
-      // Ignore transient failure
+      // Keep prior UI state cleanly without faking success
     } finally {
       setLoading(false);
     }

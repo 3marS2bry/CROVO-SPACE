@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowDown, Zap, CheckCircle2, ShieldCheck, Sparkles, BookOpen, ThumbsUp } from 'lucide-react';
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
-import { api } from '../utils/api';
+import { api, ApiError } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
+import { getCachedToolLikes, hasCompletedInitialBootstrap, setFastToolLikes, subscribeFastStore } from '../utils/fastStore';
 
 interface HeroSectionProps {
   onScrollToLibrary: () => void;
@@ -16,11 +17,12 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   onOpenToolDetails,
   onOpenSubscription,
 }) => {
-  const { user, isCloudUser } = useAuth();
-  const [cloudLikesCount, setCloudLikesCount] = useState(0);
+  const { user, isCloudUser, openAuthModal } = useAuth();
+  const [cloudLikesCount, setCloudLikesCount] = useState(() => getCachedToolLikes().count);
   const [cloudHasLiked, setCloudHasLiked] = useState(false);
-  const [apiLikesCount, setApiLikesCount] = useState(0);
-  const [apiHasLiked, setApiHasLiked] = useState(false);
+  const [apiLikesCount, setApiLikesCount] = useState(() => getCachedToolLikes().count);
+  const [apiHasLiked, setApiHasLiked] = useState(() => getCachedToolLikes().liked);
+  const [likesResolved, setLikesResolved] = useState(() => getCachedToolLikes().resolved);
   const [liking, setLiking] = useState(false);
   const [browseBurst, setBrowseBurst] = useState(false);
 
@@ -29,14 +31,30 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    api
-      .getLikes('tool')
-      .then((res) => {
-        if (!mounted) return;
-        setApiLikesCount(res.count);
-        setApiHasLiked(res.liked);
-      })
-      .catch(() => {});
+
+    const unsubFast = subscribeFastStore(() => {
+      if (!mounted) return;
+      const cached = getCachedToolLikes();
+      if (cached.resolved) {
+        setApiLikesCount(cached.count);
+        setApiHasLiked(cached.liked);
+        setLikesResolved(true);
+      }
+    });
+
+    // Only fetch /api/likes independently if user signed in (for personalized liked flag) or bootstrap already completed without resolving likes
+    if (user?.id || (hasCompletedInitialBootstrap() && !getCachedToolLikes().resolved)) {
+      api
+        .getLikes('tool')
+        .then((res) => {
+          if (!mounted) return;
+          setApiLikesCount(res.count);
+          setApiHasLiked(res.liked);
+          setLikesResolved(true);
+          setFastToolLikes(res);
+        })
+        .catch(() => {});
+    }
 
     const unsubCloud = subscribeToolLikesCloud(
       isCloudUser ? getFirebaseUid() : null,
@@ -44,6 +62,9 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
         if (!mounted) return;
         setCloudLikesCount(state.count);
         setCloudHasLiked(state.liked);
+        if (state.count > 0) {
+          setLikesResolved(true);
+        }
       }
     );
 
@@ -52,11 +73,13 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
       if (detail?.itemKey === 'tool') {
         setApiLikesCount(detail.count);
         setApiHasLiked(detail.liked);
+        setLikesResolved(true);
       }
     };
     window.addEventListener('crovo:likes-updated', onLikesUpdated);
     return () => {
       mounted = false;
+      unsubFast();
       unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
@@ -101,27 +124,31 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
       const res = await api.toggleLike('tool', nextDesired);
       setApiLikesCount(res.count);
       setApiHasLiked(res.liked);
+      setCloudLikesCount(res.count);
+      setCloudHasLiked(res.liked);
+      setLikesResolved(true);
+      setFastToolLikes(res);
       const fbUid = getFirebaseUid();
       if (fbUid) {
-        toggleToolLikeCloud(fbUid, res.liked)
-          .then((cloudRes) => {
-            setCloudLikesCount(cloudRes.count);
-            setCloudHasLiked(cloudRes.liked);
-          })
-          .catch(() => {});
         void logCloudActivity(fbUid, {
           eventType: res.liked ? 'tool_like' : 'tool_unlike',
           label: res.liked ? 'إعجاب بالأداة' : 'إلغاء الإعجاب بالأداة',
           path: '/',
         });
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        openAuthModal('سجّل دخولك الأول عشان تضيف إعجابك بالأداة ويُحسب باسمك.');
+        return;
+      }
       const fbUid = getFirebaseUid();
       if (fbUid) {
         try {
           const cloudRes = await toggleToolLikeCloud(fbUid, nextDesired);
           setCloudLikesCount(cloudRes.count);
           setCloudHasLiked(cloudRes.liked);
+          setLikesResolved(true);
+          setFastToolLikes({ itemKey: 'tool', count: cloudRes.count, liked: cloudRes.liked });
         } catch {}
       }
     } finally {
@@ -248,8 +275,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                 }`}
               >
                 <ThumbsUp className={`w-3.5 h-3.5 ${hasLiked ? 'fill-white text-white' : ''}`} />
-                <span data-testid="hero-likes-count" className="font-mono tabular-nums">
-                  {likesCount}
+                <span data-testid="hero-likes-count" className="font-mono tabular-nums min-w-[1ch] text-center">
+                  {likesResolved || likesCount > 0 ? likesCount : '···'}
                 </span>
               </button>
             </div>

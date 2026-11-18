@@ -86,86 +86,31 @@ export const AuthModal: React.FC = () => {
       if (mode === 'register') {
         const cloudUser = await registerWithEmailCloud({ name, email, password, grade });
         let finalUser = cloudUser;
-        try {
-          const res = await api.authRegister({ name, email, password, grade });
-          finalUser = res.user;
-          if (cloudUser?.serialNumber && cloudUser.serialNumber !== res.user.serialNumber) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name,
-                grade,
-                serialNumber: cloudUser.serialNumber,
-              });
-              finalUser = synced.user;
-            }
-          }
-        } catch (regErr) {
-          if (cloudUser) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name: cloudUser.name,
-                grade,
-                serialNumber: cloudUser.serialNumber,
-              });
-              finalUser = synced.user;
-            }
-          } else {
-            throw regErr;
-          }
-        }
-        if (!finalUser) {
-          throw new Error('تعذر إنشاء الحساب، تأكد من البيانات وجرب تاني.');
+        const idToken = await getFirebaseIdToken();
+        if (idToken) {
+          const synced = await api.authCloudSync({
+            idToken,
+            name: cloudUser.name,
+            grade,
+            serialNumber: cloudUser.serialNumber,
+          });
+          finalUser = synced.user;
         }
         consumePendingAction(finalUser);
       } else {
-        let localRes: { ok: boolean; token: string; user: import('../utils/api').AuthUser } | null = null;
-        let localErr: unknown = null;
-        const [apiOutcome, cloudUser] = await Promise.all([
-          api.authLogin({ email, password }).catch((err) => {
-            localErr = err;
-            return null;
-          }),
-          signInWithEmailCloud({ email, password }),
-        ]);
-        localRes = apiOutcome;
-
-        if (localRes?.user) {
-          let finalUser = localRes.user;
-          if (cloudUser?.serialNumber && cloudUser.serialNumber !== finalUser.serialNumber) {
-            const idToken = await getFirebaseIdToken();
-            if (idToken) {
-              const synced = await api.authCloudSync({
-                idToken,
-                name: finalUser.name,
-                grade: finalUser.grade,
-                serialNumber: cloudUser.serialNumber,
-              }).catch(() => null);
-              if (synced?.user) finalUser = synced.user;
-            }
-          }
-          consumePendingAction(finalUser);
-        } else if (cloudUser) {
-          const idToken = await getFirebaseIdToken();
-          if (idToken) {
-            const synced = await api.authCloudSync({
-              idToken,
-              name: cloudUser.name,
-              grade: cloudUser.grade,
-              serialNumber: cloudUser.serialNumber,
-            });
-            consumePendingAction(synced.user);
-          } else {
-            consumePendingAction(cloudUser);
-          }
-        } else {
-          throw localErr instanceof Error
-            ? localErr
-            : new Error('البريد الإلكتروني أو كلمة المرور غير صحيحة.');
+        const cloudUser = await signInWithEmailCloud({ email, password });
+        let finalUser = cloudUser;
+        const idToken = await getFirebaseIdToken();
+        if (idToken) {
+          const synced = await api.authCloudSync({
+            idToken,
+            name: cloudUser.name,
+            grade: cloudUser.grade,
+            serialNumber: cloudUser.serialNumber,
+          });
+          finalUser = synced.user;
         }
+        consumePendingAction(finalUser);
       }
       setPassword('');
     } catch (err) {

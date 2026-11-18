@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Play, ShieldCheck, Zap, Sparkles, Flame, Eye, X, ThumbsUp, MessageSquare } from 'lucide-react';
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
 import { toolVideos as fallbackVideos, toolScreenshots, examSolverFaqs } from '../data/chaptersData';
-import { api, PublicConfig } from '../utils/api';
+import { api, ApiError, PublicConfig } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
+import { getCachedToolLikes, hasCompletedInitialBootstrap, setFastToolLikes, subscribeFastStore } from '../utils/fastStore';
 import confetti from 'canvas-confetti';
 
 interface ToolDetailsPageProps {
@@ -61,11 +62,11 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
   const safeVideoIdx = activeVideoIdx >= videosList.length ? 0 : activeVideoIdx;
   const activeVideo = videosList[safeVideoIdx] || videosList[0];
 
-  const { user, isCloudUser } = useAuth();
-  const [cloudLikesCount, setCloudLikesCount] = useState<number>(0);
+  const { user, isCloudUser, openAuthModal } = useAuth();
+  const [cloudLikesCount, setCloudLikesCount] = useState<number>(() => getCachedToolLikes().count);
   const [cloudHasLiked, setCloudHasLiked] = useState<boolean>(false);
-  const [apiLikesCount, setApiLikesCount] = useState<number>(0);
-  const [apiHasLiked, setApiHasLiked] = useState<boolean>(false);
+  const [apiLikesCount, setApiLikesCount] = useState<number>(() => getCachedToolLikes().count);
+  const [apiHasLiked, setApiHasLiked] = useState<boolean>(() => getCachedToolLikes().liked);
   const [liking, setLiking] = useState<boolean>(false);
   const [likeError, setLikeError] = useState<string | null>(null);
 
@@ -74,14 +75,26 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    api
-      .getLikes('tool')
-      .then((res) => {
-        if (!mounted) return;
-        setApiLikesCount(res.count);
-        setApiHasLiked(res.liked);
-      })
-      .catch(() => {});
+    const unsubFast = subscribeFastStore(() => {
+      if (!mounted) return;
+      const cached = getCachedToolLikes();
+      if (cached.resolved) {
+        setApiLikesCount(cached.count);
+        setApiHasLiked(cached.liked);
+      }
+    });
+
+    if (user?.id || (hasCompletedInitialBootstrap() && !getCachedToolLikes().resolved)) {
+      api
+        .getLikes('tool')
+        .then((res) => {
+          if (!mounted) return;
+          setApiLikesCount(res.count);
+          setApiHasLiked(res.liked);
+          setFastToolLikes(res);
+        })
+        .catch(() => {});
+    }
 
     const unsubCloud = subscribeToolLikesCloud(
       isCloudUser ? getFirebaseUid() : null,
@@ -102,6 +115,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
     window.addEventListener('crovo:likes-updated', onLikesUpdated);
     return () => {
       mounted = false;
+      unsubFast();
       unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
@@ -118,20 +132,26 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         const res = await api.toggleLike('tool', nextDesired);
         setApiLikesCount(res.count);
         setApiHasLiked(res.liked);
+        setCloudLikesCount(res.count);
+        setCloudHasLiked(res.liked);
+        setFastToolLikes(res);
         nextLiked = res.liked;
       } catch (apiErr) {
+        if (apiErr instanceof ApiError && apiErr.status === 401) {
+          openAuthModal('سجّل دخولك الأول عشان تضيف إعجابك بالأداة ويُحسب باسمك.');
+          return;
+        }
         const fbUid = getFirebaseUid();
         if (!fbUid) throw apiErr;
+        const cloudRes = await toggleToolLikeCloud(fbUid, nextDesired);
+        setCloudLikesCount(cloudRes.count);
+        setCloudHasLiked(cloudRes.liked);
+        setFastToolLikes({ itemKey: 'tool', count: cloudRes.count, liked: cloudRes.liked });
+        nextLiked = cloudRes.liked;
       }
 
       const fbUid = getFirebaseUid();
       if (fbUid) {
-        try {
-          const cloudRes = await toggleToolLikeCloud(fbUid, nextLiked);
-          setCloudLikesCount(cloudRes.count);
-          setCloudHasLiked(cloudRes.liked);
-          nextLiked = cloudRes.liked;
-        } catch {}
         void logCloudActivity(fbUid, {
           eventType: nextLiked ? 'tool_like' : 'tool_unlike',
           label: nextLiked ? 'إعجاب بالأداة' : 'إلغاء الإعجاب بالأداة',

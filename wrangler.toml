@@ -2,8 +2,9 @@ name = "crovo-space"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-01-01"
 
-[[d1_databases]]
-binding = "DB"
-database_name = "crovo-space-db"
-database_id = "53d2ac36-dbc3-4c4b-b67e-bda88d682088"
-migrations_dir = "migrations"
+# Free Cloudflare KV namespace for distributed rate limiting & order idempotency
+# Run: npx wrangler kv namespace create RATE_LIMIT_KV
+# Then replace the id below before deploying to Cloudflare Pages:
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"

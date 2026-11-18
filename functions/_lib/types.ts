@@ -1,49 +1,33 @@
-export interface D1Meta {
-  duration?: number;
-  changes?: number;
-  last_row_id?: number;
-  changed_db?: boolean;
-  size_after?: number;
-  rows_read?: number;
-  rows_written?: number;
+export interface KVNamespacePutOptions {
+  expiration?: number;
+  expirationTtl?: number;
+  metadata?: unknown;
 }
 
-export interface D1Result<T = Record<string, unknown>> {
-  results: T[];
-  success: boolean;
-  meta: D1Meta;
-}
-
-export interface D1ExecResult {
-  count: number;
-  duration: number;
-}
-
-export interface D1PreparedStatement {
-  bind(...values: unknown[]): D1PreparedStatement;
-  first<T = Record<string, unknown>>(colName?: string): Promise<T | null>;
-  all<T = Record<string, unknown>>(): Promise<D1Result<T>>;
-  run<T = Record<string, unknown>>(): Promise<D1Result<T>>;
-  raw<T = unknown[]>(options?: { columnNames?: boolean }): Promise<T[]>;
-}
-
-export interface D1Database {
-  prepare(query: string): D1PreparedStatement;
-  batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
-  exec(query: string): Promise<D1ExecResult>;
+export interface KVNamespace {
+  get(key: string, options?: { type?: 'text' }): Promise<string | null>;
+  get<T = unknown>(key: string, options: { type: 'json' }): Promise<T | null>;
+  put(key: string, value: string, options?: KVNamespacePutOptions): Promise<void>;
+  delete(key: string): Promise<void>;
 }
 
 export interface Env {
-  DB: D1Database;
+  RATE_LIMIT_KV?: KVNamespace;
+  FIREBASE_PROJECT_ID?: string;
+  FIREBASE_DATABASE_ID?: string;
+  FIREBASE_API_KEY?: string;
   SESSION_SECRET?: string;
   CREDENTIAL_ENCRYPTION_KEY?: string;
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;
+  ADMIN_FIREBASE_EMAIL?: string;
+  ADMIN_FIREBASE_PASSWORD?: string;
   ADMIN_WHATSAPP_NUMBER?: string;
   VAPID_PUBLIC_KEY?: string;
   VAPID_PRIVATE_KEY?: string;
   VAPID_SUBJECT?: string;
   PUSH_CRON_SECRET?: string;
+  NODE_ENV?: string;
 }
 
 export interface PagesEventContext<E = Env> {
@@ -66,20 +50,4 @@ export interface AuthUser {
   role: 'user' | 'admin';
   status: 'active' | 'suspended';
   suspendReason: string | null;
-}
-
-export interface EdgeRequestContext {
-  request: Request;
-  url: URL;
-  env: Env;
-  db: D1Database;
-  visitorId: string;
-  visitorToken: string;
-  ipHash: string;
-  currentUser: AuthUser | null;
-  sessionSecret: string;
-  encryptionKey: string;
-  adminUsername: string;
-  adminPassword: string;
-  cookies: Record<string, string>;
 }

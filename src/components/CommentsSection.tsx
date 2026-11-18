@@ -16,8 +16,14 @@ import {
   UserCircle2,
   X,
 } from 'lucide-react';
-import { api, CommentItem } from '../utils/api';
+import { api, ApiError, CommentItem } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
+import {
+  getCachedComments,
+  hasCompletedInitialBootstrap,
+  setFastComments,
+  subscribeFastStore,
+} from '../utils/fastStore';
 import {
   createCloudComment,
   deleteCloudComment,
@@ -110,8 +116,8 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
 }) => {
   const { user, isCloudUser, openAuthModal } = useAuth();
   const [cloudComments, setCloudComments] = useState<CommentItem[]>([]);
-  const [apiComments, setApiComments] = useState<CommentItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [apiComments, setApiComments] = useState<CommentItem[]>(() => getCachedComments() || []);
+  const [loading, setLoading] = useState(() => getCachedComments() === null);
   const [error, setError] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(fullPageMode);
   const [reviewFilter, setReviewFilter] = useState<'all' | 'verified' | 'withImage'>('all');
@@ -149,7 +155,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   const loadApiComments = async () => {
     try {
       const res = await api.getComments();
-      setApiComments(res.comments.map((c) => ({ ...c, source: 'api' })));
+      const mapped = res.comments.map((c) => ({ ...c, source: 'api' as const }));
+      setApiComments(mapped);
+      setFastComments(mapped);
       setError(null);
     } catch {
       // Keep cloud comments if backend API is temporarily unavailable
@@ -159,7 +167,17 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   };
 
   useEffect(() => {
-    loadApiComments();
+    const unsubFast = subscribeFastStore(() => {
+      const cached = getCachedComments();
+      if (cached) {
+        setApiComments(cached);
+        setLoading(false);
+      }
+    });
+
+    if (user?.id || (hasCompletedInitialBootstrap() && getCachedComments() === null)) {
+      void loadApiComments();
+    }
 
     const unsubCloud = subscribeCloudComments(
       isCloudUser ? getFirebaseUid() : null,
@@ -174,10 +192,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     );
 
     const handleAuthChanged = () => {
-      loadApiComments();
+      void loadApiComments();
     };
     window.addEventListener('crovo:auth-updated', handleAuthChanged);
     return () => {
+      unsubFast();
       unsubCloud();
       window.removeEventListener('crovo:auth-updated', handleAuthChanged);
     };
@@ -298,6 +317,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         savedComment = { ...res.comment, source: 'api' };
         setApiComments((prev) => [savedComment!, ...prev]);
       } catch (apiErr) {
+        if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 400 || apiErr.status === 429)) {
+          throw apiErr;
+        }
         if (!fbUid) throw apiErr;
         savedComment = await createCloudComment(fbUid, {
           authorName,
@@ -309,20 +331,10 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           attachmentBeforeDataUrl,
           attachmentAfterDataUrl,
         });
+        setCloudComments((prev) => [savedComment!, ...prev]);
       }
 
-      if (fbUid && savedComment && savedComment.source === 'api') {
-        void createCloudComment(fbUid, {
-          id: savedComment.id,
-          authorName,
-          grade,
-          rating,
-          content,
-          contactPhone: contactPhone.trim() || undefined,
-          avatarDataUrl,
-          attachmentBeforeDataUrl,
-          attachmentAfterDataUrl,
-        }).catch(() => {});
+      if (fbUid) {
         void logCloudActivity(fbUid, {
           eventType: 'comment_create',
           label: 'إضافة تقييم وتعليق',
@@ -340,6 +352,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       setContactPhone('');
       setFormMsg({ type: 'ok', text: 'تسلم يا بطل! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.' });
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        openAuthModal('سجّل دخولك الأول عشان تقدر تنشر تعليقك.');
+      }
       setFormMsg({
         type: 'err',
         text: err instanceof Error ? err.message : 'تعذر نشر التعليق، حاول تاني.',
@@ -351,19 +366,16 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
 
   const handleSaveEdit = async (cmt: CommentItem) => {
     try {
-      const inApi = apiCommentIds.has(cmt.id);
-      const inCloud = cloudCommentIds.has(cmt.id);
       const fbUid = getFirebaseUid();
-      let cloudUpdated = false;
-      if (inCloud && fbUid) {
-        await updateCloudComment(cmt.id, { content: editContent, rating: editRating });
-        cloudUpdated = true;
-      }
-      if (inApi || !cloudUpdated) {
-        await api.updateComment(cmt.id, { content: editContent, rating: editRating }).catch((err) => {
-          if (!cloudUpdated) throw err;
-        });
+      try {
+        await api.updateComment(cmt.id, { content: editContent, rating: editRating });
         await loadApiComments();
+      } catch (apiErr) {
+        if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 403 || apiErr.status === 404)) {
+          throw apiErr;
+        }
+        if (!fbUid) throw apiErr;
+        await updateCloudComment(cmt.id, { content: editContent, rating: editRating });
       }
       if (fbUid) {
         void logCloudActivity(fbUid, {
@@ -381,21 +393,18 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
 
   const handleDelete = async (cmt: CommentItem) => {
     try {
-      const inApi = apiCommentIds.has(cmt.id);
-      const inCloud = cloudCommentIds.has(cmt.id);
       const fbUid = getFirebaseUid();
-      let cloudDeleted = false;
-      if (inCloud && fbUid) {
+      try {
+        await api.deleteComment(cmt.id);
+      } catch (apiErr) {
+        if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 403)) {
+          throw apiErr;
+        }
+        if (!fbUid) throw apiErr;
         await deleteCloudComment(cmt.id);
-        cloudDeleted = true;
-        setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
       }
-      if (inApi || !cloudDeleted) {
-        await api.deleteComment(cmt.id).catch((err) => {
-          if (!cloudDeleted) throw err;
-        });
-        setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
-      }
+      setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+      setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
       if (fbUid) {
         void logCloudActivity(fbUid, {
           eventType: 'comment_delete',
@@ -411,28 +420,28 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
 
   const handleReportSubmit = async (cmt: CommentItem) => {
     try {
-      const inApi = apiCommentIds.has(cmt.id);
-      const inCloud = cloudCommentIds.has(cmt.id);
       const fbUid = getFirebaseUid();
-
-      if (inApi || !inCloud) {
+      try {
         const res = await api.reportComment(cmt.id, reportReason);
         setReportingId(null);
         setReportNotice(res.message);
         if (res.flaggedForReview) {
           setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+          setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
         }
-        if (inCloud && fbUid) {
-          void reportCloudComment(cmt.id, fbUid, reportReason).catch(() => {});
+      } catch (apiErr) {
+        if (apiErr instanceof ApiError && apiErr.status === 401) {
+          setReportingId(null);
+          openAuthModal('سجّل دخولك لإرسال بلاغ عن تعليق.');
+          return;
         }
-      } else if (fbUid) {
+        if (apiErr instanceof ApiError && apiErr.status === 409) {
+          throw apiErr;
+        }
+        if (!fbUid) throw apiErr;
         const res = await reportCloudComment(cmt.id, fbUid, reportReason);
         setReportingId(null);
         setReportNotice(res.message);
-      } else {
-        setReportingId(null);
-        openAuthModal('سجّل دخولك لإرسال بلاغ عن تعليق.');
-        return;
       }
       window.setTimeout(() => setReportNotice(null), 4000);
     } catch (err) {
@@ -444,45 +453,39 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   const handleToggleCommentLike = async (cmt: CommentItem) => {
     if (likingIds[cmt.id]) return;
 
-    const inApi = apiCommentIds.has(cmt.id);
-    const inCloud = cloudCommentIds.has(cmt.id);
     const fbUid = getFirebaseUid();
-
-    if (!inApi && inCloud && !fbUid) {
-      openAuthModal('سجّل دخولك أولاً لتسجيل إعجابك بالتعليق.');
-      return;
-    }
-
     setLikingIds((prev) => ({ ...prev, [cmt.id]: true }));
     const nextDesired = !cmt.hasLiked;
     try {
-      if (inCloud && fbUid && !inApi) {
-        const res = await toggleCloudCommentLike(cmt.id, fbUid, nextDesired);
-        setCloudComments((prev) =>
-          prev.map((c) =>
-            c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
-          )
-        );
+      let res: { count: number; liked: boolean };
+      try {
+        res = await api.toggleLike(`comment:${cmt.id}`, nextDesired);
+      } catch (apiErr) {
+        if (apiErr instanceof ApiError && apiErr.status === 401) {
+          openAuthModal('سجّل دخولك أولاً لتسجيل إعجابك بالتعليق.');
+          return;
+        }
+        if (!fbUid) throw apiErr;
+        res = await toggleCloudCommentLike(cmt.id, fbUid, nextDesired);
+      }
+
+      setApiComments((prev) =>
+        prev.map((c) =>
+          c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
+        )
+      );
+      setCloudComments((prev) =>
+        prev.map((c) =>
+          c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
+        )
+      );
+
+      if (fbUid) {
         void logCloudActivity(fbUid, {
           eventType: res.liked ? 'comment_like' : 'comment_unlike',
           label: res.liked ? 'إعجاب بتعليق' : 'إلغاء الإعجاب بتعليق',
           path: '/reviews',
         });
-      } else {
-        const res = await api.toggleLike(`comment:${cmt.id}`, nextDesired);
-        setApiComments((prev) =>
-          prev.map((c) =>
-            c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
-          )
-        );
-        if (inCloud && fbUid) {
-          void toggleCloudCommentLike(cmt.id, fbUid, res.liked).catch(() => {});
-          void logCloudActivity(fbUid, {
-            eventType: res.liked ? 'comment_like' : 'comment_unlike',
-            label: res.liked ? 'إعجاب بتعليق' : 'إلغاء الإعجاب بتعليق',
-            path: '/reviews',
-          });
-        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تسجيل الإعجاب.');

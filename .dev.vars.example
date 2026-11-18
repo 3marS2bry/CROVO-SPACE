@@ -6,14 +6,16 @@
 SESSION_SECRET=""
 CREDENTIAL_ENCRYPTION_KEY=""
 
-# Admin dashboard login credentials
+# Admin Username & Password (local Wrangler dev - never commit .dev.vars)
 ADMIN_USERNAME=""
 ADMIN_PASSWORD=""
+ADMIN_FIREBASE_EMAIL=""
+ADMIN_FIREBASE_PASSWORD=""
 
 # Public WhatsApp click-to-chat number (digits only with country code)
 ADMIN_WHATSAPP_NUMBER="201550324450"
 
-# Optional persistent Web Push VAPID keys (leave empty or generate via `npx web-push generate-vapid-keys`)
+# Persistent Web Push VAPID keys (generate via `npx web-push generate-vapid-keys`)
 VAPID_SUBJECT="mailto:support@crovo.space"
 VAPID_PUBLIC_KEY=""
 VAPID_PRIVATE_KEY=""

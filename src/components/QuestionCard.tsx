@@ -10,7 +10,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { AcademicGrade, QuestionItem, SectionType } from '../types';
-import { api } from '../utils/api';
+import { api, ApiError } from '../utils/api';
 import { getFirebaseUid, saveQuestionReportCloud } from '../utils/cloudStore';
 import confetti from 'canvas-confetti';
 
@@ -120,30 +120,47 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
         questionTitle: question.q,
         description: reportText,
       });
-      const fbUid = getFirebaseUid();
-      if (fbUid && res.reportId) {
-        void saveQuestionReportCloud({
-          id: res.reportId,
-          reporterUid: fbUid,
-          questionKey,
-          grade,
-          section,
-          chapterNum,
-          qIndex: index,
-          questionTitle: question.q,
-          description: reportText.trim() || 'تبليغ عن إجابة غير صحيحة',
-        });
-      }
       setReportMsg({ type: 'ok', text: res.message });
       setReportText('');
       window.setTimeout(() => {
         setReportOpen(false);
       }, 2200);
     } catch (err) {
-      setReportMsg({
-        type: 'err',
-        text: err instanceof Error ? err.message : 'تعذر إرسال البلاغ، حاول تاني.',
-      });
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) {
+        setReportMsg({
+          type: 'err',
+          text: err.message,
+        });
+      } else {
+        const fbUid = getFirebaseUid();
+        if (fbUid) {
+          try {
+            await saveQuestionReportCloud({
+              id: `qrep_${Date.now()}`,
+              reporterUid: fbUid,
+              questionKey,
+              grade,
+              section,
+              chapterNum,
+              qIndex: index,
+              questionTitle: question.q,
+              description: reportText.trim() || 'تبليغ عن إجابة غير صحيحة',
+            });
+            setReportMsg({ type: 'ok', text: 'تم تسجيل بلاغك للمراجعة بنجاح. شكرًا لمساهمتك!' });
+            setReportText('');
+            window.setTimeout(() => {
+              setReportOpen(false);
+            }, 2200);
+            return;
+          } catch {
+            // fall through to generic error message
+          }
+        }
+        setReportMsg({
+          type: 'err',
+          text: err instanceof Error ? err.message : 'تعذر إرسال البلاغ، حاول تاني.',
+        });
+      }
     } finally {
       setReportSubmitting(false);
     }

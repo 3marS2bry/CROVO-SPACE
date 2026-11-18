@@ -7,12 +7,13 @@ import {
   votePollCloud,
 } from '../utils/cloudStore';
 import { useAuth } from '../context/AuthContext';
+import { getCachedPoll, hasCompletedInitialBootstrap, setFastPoll, subscribeFastStore } from '../utils/fastStore';
 
 export const PollSection: React.FC = () => {
   const { user, openAuthModal } = useAuth();
-  const [poll, setPoll] = useState<PollState | null>(null);
+  const [poll, setPoll] = useState<PollState | null>(() => getCachedPoll());
   const [cloudPoll, setCloudPoll] = useState<PollState | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !getCachedPoll());
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,6 +21,7 @@ export const PollSection: React.FC = () => {
     try {
       const data = await api.getPoll();
       setPoll(data);
+      setFastPoll(data);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل التصويت.');
@@ -29,16 +31,28 @@ export const PollSection: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    loadPoll();
+    const unsubFast = subscribeFastStore(() => {
+      const cached = getCachedPoll();
+      if (cached) {
+        setPoll(cached);
+        setLoading(false);
+      }
+    });
+
+    if (user?.id || (hasCompletedInitialBootstrap() && !getCachedPoll())) {
+      void loadPoll();
+    }
+
     const unsubCloud = subscribeActivePollCloud(getFirebaseUid(), (cp) => {
       setCloudPoll(cp);
       setLoading(false);
     });
     const onAuthChanged = () => {
-      loadPoll();
+      void loadPoll();
     };
     window.addEventListener('crovo:auth-updated', onAuthChanged);
     return () => {
+      unsubFast();
       unsubCloud();
       window.removeEventListener('crovo:auth-updated', onAuthChanged);
     };
@@ -61,19 +75,22 @@ export const PollSection: React.FC = () => {
       setSubmitting(choiceKey);
       setError(null);
       try {
-        const fbUid = getFirebaseUid();
-        let cloudRes: PollState | null = null;
-        if (fbUid && activePoll.pollId) {
-          cloudRes = await votePollCloud(activePoll.pollId, fbUid, choiceKey);
-        }
         try {
           const updated = await api.votePoll(choiceKey, activePoll.pollId);
           setPoll(updated);
+          setCloudPoll(updated);
+          setFastPoll(updated);
         } catch (apiErr) {
+          if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 403 || apiErr.status === 409)) {
+            throw apiErr;
+          }
+          const fbUid = getFirebaseUid();
+          if (!fbUid || !activePoll.pollId) throw apiErr;
+          const cloudRes = await votePollCloud(activePoll.pollId, fbUid, choiceKey);
           if (!cloudRes) throw apiErr;
-        }
-        if (cloudRes) {
+          setPoll(cloudRes);
           setCloudPoll(cloudRes);
+          setFastPoll(cloudRes);
         }
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
@@ -103,25 +120,20 @@ export const PollSection: React.FC = () => {
           try {
             const latest = await api.getPoll();
             setPoll(latest);
-            const targetPoll = cloudPoll || latest;
-            if (!targetPoll.closed && !targetPoll.userChoice) {
-              const fbUid = getFirebaseUid();
-              if (fbUid && targetPoll.pollId) {
-                const cloudRes = await votePollCloud(targetPoll.pollId, fbUid, choiceKey).catch(() => null);
-                if (cloudRes) setCloudPoll(cloudRes);
-              }
-              const updated = await api.votePoll(choiceKey, targetPoll.pollId).catch(() => null);
-              if (updated) setPoll(updated);
+            if (!latest.closed && !latest.userChoice) {
+              const updated = await api.votePoll(choiceKey, latest.pollId);
+              setPoll(updated);
+              setCloudPoll(updated);
             }
           } catch (err) {
             setError(err instanceof Error ? err.message : 'تعذر تسجيل صوتك.');
-            loadPoll();
+            await loadPoll();
           }
         }
       );
       return;
     }
-    submitVote(choiceKey);
+    void submitVote(choiceKey);
   };
 
   const pollToRender = activePoll;

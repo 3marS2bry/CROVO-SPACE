@@ -19,15 +19,16 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
 }) => {
   const [logs, setLogs] = useState<AdminAuditLogItem[]>([]);
   const [creatingBackup, setCreatingBackup] = useState(false);
+  const [syncingLegacy, setSyncingLegacy] = useState(false);
 
   const loadLogs = useCallback(async () => {
     try {
       const res = await api.adminAuditLogs();
       setLogs(res.logs);
-    } catch {
-      // Ignore transient error
+    } catch (err) {
+      onNotice(err instanceof Error ? err.message : 'تعذر تحميل سجل الإجراءات.');
     }
-  }, []);
+  }, [onNotice]);
 
   useEffect(() => {
     loadLogs();
@@ -38,13 +39,38 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
     setCreatingBackup(true);
     try {
       const res = await api.adminCreateBackup();
-      onNotice(`تم إنشاء نسخة احتياطية كاملة: ${res.backup.filename}`);
+      if (res.snapshot) {
+        const blob = new Blob([JSON.stringify(res.snapshot, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = res.backup.filename || `crovo-firestore-backup-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+      onNotice(`تم تصدير نسخة احتياطية كاملة من Firestore: ${res.backup.filename}`);
       onRefreshOverview();
       loadLogs();
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر إنشاء النسخة الاحتياطية.');
     } finally {
       setCreatingBackup(false);
+    }
+  };
+
+  const handleMigrateLegacy = async () => {
+    if (syncingLegacy) return;
+    setSyncingLegacy(true);
+    try {
+      const res = await api.adminMigrateLegacy();
+      const total = Object.values(res.seeded || {}).reduce((a, b) => a + b, 0);
+      onNotice(`تم توحيد ومزامنة البيانات الافتراضية والمكتبة مع Firestore بنجاح (${total} سجل).`);
+      onRefreshOverview();
+      loadLogs();
+    } catch (err) {
+      onNotice(err instanceof Error ? err.message : 'تعذر مزامنة البيانات مع Firestore.');
+    } finally {
+      setSyncingLegacy(false);
     }
   };
 
@@ -56,37 +82,49 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4 text-indigo-600" />
             <h2 className="text-base font-black font-decorative">
-              حماية البيانات والنسخ الاحتياطي
+              قاعدة بيانات Firestore الموحدة والنسخ الاحتياطي
             </h2>
           </div>
 
-          <button
-            type="button"
-            disabled={creatingBackup}
-            onClick={handleBackup}
-            className="clay-apple-blue px-4 py-2 rounded-xl font-bold text-white flex items-center gap-1.5"
-          >
-            <HardDrive className="w-3.5 h-3.5" />
-            <span>{creatingBackup ? 'جاري الإنشاء...' : 'نسخة احتياطية الآن'}</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={syncingLegacy}
+              onClick={handleMigrateLegacy}
+              className="clay-btn px-3.5 py-2 rounded-xl font-bold text-indigo-700 flex items-center gap-1.5"
+            >
+              <Database className="w-3.5 h-3.5" />
+              <span>{syncingLegacy ? 'جاري المزامنة...' : 'توحيد ومزامنة المكتبة والإعدادات مع Firestore'}</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={creatingBackup}
+              onClick={handleBackup}
+              className="clay-apple-blue px-4 py-2 rounded-xl font-bold text-white flex items-center gap-1.5"
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              <span>{creatingBackup ? 'جاري التصدير...' : 'تصدير نسخة احتياطية JSON'}</span>
+            </button>
+          </div>
         </div>
 
         <div className="p-3 rounded-xl clay-inset flex flex-wrap items-center justify-between gap-2">
-          <span className="font-bold">فحص سلامة واستقرار التخزين:</span>
+          <span className="font-bold">فحص اتصال وسلامة Cloud Firestore:</span>
           <span className={`font-black font-mono ${dbIntegrity.ok ? 'text-indigo-700' : 'text-rose-600'}`}>
-            {dbIntegrity.ok ? 'سليمة ✓ (OK)' : dbIntegrity.detail}
+            {dbIntegrity.ok ? 'متصل وسليم ✓ (Firestore OK)' : dbIntegrity.detail}
           </span>
         </div>
 
-        <div className="p-3 rounded-xl clay-inset flex items-start gap-2 text-amber-800 font-bold">
-          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+        <div className="p-3 rounded-xl clay-inset flex items-start gap-2 text-indigo-800 font-bold">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-indigo-600" />
           <span>{storageNotice}</span>
         </div>
 
         <div className="space-y-1.5">
-          <div className="font-bold text-slate-600">النسخ الاحتياطية المحفوظة ({backups.length}):</div>
+          <div className="font-bold text-slate-600">سجل النسخ المُصدّرة ({backups.length}):</div>
           {backups.length === 0 ? (
-            <div className="p-3 rounded-xl clay-inset text-slate-500">لا توجد نسخ محفوظة بعد.</div>
+            <div className="p-3 rounded-xl clay-inset text-slate-500">لا توجد نسخ مُصدّرة بعد. اضغط «تصدير نسخة احتياطية JSON» لتحميل نسخة كاملة فوراً.</div>
           ) : (
             backups.map((b) => (
               <div

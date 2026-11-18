@@ -29,20 +29,8 @@ import {
 import { api } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import {
-  deleteCommentAdminCloud,
-  deleteOrderAdminCloud,
   getFirebaseIdToken,
-  getFirebaseUid,
-  listAllCommentsAdminCloud,
-  listOrdersAdminCloud,
-  listQuestionReportsAdminCloud,
-  saveOrderMetadataCloud,
-  saveQuestionReportCloud,
   signInWithGoogleCloud,
-  syncSiteConfigToCloud,
-  updateCommentAdminCloud,
-  updateOrderAdminCloud,
-  updateQuestionReportCloud,
 } from '../utils/cloudStore';
 import { AdminAnalyticsTab } from './admin/AdminAnalyticsTab';
 import { AdminUsersTab } from './admin/AdminUsersTab';
@@ -76,14 +64,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onBackToSite,
   onConfigUpdated,
 }) => {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [loggingIn, setLoggingIn] = useState(false);
   const [googleLoggingIn, setGoogleLoggingIn] = useState(false);
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [showAdminPassword, setShowAdminPassword] = useState(false);
+  const [passwordLoggingIn, setPasswordLoggingIn] = useState(false);
 
   const [tab, setTab] = useState<AdminTab>('analytics');
   const [data, setData] = useState<OverviewData | null>(null);
@@ -152,131 +141,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const loadOverview = useCallback(async () => {
     setLoadingData(true);
     try {
-      const [overview, cloudOrders, cloudComments, cloudReports] = await Promise.all([
-        api.adminOverview(),
-        listOrdersAdminCloud().catch(() => []),
-        listAllCommentsAdminCloud().catch(() => []),
-        listQuestionReportsAdminCloud().catch(() => []),
-      ]);
-
-      // Merge Orders (keep local encrypted/decrypted password when present + include cross-site orders)
-      const ordersById = new Map<string, OverviewData['orders'][number]>();
-      for (const co of cloudOrders) {
-        ordersById.set(co.id, co);
-      }
-      for (const lo of overview.orders) {
-        const cloudMatch = ordersById.get(lo.id);
-        ordersById.set(lo.id, {
-          ...lo,
-          status: cloudMatch?.status || lo.status,
-          credentialsPurged: Boolean(lo.credentialsPurged || cloudMatch?.credentialsPurged),
-          userSerialNumber: lo.userSerialNumber || cloudMatch?.userSerialNumber || null,
-          userEmail: lo.userEmail || cloudMatch?.userEmail || null,
-        });
-      }
-      const mergedOrders = Array.from(ordersById.values()).sort(
-        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
-      );
-
-      // Merge Comments (merge cloud moderation/likes + cross-site reviews)
-      const commentsById = new Map<string, OverviewData['comments'][number]>();
-      for (const cc of cloudComments) {
-        commentsById.set(cc.id, cc);
-      }
-      for (const lc of overview.comments) {
-        const cloudMatch = commentsById.get(lc.id);
-        commentsById.set(lc.id, {
-          ...lc,
-          isVerified: Boolean(lc.isVerified || cloudMatch?.isVerified),
-          status: cloudMatch?.status || lc.status,
-          likesCount: Math.max(lc.likesCount || 0, cloudMatch?.likesCount || 0),
-        });
-      }
-      const mergedComments = Array.from(commentsById.values()).sort(
-        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
-      );
-
-      // Merge Question Reports
-      const reportsById = new Map<string, OverviewData['questionReports'][number]>();
-      for (const cr of cloudReports) {
-        reportsById.set(cr.id, cr);
-      }
-      for (const lr of overview.questionReports) {
-        const cloudMatch = reportsById.get(lr.id);
-        reportsById.set(lr.id, {
-          ...lr,
-          status: cloudMatch?.status || lr.status,
-          adminNote: cloudMatch?.adminNote ?? lr.adminNote,
-        });
-      }
-      const mergedReports = Array.from(reportsById.values()).sort(
-        (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)
-      );
-
-      const mergedOverview: OverviewData = {
-        ...overview,
-        orders: mergedOrders,
-        comments: mergedComments,
-        questionReports: mergedReports,
-        stats: {
-          ...overview.stats,
-          pendingQuestionReports: mergedReports.filter(
-            (r) => r.status === 'pending' || r.status === 'reviewed'
-          ).length,
-        },
-      };
-
-      setData(mergedOverview);
-      syncSettingsFields(mergedOverview);
-
-      // Background push of local items to Firestore so future republishes stay 100% synced
-      if (getFirebaseUid()) {
-        void syncSiteConfigToCloud(overview.config);
-        const cloudOrderIds = new Set(cloudOrders.map((o) => o.id));
-        for (const lo of overview.orders) {
-          if (!cloudOrderIds.has(lo.id)) {
-            void saveOrderMetadataCloud({
-              order: {
-                id: lo.id,
-                orderCode: lo.orderCode,
-                fullName: lo.fullName,
-                grade: lo.grade,
-                platformLabel: lo.platformLabel,
-                sectionDetails: lo.sectionDetails,
-                oldPrice: lo.oldPrice,
-                finalPrice: lo.finalPrice,
-                offerApplied: lo.offerApplied,
-                paymentMethod: lo.paymentMethod,
-                status: lo.status,
-                createdAt: lo.createdAt,
-              },
-              authorUid: lo.userId || 'guest_order',
-              userSerialNumber: lo.userSerialNumber,
-              userEmail: lo.userEmail,
-              platformUsername: lo.platformUsername,
-              credentialsPurged: lo.credentialsPurged,
-            });
-          }
-        }
-        const cloudReportIds = new Set(cloudReports.map((r) => r.id));
-        for (const lr of overview.questionReports) {
-          if (!cloudReportIds.has(lr.id)) {
-            void saveQuestionReportCloud({
-              id: lr.id,
-              reporterUid: 'guest_report',
-              questionKey: lr.questionKey,
-              grade: lr.grade,
-              section: lr.section,
-              chapterNum: lr.chapterNum,
-              qIndex: lr.qIndex,
-              questionTitle: lr.questionTitle,
-              description: lr.description,
-              status: lr.status,
-              adminNote: lr.adminNote,
-            });
-          }
-        }
-      }
+      const overview = await api.adminOverview();
+      setData(overview);
+      syncSettingsFields(overview);
     } catch (err) {
       flashNotice(err instanceof Error ? err.message : 'تعذر تحميل بيانات الإدارة.');
     } finally {
@@ -299,10 +166,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .finally(() => setAuthChecked(true));
   }, [loadOverview]);
 
-  // Automatic Google Admin elevation across deployments if signed in as the verified owner email
+  // Automatic Google Admin verification when signed in via Firebase as an admin
   useEffect(() => {
-    if (!authChecked || authenticated) return;
-    if (!user || user.role !== 'admin' || user.email.toLowerCase() !== '3mars7bry@gmail.com') return;
+    if (!authChecked || authenticated || !user || user.role !== 'admin') return;
 
     let cancelled = false;
     (async () => {
@@ -314,7 +180,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setAuthenticated(true);
         await loadOverview();
       } catch {
-        // Leave login form available
+        // Leave Google login prompt available
       }
     })();
 
@@ -323,29 +189,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
   }, [authChecked, authenticated, user, loadOverview]);
 
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoggingIn(true);
-    setLoginError(null);
-    try {
-      await api.adminLogin(username, password);
-      setPassword('');
-      setAuthenticated(true);
-      await loadOverview();
-    } catch (err) {
-      setLoginError(err instanceof Error ? err.message : 'فشل تسجيل الدخول.');
-    } finally {
-      setLoggingIn(false);
-    }
-  };
-
   const handleGoogleAdminLogin = async () => {
     if (googleLoggingIn) return;
     setGoogleLoggingIn(true);
     setLoginError(null);
+    let openedPopup = false;
     try {
       let idToken = await getFirebaseIdToken();
-      if (!idToken || user?.email.toLowerCase() !== '3mars7bry@gmail.com') {
+      if (!idToken) {
+        openedPopup = true;
         await signInWithGoogleCloud('bac1');
         idToken = await getFirebaseIdToken();
       }
@@ -356,14 +208,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setAuthenticated(true);
       await loadOverview();
     } catch (err) {
+      // If user was already logged into a non-admin Google account, let them switch via popup once
+      if (!openedPopup) {
+        try {
+          await signInWithGoogleCloud('bac1');
+          const freshToken = await getFirebaseIdToken();
+          if (!freshToken) {
+            throw new Error('تعذر الحصول على رمز التحقق من Google.');
+          }
+          await api.adminFirebaseLogin(freshToken);
+          setAuthenticated(true);
+          await loadOverview();
+          return;
+        } catch (retryErr) {
+          setLoginError(retryErr instanceof Error ? retryErr.message : 'فشل تسجيل الدخول بحساب الإدارة.');
+          return;
+        }
+      }
       setLoginError(err instanceof Error ? err.message : 'فشل تسجيل الدخول بحساب الإدارة.');
     } finally {
       setGoogleLoggingIn(false);
     }
   };
 
+  const handlePasswordAdminLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (passwordLoggingIn) return;
+    if (!adminUsername.trim() || !adminPassword) {
+      setLoginError('أدخل اسم المستخدم وكلمة المرور.');
+      return;
+    }
+    setPasswordLoggingIn(true);
+    setLoginError(null);
+    try {
+      await api.adminLogin(adminUsername.trim(), adminPassword);
+      setAuthenticated(true);
+      setAdminPassword('');
+      await loadOverview();
+    } catch (err) {
+      setLoginError(err instanceof Error ? err.message : 'اسم المستخدم أو كلمة المرور غير صحيحة.');
+    } finally {
+      setPasswordLoggingIn(false);
+    }
+  };
+
   const handleLogout = async () => {
-    await api.adminLogout();
+    await Promise.allSettled([api.adminLogout(), logout()]);
     setAuthenticated(false);
     setData(null);
   };
@@ -373,8 +263,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     status: 'new' | 'reviewing' | 'completed' | 'cancelled'
   ) => {
     try {
-      await updateOrderAdminCloud(id, { status });
-      await api.adminUpdateOrder(id, { status }).catch(() => {});
+      await api.adminUpdateOrder(id, { status });
       flashNotice('تم تحديث حالة الطلب بنجاح.');
       await loadOverview();
     } catch (err) {
@@ -384,8 +273,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handlePurgeCredentials = async (id: string) => {
     try {
-      await updateOrderAdminCloud(id, { credentialsPurged: true });
-      await api.adminUpdateOrder(id, { purgeCredentials: true }).catch(() => {});
+      await api.adminUpdateOrder(id, { purgeCredentials: true });
       flashNotice('تم حذف كلمة السر نهائياً.');
       await loadOverview();
     } catch (err) {
@@ -395,8 +283,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleDeleteOrder = async (id: string) => {
     try {
-      await deleteOrderAdminCloud(id);
-      await api.adminDeleteOrder(id).catch(() => {});
+      await api.adminDeleteOrder(id);
       setConfirmDeleteOrderId(null);
       flashNotice('تم حذف الطلب نهائياً.');
       await loadOverview();
@@ -408,7 +295,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await api.adminUpdateSettings({
+      await api.adminUpdateSettings({
         qureoOfferPrice,
         qureoOldPrice,
         finOfferPrice,
@@ -422,7 +309,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         notificationsEnabled,
         notificationsIntervalDays,
       });
-      void syncSiteConfigToCloud(res.config);
       flashNotice('تم حفظ الإعدادات وتحديث الموقع للجميع فوراً.');
       onConfigUpdated();
       await loadOverview();
@@ -436,8 +322,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     payload: { isVerified?: boolean; status?: 'approved' | 'hidden'; clearReports?: boolean }
   ) => {
     try {
-      await updateCommentAdminCloud(id, payload);
-      await api.adminUpdateComment(id, payload).catch(() => {});
+      await api.adminUpdateComment(id, payload);
       flashNotice('تم تحديث التقييم.');
       await loadOverview();
     } catch (err) {
@@ -447,8 +332,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const handleDeleteComment = async (id: string) => {
     try {
-      await deleteCommentAdminCloud(id);
-      await api.adminDeleteComment(id).catch(() => {});
+      await api.adminDeleteComment(id);
       setConfirmDeleteCommentId(null);
       flashNotice('تم حذف التعليق نهائياً.');
       await loadOverview();
@@ -463,13 +347,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   ) => {
     try {
       const note = reportNotes[id] ?? undefined;
-      await updateQuestionReportCloud(id, { status, adminNote: note });
-      await api
-        .adminUpdateQuestionReport(id, {
-          status,
-          adminNote: note,
-        })
-        .catch(() => {});
+      await api.adminUpdateQuestionReport(id, {
+        status,
+        adminNote: note,
+      });
       flashNotice('تم تحديث حالة بلاغ السؤال.');
       await loadOverview();
     } catch (err) {
@@ -523,16 +404,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <span>الرجوع للموقع</span>
         </button>
 
-        <form onSubmit={handleLogin} className="clay-card p-6 space-y-4 border border-white/80">
+        <div className="clay-card p-6 space-y-4 border border-white/80">
           <div className="flex items-center gap-2.5">
             <div className="w-10 h-10 rounded-2xl clay-apple-blue flex items-center justify-center text-white">
               <Lock className="w-5 h-5" />
             </div>
             <div>
               <h1 className="text-lg font-black font-decorative text-slate-900">
-                تسجيل دخول لوحة الإدارة (/admin)
+                دخول لوحة الإدارة (/admin)
               </h1>
-              <p className="text-xs text-slate-500 font-ios">CROVO SPACE — لصاحب الموقع فقط</p>
+              <p className="text-xs text-slate-500 font-ios">
+                محمي بصلاحيات Firebase Auth وقواعد Firestore Rules — للمدير المعتمد فقط
+              </p>
             </div>
           </div>
 
@@ -542,69 +425,81 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
-          <div>
-            <label htmlFor="adm-user" className="block text-xs font-bold mb-1 font-ios">
-              اسم المستخدم:
-            </label>
-            <input
-              id="adm-user"
-              type="text"
-              required
-              autoComplete="username"
-              dir="ltr"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              placeholder="admin username"
-              className="w-full px-3.5 py-2.5 rounded-xl text-sm font-mono clay-inset border-none outline-none text-left"
-            />
-          </div>
+          <form onSubmit={handlePasswordAdminLogin} className="space-y-3 pt-1">
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1 font-ios">
+                اسم المستخدم أو البريد الإلكتروني
+              </label>
+              <input
+                type="text"
+                data-testid="admin-username-input"
+                dir="ltr"
+                autoComplete="username"
+                value={adminUsername}
+                onChange={(e) => setAdminUsername(e.target.value)}
+                placeholder="admin"
+                className="w-full px-3.5 py-2.5 rounded-xl clay-inset text-sm font-mono text-slate-900 border-none outline-none"
+              />
+            </div>
 
-          <div>
-            <label htmlFor="adm-pass" className="block text-xs font-bold mb-1 font-ios">
-              كلمة المرور:
-            </label>
-            <input
-              id="adm-pass"
-              type="password"
-              required
-              autoComplete="current-password"
-              dir="ltr"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full px-3.5 py-2.5 rounded-xl text-sm font-mono clay-inset border-none outline-none text-left"
-            />
-          </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1 font-ios">
+                كلمة المرور
+              </label>
+              <div className="relative">
+                <input
+                  type={showAdminPassword ? 'text' : 'password'}
+                  data-testid="admin-password-input"
+                  dir="ltr"
+                  autoComplete="current-password"
+                  value={adminPassword}
+                  onChange={(e) => setAdminPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pl-10 pr-3.5 py-2.5 rounded-xl clay-inset text-sm font-mono text-slate-900 border-none outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPassword((v) => !v)}
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-800 p-1"
+                  aria-label={showAdminPassword ? 'إخفاء كلمة المرور' : 'عرض كلمة المرور'}
+                >
+                  {showAdminPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
 
-          <button
-            type="submit"
-            disabled={loggingIn || googleLoggingIn}
-            className="w-full clay-apple-blue py-3 rounded-xl text-sm font-black text-white font-ios shadow-md disabled:opacity-60"
-          >
-            {loggingIn ? 'جاري التحقق...' : 'دخول الإدارة'}
-          </button>
+            <button
+              type="submit"
+              data-testid="admin-login-submit"
+              disabled={passwordLoggingIn}
+              className="w-full clay-apple-blue py-3 rounded-xl text-sm font-black text-white font-ios flex items-center justify-center gap-2 shadow-md disabled:opacity-60"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>{passwordLoggingIn ? 'جاري التحقق...' : 'دخول الإدارة'}</span>
+            </button>
+          </form>
 
-          <div className="relative flex items-center py-1">
-            <div className="flex-1 border-t border-slate-300/70" />
-            <span className="px-3 text-[11px] font-bold text-slate-500 font-ios">أو</span>
-            <div className="flex-1 border-t border-slate-300/70" />
+          <div className="flex items-center gap-2 text-[11px] text-slate-400 font-ios">
+            <span className="flex-1 h-px bg-slate-200/80" />
+            <span>أو الدخول بحساب Google المصرّح له</span>
+            <span className="flex-1 h-px bg-slate-200/80" />
           </div>
 
           <button
             type="button"
             data-testid="admin-google-login-btn"
-            disabled={loggingIn || googleLoggingIn}
+            disabled={googleLoggingIn}
             onClick={handleGoogleAdminLogin}
-            className="w-full clay-btn py-2.5 rounded-xl text-xs font-black text-indigo-700 font-ios flex items-center justify-center gap-2 border border-indigo-200/80 disabled:opacity-60"
+            className="w-full clay-btn py-2.5 rounded-xl text-xs font-black text-indigo-700 font-ios flex items-center justify-center gap-2 disabled:opacity-60"
           >
-            <ShieldCheck className="w-4 h-4 text-indigo-600" />
+            <ShieldCheck className="w-4 h-4" />
             <span>
               {googleLoggingIn
                 ? 'جاري التحقق بحساب Google...'
-                : 'دخول سريع بحساب Google الإدارة (3mars7bry@gmail.com)'}
+                : 'دخول الإدارة الآمن بحساب Google'}
             </span>
           </button>
-        </form>
+        </div>
       </div>
     );
   }
@@ -690,6 +585,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {statusMessage && (
         <div className="mb-4 p-3 rounded-2xl clay-inset text-xs font-bold text-indigo-700 font-ios">
           {statusMessage}
+        </div>
+      )}
+
+      {data?.stats.requiresFirebaseLink && (
+        <div className="mb-4 p-3.5 rounded-2xl clay-card border border-amber-200/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs font-ios">
+          <div className="text-amber-900 font-bold">
+            أنت مسجّل الآن باسم المستخدم وكلمة المرور. لعرض الطلبات وبيانات المشتركين وحفظ التعديلات في Firestore، اربط جلسة Google/Firebase السحابية بضغطة واحدة.
+          </div>
+          <button
+            type="button"
+            disabled={googleLoggingIn}
+            onClick={handleGoogleAdminLogin}
+            className="clay-apple-blue px-4 py-2 rounded-xl text-xs font-black text-white shrink-0 flex items-center gap-1.5 disabled:opacity-60"
+          >
+            <ShieldCheck className="w-4 h-4" />
+            <span>{googleLoggingIn ? 'جاري الربط...' : 'ربط جلسة Google/Firebase'}</span>
+          </button>
         </div>
       )}
 

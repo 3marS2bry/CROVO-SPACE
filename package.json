@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "d1:export": "tsx scripts/export-d1.ts"
+    "migrate:firestore": "tsx scripts/migrate-sqlite-to-firestore.ts"
   },
   "dependencies": {
     "@firebase/eslint-plugin-security-rules": "^0.0.2",

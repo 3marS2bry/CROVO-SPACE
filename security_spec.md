@@ -11,6 +11,12 @@
 5. **Document Size & Attachment Bounds:** `avatarDataUrl <= 120000` chars; `attachmentBeforeDataUrl <= 320000` chars; `attachmentAfterDataUrl <= 320000` chars so every comment document stays well below Firestore's 1 MiB limit.
 6. **Verified Accounts Only for Writes:** Standard authenticated writes require `request.auth != null && request.auth.token.email_verified == true`.
 7. **Approved-Only Public Comment Queries:** Unauthenticated/non-admin `list` queries on `/comments` are restricted by `resource.data.status == 'approved'` (rule-enforced).
+8. **Unified Database Collections & PII Isolation:**
+   - `/orders/{orderId}` and `/question_reports/{reportId}`: create allowed for owner (`authorUid == request.auth.uid` / `reporterUid == request.auth.uid`) or anonymous guest (`'guest_order'` / `'guest_report'`) with server-forced initial status (`'new'` / `'pending'`). Reads, updates, and deletes are strictly restricted to `isAdmin()` or the authenticated owner (`get, list` only on own docs; guests cannot read back).
+   - `/push_subscriptions/{subId}`: `get, list, delete` are admin-only (`isAdmin()`). Non-admin updates cannot alter `endpoint` (`incoming().endpoint == existing().endpoint`).
+   - `/analytics_events/{eventId}`, `/analytics_daily/{dayKey}`, `/notification_logs/{logId}`, `/audit_logs/{logId}`, `/tool_runs/{runId}`: admin-only read/list/delete; `analytics_events` and `tool_runs` allow validated schema-checked create with `createdAt == request.time`.
+   - `/library_bundles/{bundleId}` and `/library_overrides/{itemId}`: public read/list; create/update/delete strictly `isAdmin()`.
+   - `/admins/{userId}`: `get` allowed only for owner or admin; create/delete strictly `isAdmin()` (no self-delete, no update).
 
 ## 2. The "Dirty Dozen" Payloads (Expected: PERMISSION_DENIED)
 1. **Unverified Email Admin Spoof:** Token has `email: "3mars7bry@gmail.com"` with `email_verified: false` reading `/users/other`.
@@ -24,4 +30,6 @@
 9. **Oversized Poison ID:** User creates `/comments/${"a".repeat(200)}` (`isValidId` rejects > 128 chars).
 10. **Orphaned / Non-Atomic Like Increment:** User updates `/comments/cmt_1` setting `likesCount: existing + 5` or `+1` without creating `/comments/cmt_1/likes/{uid}` in the same batch.
 11. **Unauthorized Comment Edit:** User B tries updating `/comments/cmt_owned_by_A.content`.
-12. **PII Phone Scrape:** Visitor or User B tries reading `/comments/cmt_1/private/contact`.
+12. **PII Phone & Private Collection Scrape:** Visitor or non-admin tries reading `/comments/cmt_1/private/contact`, `/orders/{id}`, `/push_subscriptions/{id}`, `/analytics_events/{id}`, or `/audit_logs/{id}`.
+13. **Guest Order Status Tampering:** Unauthenticated client attempts creating `/orders/ord_1` with `status: 'completed'` or `authorUid: 'victim_uid'`.
+14. **Push Endpoint Hijack:** Non-admin client updates `/push_subscriptions/{subId}` attempting to replace `endpoint` with an attacker URL.

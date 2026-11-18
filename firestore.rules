@@ -34,6 +34,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return isVerifiedUser() && (
+        request.auth.token.admin == true ||
         request.auth.token.email == '3mars7bry@gmail.com' ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
@@ -42,17 +43,26 @@ service cloud.firestore {
     // 3. Entity Validation Helpers (Blueprint Sync)
     function isValidUserProfile(data) {
       return data.keys().hasAll(['uid', 'name', 'email', 'grade', 'role', 'status', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'name', 'email', 'grade', 'role', 'status', 'photoUrl', 'serialNumber', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'name', 'email', 'grade', 'role', 'status', 'suspendReason', 'photoUrl', 'serialNumber', 'createdAt', 'updatedAt'])
         && isValidId(data.uid)
         && data.name is string && data.name.size() >= 2 && data.name.size() <= 80
         && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
         && data.grade in ['bac1', 'bac2']
         && data.role in ['user', 'admin']
         && data.status in ['active', 'suspended']
+        && (!('suspendReason' in data) || (data.suspendReason is string && data.suspendReason.size() <= 240))
         && (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 500))
         && (!('serialNumber' in data) || (data.serialNumber is string && data.serialNumber.size() >= 2 && data.serialNumber.size() <= 32 && data.serialNumber.matches('^[A-Z0-9\\-]+$')))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
+    }
+
+    function isValidAdminMarker(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && isValidId(data.uid) && data.uid.size() >= 4 && data.uid.size() <= 128
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 160
+        && data.createdAt is timestamp;
     }
 
     function isValidUserActivity(data) {
@@ -143,33 +153,44 @@ service cloud.firestore {
           'notificationsIntervalDays', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'qureoOldPrice', 'qureoOfferPrice', 'bundleOldPrice', 'bundleOfferPrice',
-          'offerDurationHours', 'offerEndsAt', 'whatsappNumber', 'offerText',
-          'notificationsEnabled', 'notificationsIntervalDays', 'promoBanner', 'libraryAd',
-          'toolServices', 'toolVideos', 'updatedAt'
+          'id', 'qureoOldPrice', 'qureoOfferPrice', 'finOldPrice', 'finOfferPrice',
+          'bundleOldPrice', 'bundleOfferPrice', 'offerDurationHours', 'offerEndsAt',
+          'afterOfferMode', 'ordersEnabled', 'pollClosed', 'whatsappNumber',
+          'adminWhatsappDisplay', 'offerText', 'notificationsEnabled',
+          'notificationsIntervalDays', 'heroPromo', 'promoBanner', 'libraryAd',
+          'toolServices', 'toolVideos', 'trackingStartedAt', 'updatedAt'
         ])
         && data.id == 'public'
         && data.qureoOldPrice is int && data.qureoOldPrice >= 1 && data.qureoOldPrice <= 100000
         && data.qureoOfferPrice is int && data.qureoOfferPrice >= 1 && data.qureoOfferPrice <= 100000
+        && (!('finOldPrice' in data) || (data.finOldPrice is int && data.finOldPrice >= 1 && data.finOldPrice <= 100000))
+        && (!('finOfferPrice' in data) || (data.finOfferPrice is int && data.finOfferPrice >= 1 && data.finOfferPrice <= 100000))
         && data.bundleOldPrice is int && data.bundleOldPrice >= 1 && data.bundleOldPrice <= 100000
         && data.bundleOfferPrice is int && data.bundleOfferPrice >= 1 && data.bundleOfferPrice <= 100000
         && (data.offerDurationHours is int || data.offerDurationHours is float)
         && data.offerEndsAt is string && data.offerEndsAt.size() <= 64
+        && (!('afterOfferMode' in data) || data.afterOfferMode in ['regular_price', 'extended_offer'])
+        && (!('ordersEnabled' in data) || data.ordersEnabled is bool)
+        && (!('pollClosed' in data) || data.pollClosed is bool)
         && data.whatsappNumber is string && data.whatsappNumber.size() >= 6 && data.whatsappNumber.size() <= 24
+        && (!('adminWhatsappDisplay' in data) || (data.adminWhatsappDisplay is string && data.adminWhatsappDisplay.size() >= 6 && data.adminWhatsappDisplay.size() <= 24))
         && (!('offerText' in data) || (data.offerText is string && data.offerText.size() <= 400))
         && data.notificationsEnabled is bool
         && data.notificationsIntervalDays is int && data.notificationsIntervalDays >= 1 && data.notificationsIntervalDays <= 365
+        && (!('heroPromo' in data) || data.heroPromo is map)
         && (!('promoBanner' in data) || data.promoBanner is map)
         && (!('libraryAd' in data) || data.libraryAd is map)
         && (!('toolServices' in data) || (data.toolServices is list && data.toolServices.size() <= 30))
         && (!('toolVideos' in data) || (data.toolVideos is list && data.toolVideos.size() <= 30))
+        && (!('trackingStartedAt' in data) || (data.trackingStartedAt is string && data.trackingStartedAt.size() <= 64))
         && data.updatedAt is timestamp;
     }
 
     function isValidPoll(data) {
       return data.keys().hasAll(['id', 'question', 'options', 'totalVotes', 'isOpen', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'question', 'options', 'totalVotes', 'isOpen', 'startsAt', 'endsAt', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'slug', 'question', 'options', 'totalVotes', 'isOpen', 'startsAt', 'endsAt', 'createdAt', 'updatedAt'])
         && isValidId(data.id) && data.id.size() >= 2 && data.id.size() <= 80
+        && (!('slug' in data) || (data.slug is string && data.slug.size() <= 80))
         && data.question is string && data.question.size() >= 3 && data.question.size() <= 240
         && data.options is list && data.options.size() >= 2 && data.options.size() <= 12
         && data.totalVotes is int && data.totalVotes >= 0
@@ -196,13 +217,15 @@ service cloud.firestore {
           'finalPrice', 'offerApplied', 'paymentMethod', 'status', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'id', 'orderCode', 'authorUid', 'userSerialNumber', 'userEmail',
-          'fullName', 'grade', 'platformLabel', 'sectionDetails', 'platformUsername',
+          'id', 'orderCode', 'clientRequestId', 'authorUid', 'userSerialNumber', 'userEmail',
+          'fullName', 'grade', 'platformLabel', 'sectionDetails', 'platformsJson',
+          'platformUsername', 'encryptedPassword', 'passwordIv', 'passwordAuthTag',
           'credentialsPurged', 'oldPrice', 'finalPrice', 'offerApplied',
           'paymentMethod', 'status', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.id) && data.id.size() >= 4 && data.id.size() <= 80
         && data.orderCode is string && data.orderCode.size() >= 3 && data.orderCode.size() <= 40
+        && (!('clientRequestId' in data) || (data.clientRequestId is string && data.clientRequestId.size() <= 100))
         && isValidId(data.authorUid) && data.authorUid.size() <= 128
         && (!('userSerialNumber' in data) || (data.userSerialNumber is string && data.userSerialNumber.size() <= 32))
         && (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() <= 160))
@@ -210,7 +233,11 @@ service cloud.firestore {
         && data.grade in ['bac1', 'bac2']
         && data.platformLabel is string && data.platformLabel.size() >= 1 && data.platformLabel.size() <= 160
         && data.sectionDetails is string && data.sectionDetails.size() <= 240
+        && (!('platformsJson' in data) || (data.platformsJson is string && data.platformsJson.size() <= 240))
         && data.platformUsername is string && data.platformUsername.size() >= 1 && data.platformUsername.size() <= 160
+        && (!('encryptedPassword' in data) || (data.encryptedPassword is string && data.encryptedPassword.size() <= 2000))
+        && (!('passwordIv' in data) || (data.passwordIv is string && data.passwordIv.size() <= 120))
+        && (!('passwordAuthTag' in data) || (data.passwordAuthTag is string && data.passwordAuthTag.size() <= 120))
         && data.credentialsPurged is bool
         && data.oldPrice is int && data.oldPrice >= 0 && data.oldPrice <= 100000
         && data.finalPrice is int && data.finalPrice >= 0 && data.finalPrice <= 100000
@@ -258,9 +285,20 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidLibraryBundle(data) {
+      return data.keys().hasAll(['id', 'grade', 'section', 'chapters', 'questions', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'grade', 'section', 'chapters', 'questions', 'updatedAt'])
+        && isValidId(data.id) && data.id.size() <= 32
+        && data.grade in ['bac1', 'bac2']
+        && data.section in ['js', 'py', 'fin']
+        && data.chapters is list && data.chapters.size() <= 200
+        && data.questions is list && data.questions.size() <= 1000
+        && data.updatedAt is timestamp;
+    }
+
     function isValidLibraryOverride(data) {
       return data.keys().hasAll(['id', 'grade', 'section', 'chapterNum', 'qIndex', 'qText', 'aText', 'isCode', 'deleted', 'updatedAt'])
-        && data.keys().hasOnly(['id', 'grade', 'section', 'chapterNum', 'qIndex', 'qText', 'aText', 'isCode', 'deleted', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'grade', 'section', 'chapterNum', 'qIndex', 'qText', 'aText', 'isCode', 'deleted', 'updatedBy', 'updatedAt'])
         && isValidId(data.id) && data.id.size() <= 80
         && data.grade in ['bac1', 'bac2']
         && data.section in ['js', 'py', 'fin']
@@ -270,7 +308,90 @@ service cloud.firestore {
         && data.aText is string && data.aText.size() >= 1 && data.aText.size() <= 8000
         && data.isCode is bool
         && data.deleted is bool
+        && (!('updatedBy' in data) || (data.updatedBy is string && data.updatedBy.size() <= 160))
         && data.updatedAt is timestamp;
+    }
+
+    function isValidAnalyticsEvent(data) {
+      return data.keys().hasAll(['id', 'eventType', 'visitorId', 'createdAt'])
+        && data.keys().hasOnly(['id', 'eventType', 'visitorId', 'userId', 'path', 'grade', 'section', 'chapterNum', 'query', 'resultsCount', 'createdAt'])
+        && isValidId(data.id) && data.id.size() <= 80
+        && data.eventType in ['page_view', 'library_open', 'tool_view', 'level_view', 'library_search', 'question_copy', 'user_login', 'order_create', 'tool_run', 'push_error']
+        && isValidId(data.visitorId) && data.visitorId.size() <= 80
+        && (!('userId' in data) || (isValidId(data.userId) && data.userId.size() <= 128))
+        && (!('path' in data) || (data.path is string && data.path.size() <= 120))
+        && (!('grade' in data) || (data.grade is string && data.grade.size() <= 16))
+        && (!('section' in data) || (data.section is string && data.section.size() <= 16))
+        && (!('chapterNum' in data) || (data.chapterNum is int && data.chapterNum >= 0 && data.chapterNum <= 500))
+        && (!('query' in data) || (data.query is string && data.query.size() <= 160))
+        && (!('resultsCount' in data) || (data.resultsCount is int && data.resultsCount >= 0 && data.resultsCount <= 5000))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAnalyticsDaily(data) {
+      return data.keys().hasAll(['id', 'visits', 'libraryOpens', 'searches', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'visits', 'uniqueVisitors', 'libraryOpens', 'searches', 'updatedAt'])
+        && isValidId(data.id) && data.id.size() <= 32
+        && data.visits is int && data.visits >= 0
+        && (!('uniqueVisitors' in data) || (data.uniqueVisitors is int && data.uniqueVisitors >= 0))
+        && data.libraryOpens is int && data.libraryOpens >= 0
+        && data.searches is int && data.searches >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPushSubscription(data) {
+      return data.keys().hasAll(['id', 'visitorId', 'endpoint', 'p256dh', 'auth', 'enabled', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'visitorId', 'userId', 'endpoint', 'p256dh', 'auth', 'enabled', 'lastSentAt', 'lastMessageId', 'lastError', 'createdAt', 'updatedAt'])
+        && isValidId(data.id) && data.id.size() >= 8 && data.id.size() <= 80
+        && isValidId(data.visitorId) && data.visitorId.size() <= 80
+        && (!('userId' in data) || (isValidId(data.userId) && data.userId.size() <= 128))
+        && data.endpoint is string && data.endpoint.size() >= 16 && data.endpoint.size() <= 1000
+        && data.p256dh is string && data.p256dh.size() >= 8 && data.p256dh.size() <= 300
+        && data.auth is string && data.auth.size() >= 4 && data.auth.size() <= 160
+        && data.enabled is bool
+        && (!('lastSentAt' in data) || (data.lastSentAt is string && data.lastSentAt.size() <= 64))
+        && (!('lastMessageId' in data) || (data.lastMessageId is string && data.lastMessageId.size() <= 80))
+        && (!('lastError' in data) || (data.lastError is string && data.lastError.size() <= 240))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidNotificationLog(data) {
+      return data.keys().hasAll(['id', 'messageId', 'category', 'title', 'body', 'sentCount', 'failedCount', 'triggerType', 'createdAt'])
+        && data.keys().hasOnly(['id', 'messageId', 'category', 'title', 'body', 'sentCount', 'failedCount', 'triggerType', 'errorDetail', 'createdAt'])
+        && isValidId(data.id) && data.id.size() <= 80
+        && data.messageId is string && data.messageId.size() <= 80
+        && data.category is string && data.category.size() <= 32
+        && data.title is string && data.title.size() <= 160
+        && data.body is string && data.body.size() <= 400
+        && data.sentCount is int && data.sentCount >= 0
+        && data.failedCount is int && data.failedCount >= 0
+        && data.triggerType is string && data.triggerType.size() <= 32
+        && (!('errorDetail' in data) || (data.errorDetail is string && data.errorDetail.size() <= 300))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'actorUsername', 'action', 'targetType', 'createdAt'])
+        && data.keys().hasOnly(['id', 'actorUsername', 'action', 'targetType', 'targetId', 'detailsJson', 'createdAt'])
+        && isValidId(data.id) && data.id.size() <= 80
+        && data.actorUsername is string && data.actorUsername.size() >= 2 && data.actorUsername.size() <= 160
+        && data.action is string && data.action.size() >= 2 && data.action.size() <= 80
+        && data.targetType is string && data.targetType.size() >= 2 && data.targetType.size() <= 80
+        && (!('targetId' in data) || (data.targetId is string && data.targetId.size() <= 128))
+        && (!('detailsJson' in data) || (data.detailsJson is string && data.detailsJson.size() <= 1500))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidToolRun(data) {
+      return data.keys().hasAll(['id', 'serviceKey', 'status', 'durationMs', 'createdAt'])
+        && data.keys().hasOnly(['id', 'serviceKey', 'status', 'durationMs', 'errorMessage', 'createdAt'])
+        && isValidId(data.id) && data.id.size() <= 80
+        && data.serviceKey is string && data.serviceKey.size() >= 2 && data.serviceKey.size() <= 64
+        && data.status in ['success', 'failed', 'running']
+        && data.durationMs is int && data.durationMs >= 0 && data.durationMs <= 600000
+        && (!('errorMessage' in data) || (data.errorMessage is string && data.errorMessage.size() <= 300))
+        && data.createdAt is timestamp;
     }
 
     // 4. Collection Rules
@@ -320,7 +441,13 @@ service cloud.firestore {
     match /admins/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
-      allow create, update, delete: if false;
+      allow create: if isValidId(userId)
+        && isAdmin()
+        && isValidAdminMarker(incoming())
+        && incoming().uid == userId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(userId) && isAdmin() && userId != request.auth.uid;
     }
 
     match /comments/{commentId} {
@@ -592,7 +719,6 @@ service cloud.firestore {
       allow get: if isValidId(orderId) && (isAdmin() || (isSignedIn() && existing().authorUid == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && existing().authorUid == request.auth.uid);
       allow create: if isValidId(orderId)
-        && isSignedIn()
         && isValidOrderRecord(incoming())
         && incoming().id == orderId
         && incoming().createdAt == request.time
@@ -600,9 +726,12 @@ service cloud.firestore {
         && (
           isAdmin() ||
           (
-            incoming().authorUid == request.auth.uid
-            && incoming().status == 'new'
+            incoming().status == 'new'
             && incoming().credentialsPurged == false
+            && (
+              (isSignedIn() && incoming().authorUid == request.auth.uid) ||
+              (!isSignedIn() && incoming().authorUid == 'guest_order')
+            )
           )
         );
       allow update: if isValidId(orderId)
@@ -617,13 +746,11 @@ service cloud.firestore {
     match /question_stats/{questionKey} {
       allow get, list: if true;
       allow create: if isValidId(questionKey)
-        && isSignedIn()
         && isValidQuestionStat(incoming())
         && incoming().questionKey == questionKey
         && incoming().updatedAt == request.time
         && (isAdmin() || incoming().copyCount == 1);
       allow update: if isValidId(questionKey)
-        && isSignedIn()
         && isValidQuestionStat(incoming())
         && incoming().questionKey == existing().questionKey
         && incoming().updatedAt == request.time
@@ -641,7 +768,6 @@ service cloud.firestore {
       allow get: if isValidId(reportId) && (isAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid));
       allow list: if isAdmin() || (isSignedIn() && existing().reporterUid == request.auth.uid);
       allow create: if isValidId(reportId)
-        && isSignedIn()
         && isValidQuestionReport(incoming())
         && incoming().id == reportId
         && incoming().createdAt == request.time
@@ -649,8 +775,11 @@ service cloud.firestore {
         && (
           isAdmin() ||
           (
-            incoming().reporterUid == request.auth.uid
-            && incoming().status == 'pending'
+            incoming().status == 'pending'
+            && (
+              (isSignedIn() && incoming().reporterUid == request.auth.uid) ||
+              (!isSignedIn() && incoming().reporterUid == 'guest_report')
+            )
           )
         );
       allow update: if isValidId(reportId)
@@ -662,14 +791,113 @@ service cloud.firestore {
       allow delete: if isValidId(reportId) && isAdmin();
     }
 
+    match /library_bundles/{bundleId} {
+      allow get, list: if true;
+      allow create: if isValidId(bundleId)
+        && isAdmin()
+        && isValidLibraryBundle(incoming())
+        && incoming().id == bundleId
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(bundleId)
+        && isAdmin()
+        && isValidLibraryBundle(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(bundleId) && isAdmin();
+    }
+
     match /library_overrides/{itemId} {
       allow get, list: if true;
-      allow create, update: if isValidId(itemId)
+      allow create: if isValidId(itemId)
         && isAdmin()
         && isValidLibraryOverride(incoming())
         && incoming().id == itemId
         && incoming().updatedAt == request.time;
+      allow update: if isValidId(itemId)
+        && isAdmin()
+        && isValidLibraryOverride(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
       allow delete: if isValidId(itemId) && isAdmin();
+    }
+
+    match /analytics_events/{eventId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(eventId)
+        && isValidAnalyticsEvent(incoming())
+        && incoming().id == eventId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(eventId) && isAdmin();
+    }
+
+    match /analytics_daily/{dayKey} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(dayKey)
+        && isAdmin()
+        && isValidAnalyticsDaily(incoming())
+        && incoming().id == dayKey
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(dayKey)
+        && isAdmin()
+        && isValidAnalyticsDaily(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time;
+      allow delete: if isValidId(dayKey) && isAdmin();
+    }
+
+    match /push_subscriptions/{subId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(subId)
+        && isValidPushSubscription(incoming())
+        && incoming().id == subId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(subId)
+        && isValidPushSubscription(incoming())
+        && incoming().id == existing().id
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            incoming().endpoint == existing().endpoint
+            && incoming().diff(existing()).affectedKeys().hasOnly(['enabled', 'p256dh', 'auth', 'visitorId', 'userId', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(subId) && isAdmin();
+    }
+
+    match /notification_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(logId)
+        && isAdmin()
+        && isValidNotificationLog(incoming())
+        && incoming().id == logId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(logId) && isAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(logId)
+        && isAdmin()
+        && isValidAuditLog(incoming())
+        && incoming().id == logId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(logId) && isAdmin();
+    }
+
+    match /tool_runs/{runId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(runId)
+        && isValidToolRun(incoming())
+        && incoming().id == runId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(runId) && isAdmin();
     }
   }
 }
