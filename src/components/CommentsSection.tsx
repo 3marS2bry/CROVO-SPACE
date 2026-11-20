@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BadgeCheck,
@@ -16,7 +16,7 @@ import {
   UserCircle2,
   X,
 } from 'lucide-react';
-import { api, ApiError, CommentItem } from '../utils/api';
+import { api, ApiError, AuthUser, CommentItem } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import {
   getCachedComments,
@@ -27,10 +27,10 @@ import {
 import {
   createCloudComment,
   deleteCloudComment,
+  fetchApprovedCommentsCloudOneShot,
   getFirebaseUid,
   logCloudActivity,
   reportCloudComment,
-  subscribeCloudComments,
   toggleCloudCommentLike,
   updateCloudComment,
 } from '../utils/cloudStore';
@@ -152,55 +152,89 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     }
   }, [user?.name]);
 
-  const loadApiComments = async () => {
+  const lastFetchedAuthUidRef = useRef<string | null | undefined>(undefined);
+  const oneShotCloudTriedRef = useRef(false);
+
+  const loadApiComments = useCallback(async (forceCloudFallback = false) => {
     try {
       const res = await api.getComments();
       const mapped = res.comments.map((c) => ({ ...c, source: 'api' as const }));
+      if (res.quotaDegraded && mapped.length === 0) {
+        const cached = getCachedComments();
+        if (cached && cached.length > 0) {
+          setApiComments(cached);
+          setError(null);
+          return;
+        }
+        if (!oneShotCloudTriedRef.current || forceCloudFallback) {
+          oneShotCloudTriedRef.current = true;
+          try {
+            const cloudFallback = await fetchApprovedCommentsCloudOneShot(user?.id);
+            if (cloudFallback.length > 0) {
+              setCloudComments(cloudFallback);
+              setFastComments(cloudFallback);
+              setError(null);
+              return;
+            }
+          } catch {
+            // Fall through to soft non-blocking notice below
+          }
+        }
+        setApiComments((prev) => {
+          if (prev.length > 0) {
+            setError(null);
+            return prev;
+          }
+          setError('يتم تحديث التعليقات مؤقتاً بسبب ضغط قاعدة البيانات. اضغط «إعادة المحاولة».');
+          return prev;
+        });
+        return;
+      }
+
       setApiComments(mapped);
-      setFastComments(mapped);
+      if (!res.quotaDegraded || mapped.length > 0) {
+        setFastComments(mapped);
+      }
       setError(null);
     } catch {
-      // Keep cloud comments if backend API is temporarily unavailable
+      // Keep cached or cloud comments if backend API is temporarily unavailable
     } finally {
       setLoading(false);
     }
-  };
+  }, [user?.id]);
 
   useEffect(() => {
     const unsubFast = subscribeFastStore(() => {
       const cached = getCachedComments();
-      if (cached) {
+      if (cached && (!cached.length ? false : true)) {
         setApiComments(cached);
         setLoading(false);
       }
     });
 
-    if (user?.id || (hasCompletedInitialBootstrap() && getCachedComments() === null)) {
+    const currentUid = user?.id || null;
+    const cachedNow = getCachedComments();
+    const shouldFetchNow =
+      lastFetchedAuthUidRef.current !== currentUid &&
+      (Boolean(currentUid) || (hasCompletedInitialBootstrap() && (!cachedNow || cachedNow.length === 0)));
+
+    if (shouldFetchNow) {
+      lastFetchedAuthUidRef.current = currentUid;
       void loadApiComments();
     }
 
-    const unsubCloud = subscribeCloudComments(
-      isCloudUser ? getFirebaseUid() : null,
-      (list) => {
-        setCloudComments(list);
-        setLoading(false);
-        setError(null);
-      },
-      () => {
-        setLoading(false);
-      }
-    );
-
-    const handleAuthChanged = () => {
+    const handleAuthChanged = (ev: Event) => {
+      const nextUid = ((ev as CustomEvent<AuthUser | null>).detail?.id) || null;
+      if (nextUid === lastFetchedAuthUidRef.current) return;
+      lastFetchedAuthUidRef.current = nextUid;
       void loadApiComments();
     };
     window.addEventListener('crovo:auth-updated', handleAuthChanged);
     return () => {
       unsubFast();
-      unsubCloud();
       window.removeEventListener('crovo:auth-updated', handleAuthChanged);
     };
-  }, [isCloudUser, user?.id]);
+  }, [user?.id, loadApiComments]);
 
   const apiCommentIds = useMemo(() => new Set(apiComments.map((c) => c.id)), [apiComments]);
   const cloudCommentIds = useMemo(() => new Set(cloudComments.map((c) => c.id)), [cloudComments]);
@@ -315,7 +349,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           attachmentAfterDataUrl,
         });
         savedComment = { ...res.comment, source: 'api' };
-        setApiComments((prev) => [savedComment!, ...prev]);
+        setApiComments((prev) => {
+          const next = [savedComment!, ...prev];
+          setFastComments(next);
+          return next;
+        });
       } catch (apiErr) {
         if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 400 || apiErr.status === 429)) {
           throw apiErr;
@@ -350,7 +388,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       setAttachmentBeforeDataUrl(null);
       setAttachmentAfterDataUrl(null);
       setContactPhone('');
-      setFormMsg({ type: 'ok', text: 'تسلم يا بطل! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.' });
+      setFormMsg({ type: 'ok', text: 'تسلم يا مدير! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.' });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         openAuthModal('سجّل دخولك الأول عشان تقدر تنشر تعليقك.');
@@ -403,7 +441,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         if (!fbUid) throw apiErr;
         await deleteCloudComment(cmt.id);
       }
-      setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+      setApiComments((prev) => {
+        const next = prev.filter((c) => c.id !== cmt.id);
+        setFastComments(next);
+        return next;
+      });
       setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
       if (fbUid) {
         void logCloudActivity(fbUid, {
@@ -469,11 +511,13 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         res = await toggleCloudCommentLike(cmt.id, fbUid, nextDesired);
       }
 
-      setApiComments((prev) =>
-        prev.map((c) =>
+      setApiComments((prev) => {
+        const next = prev.map((c) =>
           c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
-        )
-      );
+        );
+        setFastComments(next);
+        return next;
+      });
       setCloudComments((prev) =>
         prev.map((c) =>
           c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
@@ -604,9 +648,13 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         )}
 
         {error && (
-          <div className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios flex items-center justify-between">
+          <div className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios flex items-center justify-between gap-2">
             <span>{error}</span>
-            <button type="button" onClick={loadApiComments} className="underline font-bold">
+            <button
+              type="button"
+              onClick={() => void loadApiComments(true)}
+              className="underline font-bold shrink-0"
+            >
               إعادة المحاولة
             </button>
           </div>
@@ -861,11 +909,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           </form>
         )}
 
-        {/* Comments List — Balanced & Compact Cards */}
+        {/* Comments List — Balanced Two-Column RTL Grid (2 cards/row on desktop, 1 on mobile) */}
         {loading ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            <div className="h-36 rounded-2xl clay-inset animate-pulse" />
-            <div className="h-36 rounded-2xl clay-inset animate-pulse" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="h-40 rounded-2xl clay-inset animate-pulse" />
+            <div className="h-40 rounded-2xl clay-inset animate-pulse" />
           </div>
         ) : visibleComments.length === 0 ? (
           <div className="p-6 rounded-2xl clay-inset text-center space-y-2">
@@ -881,7 +929,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-stretch">
+          <div
+            data-testid="comments-grid"
+            dir="rtl"
+            className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch"
+          >
             {visibleComments.map((cmt) => {
               const beforeImg = cmt.attachmentBeforeUrl || cmt.attachmentUrl || null;
               const afterImg = cmt.attachmentAfterUrl || null;
@@ -892,16 +944,16 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                 <article
                   key={cmt.id}
                   data-testid={`comment-card-${cmt.id}`}
-                  className="clay-inset p-3.5 sm:p-4 rounded-2xl text-right flex flex-col justify-between gap-2.5 h-full border border-white/60"
+                  className="min-w-0 overflow-hidden clay-inset p-4 rounded-2xl text-right flex flex-col justify-between gap-3 h-full border border-white/60"
                 >
-                  <div className="space-y-2.5">
+                  <div className="space-y-2.5 min-w-0">
                     {/* Compact Card Header */}
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="flex items-start justify-between gap-2 min-w-0">
+                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
                         {cmt.avatarUrl ? (
                           <img
                             src={cmt.avatarUrl}
-                            alt={cmt.authorName}
+                            alt={`صورة ${cmt.authorName}`}
                             className="w-9 h-9 rounded-full object-cover shrink-0 shadow-sm border border-white"
                           />
                         ) : (
@@ -910,13 +962,13 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                           </div>
                         )}
 
-                        <div className="min-w-0">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate max-w-[165px]">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                            <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate max-w-[175px]">
                               {cmt.authorName}
                             </span>
                             {cmt.isVerified && (
-                              <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-700 font-ios">
+                              <span className="inline-flex items-center gap-0.5 text-[10px] font-bold text-emerald-700 font-ios shrink-0">
                                 <BadgeCheck className="w-3.5 h-3.5 text-emerald-500" />
                                 <span>عميل موثّق</span>
                               </span>
@@ -935,9 +987,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                       </div>
                     </div>
 
-                    {/* Comment Text with Controlled Height */}
+                    {/* Comment Text with Controlled Height & Strict Overflow Prevention */}
                     {editingId === cmt.id ? (
-                      <div className="space-y-2 pt-1">
+                      <div className="space-y-2 pt-1 min-w-0">
                         <textarea
                           rows={2}
                           value={editContent}
@@ -980,9 +1032,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                         </div>
                       </div>
                     ) : (
-                      <div className="space-y-1">
+                      <div className="space-y-1 min-w-0">
                         <p
-                          className={`text-xs sm:text-[13px] text-slate-800 font-ios leading-relaxed break-words ${
+                          className={`text-xs sm:text-[13px] text-slate-800 font-ios leading-relaxed break-words [overflow-wrap:anywhere] ${
                             isLong && !isExpanded ? 'line-clamp-3' : ''
                           }`}
                         >

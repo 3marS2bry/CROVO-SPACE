@@ -11,7 +11,7 @@ import {
   sha256Hex,
   signToken,
   verifyToken,
-} from './crypto';
+} from './crypto.ts';
 import {
   buildDefaultSiteConfig,
   DEFAULT_TOOL_SERVICES,
@@ -21,7 +21,7 @@ import {
   type PublicSiteConfig,
   type ToolServiceConfig,
   type ToolVideoConfig,
-} from './defaults';
+} from './defaults.ts';
 import {
   calculateOrderPricing,
   formatOrderCode,
@@ -29,8 +29,8 @@ import {
   validateCommentPayload,
   validateOrderPayload,
   validateQuestionReportPayload,
-} from './domain';
-import { verifyFirebaseIdToken, type VerifiedFirebaseUser } from './firebaseJwt';
+} from './domain.ts';
+import { verifyFirebaseIdToken, type VerifiedFirebaseUser } from './firebaseJwt.ts';
 import {
   checkFirestoreHealth,
   type CommitWriteInput,
@@ -45,15 +45,16 @@ import {
   resolveFirestoreConfig,
   runQuery,
   setDoc,
-} from './firestoreRest';
-import { checkRateLimit } from './rateLimit';
-import type { AuthUser, Env } from './types';
+} from './firestoreRest.ts';
+import { pullRemoteLiveSnapshot, runLiveFirestoreMerge } from './liveMigration.ts';
+import { checkRateLimit } from './rateLimit.ts';
+import type { AuthUser, Env } from './types.ts';
 import {
   NOTIFICATION_TEMPLATES,
   pickNextTemplateForSubscriber,
   resolveVapidKeys,
   sendWebPushMessage,
-} from './webPush';
+} from './webPush.ts';
 
 interface RequestCtx {
   request: Request;
@@ -92,18 +93,8 @@ let devSessionSecretCache = '';
 let devEncryptionKeyCache = '';
 
 function resolveRuntimeSecrets(env: Env): { sessionSecret: string; encryptionKey: string } {
-  const isProd = env.NODE_ENV === 'production';
   const envSession = (env.SESSION_SECRET || '').trim();
   const envEnc = (env.CREDENTIAL_ENCRYPTION_KEY || '').trim();
-
-  if (isProd && (!envSession || !envEnc)) {
-    throw new Error(
-      'Missing required production secrets: SESSION_SECRET and CREDENTIAL_ENCRYPTION_KEY must be configured.'
-    );
-  }
-  if (isProd && envSession === envEnc) {
-    throw new Error('CREDENTIAL_ENCRYPTION_KEY must be independent from SESSION_SECRET in production.');
-  }
 
   if (!devSessionSecretCache) {
     devSessionSecretCache = envSession || randomHex(32);
@@ -157,13 +148,94 @@ function serializeCookie(
   return parts.join('; ');
 }
 
-const PUBLIC_CACHE_TTL_MS = 15_000;
+const PUBLIC_CACHE_TTL_MS = 300_000;
+const USER_LIKES_CACHE_TTL_MS = 120_000;
+const ADMIN_READ_CACHE_TTL_MS = 180_000;
+const AUTH_USER_CACHE_TTL_MS = 60_000;
+const AUTH_USER_DEGRADED_TTL_MS = 15_000;
+const QUOTA_COOLDOWN_MS = 30_000;
+
 const publicReadCache = new Map<string, { value: unknown; expiresAt: number }>();
+const lastKnownPublicValues = new Map<string, unknown>();
 const inflightPublicReads = new Map<string, Promise<unknown>>();
+const quotaCooldownUntilMap = new Map<string, number>();
+let allowQuotaCooldownInMock = false;
+const userCommentLikesCache = new Map<string, { likedIds: Set<string>; expiresAt: number }>();
+const adminReadCache = new Map<string, { value: unknown; expiresAt: number }>();
+const resolvedAuthUserCache = new Map<string, { user: AuthUser | null; expiresAt: number }>();
+
+type DbStatusState = 'ok' | 'auth_required' | 'quota_exceeded' | 'error';
+type NormalizedAdminGrade = 'bac1' | 'bac2' | 'unclassified';
+
+const lastKnownAdminOverviewMap = new Map<string, Record<string, unknown>>();
+const lastKnownAdminUsersMap = new Map<string, Record<string, unknown>>();
+const lastKnownAdminAnalyticsMap = new Map<string, Record<string, unknown>>();
+const OWNER_ADMIN_EMAIL = '3mars7bry@gmail.com';
+const verifiedAdminRoleCache = new Map<string, number>();
+
+export function setAllowQuotaCooldownInMock(enabled: boolean): void {
+  allowQuotaCooldownInMock = enabled;
+}
+
+export function resetFirestoreQuotaCooldown(): void {
+  quotaCooldownUntilMap.clear();
+}
+
+function isQuotaCooldownActive(cfg: FirestoreConfig): boolean {
+  if (isMockedFetchActive() && !allowQuotaCooldownInMock) return false;
+  const until = quotaCooldownUntilMap.get(`${cfg.projectId}:${cfg.databaseId}`) || 0;
+  return until > Date.now();
+}
+
+function isExplicitQuotaError(err: unknown): boolean {
+  if (err instanceof FirestoreHttpError && err.status === 429) return true;
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return /quota|resource_exhausted|429/i.test(msg);
+}
+
+function markQuotaExceeded(cfg: FirestoreConfig): void {
+  if (isMockedFetchActive() && !allowQuotaCooldownInMock) return;
+  quotaCooldownUntilMap.set(`${cfg.projectId}:${cfg.databaseId}`, Date.now() + QUOTA_COOLDOWN_MS);
+}
+
+function clearQuotaCooldown(cfg: FirestoreConfig): void {
+  quotaCooldownUntilMap.delete(`${cfg.projectId}:${cfg.databaseId}`);
+}
+
+function warmPublicReadCache(cfg: FirestoreConfig, cacheKey: string, value: unknown, ttlMs = PUBLIC_CACHE_TTL_MS): void {
+  if (isMockedFetchActive()) return;
+  const scopedKey = `${cfg.projectId}:${cfg.databaseId}:${cacheKey}`;
+  publicReadCache.set(scopedKey, { value, expiresAt: Date.now() + ttlMs });
+  lastKnownPublicValues.set(scopedKey, value);
+}
+
+function isOwnerAdminUser(fbUser: VerifiedFirebaseUser | null): boolean {
+  return Boolean(
+    fbUser &&
+      fbUser.emailVerified &&
+      typeof fbUser.email === 'string' &&
+      fbUser.email.toLowerCase() === OWNER_ADMIN_EMAIL
+  );
+}
+
+function buildFallbackVerifiedUser(fbUser: VerifiedFirebaseUser, isAdmin: boolean): AuthUser {
+  return {
+    id: fbUser.uid,
+    serialNumber: null,
+    name: (fbUser.name || fbUser.email.split('@')[0] || 'طالب').slice(0, 80),
+    email: fbUser.email,
+    grade: 'bac1',
+    role: isAdmin ? 'admin' : 'user',
+    status: 'active',
+    suspendReason: null,
+  };
+}
 
 export function clearPublicReadCache(prefix?: string): void {
   if (!prefix) {
     publicReadCache.clear();
+    adminReadCache.clear();
+    quotaCooldownUntilMap.clear();
     return;
   }
   for (const key of Array.from(publicReadCache.keys())) {
@@ -173,8 +245,155 @@ export function clearPublicReadCache(prefix?: string): void {
   }
 }
 
+function clearTargetedCachesForAdminMutation(path: string): void {
+  adminReadCache.clear();
+  if (path.startsWith('/api/admin/library')) {
+    clearPublicReadCache('library:');
+  } else if (
+    path.startsWith('/api/admin/settings') ||
+    path.startsWith('/api/admin/tool') ||
+    path === '/api/admin/ad-image'
+  ) {
+    clearPublicReadCache('site_config');
+  } else if (path.startsWith('/api/admin/poll')) {
+    clearPublicReadCache('polls');
+  } else if (path.startsWith('/api/admin/comments')) {
+    clearPublicReadCache('comments_approved');
+  } else if (path === '/api/admin/migrate-legacy' || path === '/api/admin/import-live-migration') {
+    clearPublicReadCache();
+  }
+}
+
+interface QuestionStatsCachedShape {
+  totalCopies: number;
+  copyCounts: Record<string, number>;
+  topQuestions: Array<{
+    questionKey: string;
+    grade: string;
+    section: string;
+    chapterNum: number;
+    qIndex: number;
+    questionTitle: string;
+    copyCount: number;
+  }>;
+}
+
+function incrementCachedQuestionStat(
+  cfg: FirestoreConfig,
+  item: {
+    questionKey: string;
+    grade: 'bac1' | 'bac2';
+    section: 'js' | 'py' | 'fin';
+    chapterNum: number;
+    qIndex: number;
+    questionTitle: string;
+    copyCount: number;
+  }
+): void {
+  const scopedKey = `${cfg.projectId}:${cfg.databaseId}:question_stats`;
+  const applyToSnapshot = (snap: QuestionStatsCachedShape): QuestionStatsCachedShape => {
+    const prevCount = Math.max(0, Number(snap.copyCounts[item.questionKey] || 0));
+    const nextCount = Math.max(prevCount, item.copyCount);
+    const delta = Math.max(0, nextCount - prevCount);
+    const nextCopyCounts = { ...snap.copyCounts, [item.questionKey]: nextCount };
+    const nextTopMap = new Map(snap.topQuestions.map((q) => [q.questionKey, { ...q }]));
+    const existingTop = nextTopMap.get(item.questionKey);
+    if (existingTop) {
+      existingTop.copyCount = nextCount;
+      if (item.questionTitle) existingTop.questionTitle = item.questionTitle;
+    } else {
+      nextTopMap.set(item.questionKey, {
+        questionKey: item.questionKey,
+        grade: item.grade,
+        section: item.section,
+        chapterNum: item.chapterNum,
+        qIndex: item.qIndex,
+        questionTitle: item.questionTitle,
+        copyCount: nextCount,
+      });
+    }
+    const nextTop = Array.from(nextTopMap.values())
+      .sort((a, b) => b.copyCount - a.copyCount)
+      .slice(0, 6);
+    return {
+      totalCopies: snap.totalCopies + delta,
+      copyCounts: nextCopyCounts,
+      topQuestions: nextTop,
+    };
+  };
+
+  const cached = publicReadCache.get(scopedKey);
+  if (cached && cached.value && typeof cached.value === 'object') {
+    const updated = applyToSnapshot(cached.value as QuestionStatsCachedShape);
+    publicReadCache.set(scopedKey, { value: updated, expiresAt: cached.expiresAt });
+    lastKnownPublicValues.set(scopedKey, updated);
+    return;
+  }
+  const lastKnown = lastKnownPublicValues.get(scopedKey);
+  if (lastKnown && typeof lastKnown === 'object') {
+    lastKnownPublicValues.set(scopedKey, applyToSnapshot(lastKnown as QuestionStatsCachedShape));
+  }
+}
+
+function clearUserCommentLikesCache(cfg: FirestoreConfig, userId?: string): void {
+  if (!userId) {
+    userCommentLikesCache.clear();
+    return;
+  }
+  userCommentLikesCache.delete(`${cfg.projectId}:${cfg.databaseId}:${userId}`);
+}
+
+function clearAuthUserCache(cfg: FirestoreConfig, userId?: string): void {
+  if (!userId) {
+    resolvedAuthUserCache.clear();
+    return;
+  }
+  resolvedAuthUserCache.delete(`${cfg.projectId}:${cfg.databaseId}:${userId}`);
+}
+
 function isMockedFetchActive(): boolean {
   return typeof globalThis.fetch === 'function' && globalThis.fetch.name !== 'fetch';
+}
+
+function dbScopeKey(cfg: FirestoreConfig): string {
+  return `${cfg.projectId}:${cfg.databaseId}`;
+}
+
+function classifyDbError(err: unknown): { status: 'quota_exceeded' | 'error'; message: string } {
+  const msg = err instanceof Error ? err.message : String(err || 'خطأ غير معروف في قاعدة البيانات');
+  const status =
+    (err instanceof FirestoreHttpError && err.status === 429) || /quota|resource_exhausted|429/i.test(msg)
+      ? 'quota_exceeded'
+      : 'error';
+  return { status, message: msg };
+}
+
+function isQuotaOrTransientDbError(err: unknown): boolean {
+  if (err instanceof FirestoreHttpError && (err.status === 429 || err.status === 503 || err.status === 500)) {
+    return true;
+  }
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return /quota|resource_exhausted|429|unavailable/i.test(msg);
+}
+
+async function safePublicWithFallback<T>(
+  fallbackValue: T,
+  loader: () => Promise<T>
+): Promise<{ value: T; degraded: boolean }> {
+  try {
+    return { value: await loader(), degraded: false };
+  } catch (err) {
+    if (isQuotaOrTransientDbError(err)) {
+      return { value: fallbackValue, degraded: true };
+    }
+    throw err;
+  }
+}
+
+function normalizeAdminGrade(rawGrade: unknown): NormalizedAdminGrade {
+  if (rawGrade === 'bac1') return 'bac1';
+  if (rawGrade === 'bac2') return 'bac2';
+  return 'unclassified';
 }
 
 async function readPublicCached<T>(
@@ -183,7 +402,8 @@ async function readPublicCached<T>(
   loader: () => Promise<T>,
   ttlMs = PUBLIC_CACHE_TTL_MS
 ): Promise<T> {
-  if (isMockedFetchActive() || ttlMs <= 0) {
+  const bypassMockCache = isMockedFetchActive() && !allowQuotaCooldownInMock;
+  if (bypassMockCache || ttlMs <= 0) {
     return loader();
   }
   const scopedKey = `${cfg.projectId}:${cfg.databaseId}:${cacheKey}`;
@@ -193,6 +413,17 @@ async function readPublicCached<T>(
     return cached.value as T;
   }
 
+  // Fast-fail or serve last known good state during an active Firestore 429 cooldown window
+  if (isQuotaCooldownActive(cfg)) {
+    if (cached) {
+      return cached.value as T;
+    }
+    if (lastKnownPublicValues.has(scopedKey)) {
+      return lastKnownPublicValues.get(scopedKey) as T;
+    }
+    throw new FirestoreHttpError(429, 'RESOURCE_EXHAUSTED', 'Quota exceeded (cooldown active).');
+  }
+
   const inflight = inflightPublicReads.get(scopedKey);
   if (inflight) {
     return inflight as Promise<T>;
@@ -200,12 +431,31 @@ async function readPublicCached<T>(
 
   const promise = loader()
     .then((value) => {
+      clearQuotaCooldown(cfg);
       publicReadCache.set(scopedKey, { value, expiresAt: Date.now() + ttlMs });
+      lastKnownPublicValues.set(scopedKey, value);
       if (publicReadCache.size > 60) {
         const oldest = publicReadCache.keys().next().value;
         if (oldest) publicReadCache.delete(oldest);
       }
+      if (lastKnownPublicValues.size > 60) {
+        const oldest = lastKnownPublicValues.keys().next().value;
+        if (oldest) lastKnownPublicValues.delete(oldest);
+      }
       return value;
+    })
+    .catch((err) => {
+      if (isExplicitQuotaError(err)) {
+        markQuotaExceeded(cfg);
+      }
+      // Preserve last known cached public state instead of returning empty or crashing on transient quota limits
+      if (cached) {
+        return cached.value as T;
+      }
+      if (lastKnownPublicValues.has(scopedKey)) {
+        return lastKnownPublicValues.get(scopedKey) as T;
+      }
+      throw err;
     })
     .finally(() => {
       inflightPublicReads.delete(scopedKey);
@@ -455,20 +705,36 @@ async function resolveAdminStatus(
   idToken: string
 ): Promise<boolean> {
   if (!fbUser.emailVerified) return false;
+  if (isOwnerAdminUser(fbUser)) {
+    verifiedAdminRoleCache.set(fbUser.uid, Date.now());
+    return true;
+  }
+  if (!isMockedFetchActive()) {
+    const cachedAt = verifiedAdminRoleCache.get(fbUser.uid) || 0;
+    if (Date.now() - cachedAt < 10 * 60_000) {
+      return true;
+    }
+  }
   try {
     const marker = await getDoc(cfg, `admins/${fbUser.uid}`, { idToken });
-    if (marker) return true;
+    if (marker) {
+      verifiedAdminRoleCache.set(fbUser.uid, Date.now());
+      return true;
+    }
   } catch (err) {
     if (err instanceof FirestoreHttpError && (err.status === 401 || err.status === 403)) {
+      return false;
+    }
+    if (isQuotaOrTransientDbError(err)) {
       return false;
     }
     throw err;
   }
 
-  // Fallback check via Firestore Rules evaluation (owner email rule in firestore.rules)
+  // Fallback check via Firestore Rules evaluation for delegated admins
   try {
     await listCollection(cfg, 'admins', { idToken }, { pageSize: 1, maxDocs: 1 });
-    // If LIST /admins succeeded, Firestore Rules confirmed user is admin -> materialize admins/{uid}
+    verifiedAdminRoleCache.set(fbUser.uid, Date.now());
     try {
       await createDoc(
         cfg,
@@ -489,6 +755,9 @@ async function resolveAdminStatus(
     if (err instanceof FirestoreHttpError && (err.status === 401 || err.status === 403)) {
       return false;
     }
+    if (isQuotaOrTransientDbError(err)) {
+      return false;
+    }
     throw err;
   }
 }
@@ -500,36 +769,64 @@ async function resolveAuthenticatedUser(
 ): Promise<AuthUser | null> {
   if (!fbUser || !idToken || !VALID_ID_RE.test(fbUser.uid)) return null;
 
-  const profileDoc = await getDoc<Record<string, unknown>>(cfg, `users/${fbUser.uid}`, { idToken });
-  const isAdminMarker = await resolveAdminStatus(cfg, fbUser, idToken);
+  const isOwner = isOwnerAdminUser(fbUser);
+  const cacheKey = `${cfg.projectId}:${cfg.databaseId}:${fbUser.uid}`;
+  if (!isMockedFetchActive()) {
+    const cached = resolvedAuthUserCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.user;
+    }
+  }
 
+  let profileDoc: { id: string; data: Record<string, unknown> } | null = null;
+  let isAdminMarker = isOwner;
+  let degraded = false;
+
+  try {
+    profileDoc = await getDoc<Record<string, unknown>>(cfg, `users/${fbUser.uid}`, { idToken });
+    if (!isOwner) {
+      isAdminMarker = await resolveAdminStatus(cfg, fbUser, idToken);
+    }
+  } catch (err) {
+    if (!isQuotaOrTransientDbError(err)) {
+      throw err;
+    }
+    degraded = true;
+    const cachedAdminAt = verifiedAdminRoleCache.get(fbUser.uid) || 0;
+    isAdminMarker = isOwner || (fbUser.emailVerified && Date.now() - cachedAdminAt < 10 * 60_000);
+  }
+
+  let resolved: AuthUser;
   if (!profileDoc) {
-    return {
+    resolved = buildFallbackVerifiedUser(fbUser, isAdminMarker);
+  } else {
+    const d = profileDoc.data;
+    const role: 'user' | 'admin' = isOwner || isAdminMarker || d.role === 'admin' ? 'admin' : 'user';
+    const status: 'active' | 'suspended' = d.status === 'suspended' ? 'suspended' : 'active';
+
+    resolved = {
       id: fbUser.uid,
-      serialNumber: null,
-      name: (fbUser.name || fbUser.email.split('@')[0] || 'طالب').slice(0, 80),
-      email: fbUser.email,
-      grade: 'bac1',
-      role: isAdminMarker ? 'admin' : 'user',
-      status: 'active',
-      suspendReason: null,
+      serialNumber: typeof d.serialNumber === 'string' ? d.serialNumber : null,
+      name: typeof d.name === 'string' && d.name ? d.name : fbUser.name || 'طالب',
+      email: typeof d.email === 'string' && d.email ? d.email : fbUser.email,
+      grade: d.grade === 'bac2' ? 'bac2' : 'bac1',
+      role,
+      status,
+      suspendReason: typeof d.suspendReason === 'string' ? d.suspendReason : null,
     };
   }
 
-  const d = profileDoc.data;
-  const role: 'user' | 'admin' = isAdminMarker || d.role === 'admin' ? 'admin' : 'user';
-  const status: 'active' | 'suspended' = d.status === 'suspended' ? 'suspended' : 'active';
-
-  return {
-    id: fbUser.uid,
-    serialNumber: typeof d.serialNumber === 'string' ? d.serialNumber : null,
-    name: typeof d.name === 'string' && d.name ? d.name : fbUser.name || 'طالب',
-    email: typeof d.email === 'string' && d.email ? d.email : fbUser.email,
-    grade: d.grade === 'bac2' ? 'bac2' : 'bac1',
-    role,
-    status,
-    suspendReason: typeof d.suspendReason === 'string' ? d.suspendReason : null,
-  };
+  if (!isMockedFetchActive()) {
+    resolvedAuthUserCache.set(cacheKey, {
+      user: resolved,
+      expiresAt: Date.now() + (degraded ? AUTH_USER_DEGRADED_TTL_MS : AUTH_USER_CACHE_TTL_MS),
+    });
+    if (resolvedAuthUserCache.size > 150) {
+      const oldest = resolvedAuthUserCache.keys().next().value;
+      if (oldest) resolvedAuthUserCache.delete(oldest);
+    }
+  }
+  return resolved;
 }
 
 async function ensureUserSerialAndProfile(
@@ -654,7 +951,11 @@ async function allocateSerialAtomically(
         auth
       );
       return serial;
-    } catch {
+    } catch (err) {
+      if (isQuotaOrTransientDbError(err)) {
+        if (isExplicitQuotaError(err)) markQuotaExceeded(cfg);
+        throw err;
+      }
       const fallbackData = { ...createProfilePayload };
       if (preferredSerial && /^CRV-[0-9]{4,}$/.test(preferredSerial)) {
         fallbackData.serialNumber = preferredSerial;
@@ -690,7 +991,8 @@ async function allocateSerialAtomically(
       auth
     );
     return serial;
-  } catch {
+  } catch (err) {
+    if (isExplicitQuotaError(err)) markQuotaExceeded(cfg);
     return preferredSerial || '';
   }
 }
@@ -710,6 +1012,7 @@ async function recordAnalyticsEvent(
   }
 ): Promise<void> {
   if (!ALLOWED_ANALYTICS_EVENTS.has(input.eventType)) return;
+  if (isQuotaCooldownActive(cfg)) return;
   const id = generateId('ev');
   const data: Record<string, unknown> = {
     id,
@@ -732,7 +1035,14 @@ async function recordAnalyticsEvent(
     data.resultsCount = Math.max(0, Math.min(5000, Math.round(input.resultsCount)));
   }
 
-  await createDoc(cfg, 'analytics_events', id, data, ['createdAt'], { apiKey: cfg.apiKey });
+  try {
+    await createDoc(cfg, 'analytics_events', id, data, ['createdAt'], { apiKey: cfg.apiKey });
+  } catch (err) {
+    if (isExplicitQuotaError(err)) {
+      markQuotaExceeded(cfg);
+    }
+    throw err;
+  }
 }
 
 async function logAdminAudit(
@@ -756,6 +1066,110 @@ async function logAdminAudit(
   if (details) data.detailsJson = JSON.stringify(details).slice(0, 1500);
 
   await createDoc(cfg, 'audit_logs', id, data, ['createdAt'], { idToken });
+}
+
+async function getApprovedCommentLikesForUser(
+  cfg: FirestoreConfig,
+  idToken: string,
+  userId: string,
+  commentDocs: Array<{ id: string }>
+): Promise<Set<string>> {
+  const key = `${cfg.projectId}:${cfg.databaseId}:${userId}`;
+  if (!isMockedFetchActive()) {
+    const cached = userCommentLikesCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.likedIds;
+    }
+  }
+  const likedSet = new Set<string>();
+  await Promise.all(
+    commentDocs.slice(0, 50).map(async (d) => {
+      try {
+        const likeDoc = await getDoc(cfg, `comments/${d.id}/likes/${userId}`, { idToken });
+        if (likeDoc) likedSet.add(d.id);
+      } catch {
+        // Ignore individual check error
+      }
+    })
+  );
+  if (!isMockedFetchActive()) {
+    userCommentLikesCache.set(key, {
+      likedIds: likedSet,
+      expiresAt: Date.now() + USER_LIKES_CACHE_TTL_MS,
+    });
+    if (userCommentLikesCache.size > 100) {
+      const oldest = userCommentLikesCache.keys().next().value;
+      if (oldest) userCommentLikesCache.delete(oldest);
+    }
+  }
+  return likedSet;
+}
+
+async function createSystemBackupSnapshot(
+  cfg: FirestoreConfig,
+  auth: { idToken?: string | null; apiKey?: string },
+  reason: string,
+  actorUsername: string,
+  extraContext?: Record<string, unknown>
+): Promise<{ id: string; sizeBytes: number; createdAt: string } | null> {
+  if (!auth.idToken) return null;
+  const authToken = { idToken: auth.idToken };
+  const backupId = generateId('bak');
+  const createdAt = new Date().toISOString();
+
+  try {
+    const [cfgDoc, pollDocs, toolCounter, serialCounter] = await Promise.all([
+      getDoc<Record<string, unknown>>(cfg, 'site_config/public', authToken).catch(() => null),
+      listCollection<Record<string, unknown>>(cfg, 'polls', authToken, { pageSize: 20, maxDocs: 20 }).catch(() => []),
+      getDoc<{ count?: number }>(cfg, 'counters/tool', authToken).catch(() => null),
+      getDoc<{ count?: number }>(cfg, 'counters/user_serial', authToken).catch(() => null),
+    ]);
+
+    const summaryPayload = {
+      reason,
+      createdAt,
+      siteConfig: cfgDoc?.data || null,
+      polls: pollDocs.map((p) => ({ id: p.id, ...p.data })),
+      counters: {
+        toolLikes: Number(toolCounter?.data.count || 0),
+        userSerial: Number(serialCounter?.data.count || 1000),
+      },
+      extra: extraContext || null,
+    };
+
+    const countsPayload = {
+      polls: pollDocs.length,
+      toolLikes: Number(toolCounter?.data.count || 0),
+      userSerial: Number(serialCounter?.data.count || 1000),
+      hasSiteConfig: Boolean(cfgDoc?.data),
+    };
+
+    const summaryJson = JSON.stringify(summaryPayload).slice(0, 62000);
+    const countsJson = JSON.stringify(countsPayload).slice(0, 1900);
+
+    await createDoc(
+      cfg,
+      'system_backups',
+      backupId,
+      {
+        id: backupId,
+        reason: reason.slice(0, 80),
+        actor: (actorUsername || 'admin').slice(0, 160),
+        summaryJson,
+        countsJson,
+      },
+      ['createdAt'],
+      authToken
+    );
+
+    return {
+      id: backupId,
+      sizeBytes: new TextEncoder().encode(summaryJson).byteLength,
+      createdAt,
+    };
+  } catch {
+    return null;
+  }
 }
 
 interface FirebasePasswordSignInResult {
@@ -839,12 +1253,29 @@ async function refreshFirebaseIdToken(apiKey: string, refreshToken: string): Pro
 async function requireAdminContext(
   ctx: RequestCtx
 ): Promise<{ idToken: string | null; username: string; hasFirebaseToken: boolean } | null> {
-  if (ctx.idToken && ctx.fbUser && ctx.currentUser?.role === 'admin' && ctx.currentUser?.status === 'active') {
-    return {
-      idToken: ctx.idToken,
-      username: ctx.currentUser.email || ctx.currentUser.name || ctx.fbUser.uid,
-      hasFirebaseToken: true,
-    };
+  if (ctx.idToken && ctx.fbUser) {
+    if (ctx.currentUser?.role === 'admin' && ctx.currentUser?.status === 'active') {
+      verifiedAdminRoleCache.set(ctx.fbUser.uid, Date.now());
+      return {
+        idToken: ctx.idToken,
+        username: ctx.currentUser.email || ctx.currentUser.name || ctx.fbUser.uid,
+        hasFirebaseToken: true,
+      };
+    }
+
+    const cachedAt = verifiedAdminRoleCache.get(ctx.fbUser.uid) || 0;
+    const hasFreshAdminCache = ctx.fbUser.emailVerified && Date.now() - cachedAt < 10 * 60_000;
+    if (
+      isOwnerAdminUser(ctx.fbUser) ||
+      (hasFreshAdminCache && ctx.currentUser?.status !== 'suspended')
+    ) {
+      verifiedAdminRoleCache.set(ctx.fbUser.uid, Date.now());
+      return {
+        idToken: ctx.idToken,
+        username: ctx.fbUser.email || ctx.fbUser.uid,
+        hasFirebaseToken: true,
+      };
+    }
   }
 
   const rawAdminCookie = ctx.cookies['crovo_admin_session'];
@@ -1064,6 +1495,7 @@ function computeDashboardAnalytics(params: {
   toParam?: string | null;
   trackingStartedAt: string;
   events: Array<{ id: string; data: Record<string, unknown> }>;
+  dailyDocs?: Array<{ id: string; data: Record<string, unknown> }>;
   users: Array<{ id: string; data: Record<string, unknown> }>;
   orders: Array<{ id: string; data: Record<string, unknown> }>;
   questionStats: Array<{ id: string; data: Record<string, unknown> }>;
@@ -1177,6 +1609,66 @@ function computeDashboardAnalytics(params: {
     dayMap.set(dayKey, dayEntry);
   }
 
+  // Merge historical aggregated daily counts from analytics_daily (monotonic Math.max per day)
+  const dailySummaryMap = new Map<
+    string,
+    { day: string; visits: number; uniqueVisitors: number; libraryOpens: number; searches: number }
+  >();
+  for (const [dayKey, d] of dayMap.entries()) {
+    dailySummaryMap.set(dayKey, {
+      day: dayKey,
+      visits: d.visits,
+      uniqueVisitors: d.visitors.size,
+      libraryOpens: d.libraryOpens,
+      searches: d.searches,
+    });
+  }
+
+  let dailyAggUniqueSum = 0;
+  let prevDailyAggUniqueSum = 0;
+  for (const dailyDoc of params.dailyDocs || []) {
+    const rawDay = String(dailyDoc.data.id || dailyDoc.id || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rawDay)) continue;
+    const dayStartMs = Date.parse(`${rawDay}T00:00:00.000Z`);
+    const dayEndMs = Date.parse(`${rawDay}T23:59:59.999Z`);
+    if (!Number.isFinite(dayStartMs)) continue;
+
+    const dVisits = Math.max(0, Number(dailyDoc.data.visits || 0));
+    const dUnique = Math.max(0, Number(dailyDoc.data.uniqueVisitors || 0));
+    const dOpens = Math.max(0, Number(dailyDoc.data.libraryOpens || 0));
+    const dSearches = Math.max(0, Number(dailyDoc.data.searches || 0));
+
+    if (dayEndMs >= prevFromMs && dayStartMs < prevToMs) {
+      prevDailyAggUniqueSum += dUnique;
+    }
+    if (dayEndMs < fromMs || dayStartMs > toMs) continue;
+
+    dailyAggUniqueSum += dUnique;
+    const existing = dailySummaryMap.get(rawDay) || {
+      day: rawDay,
+      visits: 0,
+      uniqueVisitors: 0,
+      libraryOpens: 0,
+      searches: 0,
+    };
+    const nextVisits = Math.max(existing.visits, dVisits);
+    const nextOpens = Math.max(existing.libraryOpens, dOpens);
+    const nextSearches = Math.max(existing.searches, dSearches);
+    const nextUnique = Math.max(existing.uniqueVisitors, dUnique);
+
+    if (nextVisits > existing.visits) totalVisits += nextVisits - existing.visits;
+    if (nextOpens > existing.libraryOpens) libraryOpens += nextOpens - existing.libraryOpens;
+    if (nextSearches > existing.searches) searches += nextSearches - existing.searches;
+
+    dailySummaryMap.set(rawDay, {
+      day: rawDay,
+      visits: nextVisits,
+      uniqueVisitors: nextUnique,
+      libraryOpens: nextOpens,
+      searches: nextSearches,
+    });
+  }
+
   let newInPeriod = 0;
   let prevNewInPeriod = 0;
   for (const u of params.users) {
@@ -1218,11 +1710,11 @@ function computeDashboardAnalytics(params: {
     to: new Date(toMs).toISOString(),
     trackingStartedAt: params.trackingStartedAt,
     visitors: {
-      uniqueVisitors: uniqueSet.size,
-      prevUniqueVisitors: prevUniqueSet.size,
+      uniqueVisitors: Math.max(uniqueSet.size, dailyAggUniqueSum),
+      prevUniqueVisitors: Math.max(prevUniqueSet.size, prevDailyAggUniqueSum),
       totalVisits,
       prevTotalVisits,
-      sessions: uniqueSet.size,
+      sessions: Math.max(uniqueSet.size, dailyAggUniqueSum),
     },
     users: {
       totalRegistered: params.users.length,
@@ -1252,15 +1744,7 @@ function computeDashboardAnalytics(params: {
       totalComments: params.comments.length,
       totalPollVotes,
     },
-    timeline: Array.from(dayMap.values())
-      .sort((a, b) => a.day.localeCompare(b.day))
-      .map((d) => ({
-        day: d.day,
-        visits: d.visits,
-        uniqueVisitors: d.visitors.size,
-        libraryOpens: d.libraryOpens,
-        searches: d.searches,
-      })),
+    timeline: Array.from(dailySummaryMap.values()).sort((a, b) => a.day.localeCompare(b.day)),
   };
 }
 
@@ -1309,12 +1793,16 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
   if (idToken) {
     try {
       fbUser = await verifyFirebaseIdToken(idToken);
-      if (fbUser) {
-        currentUser = await resolveAuthenticatedUser(cfg, fbUser, idToken);
-      }
     } catch {
       fbUser = null;
-      currentUser = null;
+    }
+    if (fbUser) {
+      try {
+        currentUser = await resolveAuthenticatedUser(cfg, fbUser, idToken);
+      } catch {
+        // Keep verified fbUser intact so admin/status handlers can report dbStatus cleanly on 429/503 outages
+        currentUser = null;
+      }
     }
   }
 
@@ -1342,6 +1830,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     if (method === 'GET' && path === '/api/health') {
       try {
         const probe = await checkFirestoreHealth(cfg);
+        clearQuotaCooldown(cfg);
         return jsonResponse(ctx, {
           ok: probe.ok,
           engine: 'firebase-firestore',
@@ -1350,6 +1839,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           serverTime: new Date().toISOString(),
         });
       } catch (err) {
+        if (isExplicitQuotaError(err)) {
+          markQuotaExceeded(cfg);
+        }
         return jsonResponse(
           ctx,
           {
@@ -1392,6 +1884,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       }
 
       try {
+        clearAuthUserCache(cfg, verified.uid);
         const user = await ensureUserSerialAndProfile(cfg, verified, tokenCandidate, {
           name: typeof body.name === 'string' ? body.name : undefined,
           grade: body.grade === 'bac2' ? 'bac2' : body.grade === 'bac1' ? 'bac1' : undefined,
@@ -1409,8 +1902,20 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { ok: true, user });
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'تعذر مزامنة بيانات الحساب.';
-        const status = msg.includes('إيقاف') ? 403 : 503;
-        return jsonResponse(ctx, { error: msg }, status);
+        if (msg.includes('إيقاف')) {
+          return jsonResponse(ctx, { error: msg }, 403);
+        }
+        if (isQuotaOrTransientDbError(err)) {
+          const fallbackUser = buildFallbackVerifiedUser(verified, isOwnerAdminUser(verified));
+          if (body.grade === 'bac1' || body.grade === 'bac2') {
+            fallbackUser.grade = body.grade;
+          }
+          if (typeof body.name === 'string' && body.name.trim().length >= 2) {
+            fallbackUser.name = body.name.trim().slice(0, 80);
+          }
+          return jsonResponse(ctx, { ok: true, user: fallbackUser, quotaDegraded: true });
+        }
+        return jsonResponse(ctx, { error: msg }, 503);
       }
     }
 
@@ -1437,18 +1942,53 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const section: 'js' | 'py' | 'fin' =
         grade === 'bac1' ? 'js' : secParam === 'py' || secParam === 'fin' ? secParam : 'js';
 
-      const [siteCfg, toolLikesCount, libraryChapters, pollDocs, commentDocs, questionStats, userToolLikeDoc] =
+      const fallbackChapters = getBundledChapters(grade, section).map((ch) => ({
+        num: ch.num,
+        title: getChapterSectionDefaultTitle(grade, section, ch.num),
+        qs: ch.qs.map((q, idx) => ({
+          id: `lib_${grade}_${section}_${ch.num}_${idx}`,
+          q: q.q,
+          a: q.a,
+          code: Boolean(q.code),
+          qIndex: idx,
+        })),
+      }));
+
+      const [siteCfgRes, toolLikesRes, libRes, pollsRes, commentsRes, qStatsRes, userToolLikeDoc] =
         await Promise.all([
-          getSiteConfigCached(cfg, env),
-          getToolCounterCountCached(cfg),
-          readPublicCached(cfg, `library:${grade}:${section}`, () => loadMergedLibrarySection(cfg, grade, section)),
-          getPollsCached(cfg),
-          getApprovedCommentsCached(cfg),
-          getQuestionStatsCached(cfg),
+          safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env)),
+          safePublicWithFallback(0, () => getToolCounterCountCached(cfg)),
+          safePublicWithFallback(fallbackChapters, () =>
+            readPublicCached(cfg, `library:${grade}:${section}`, () => loadMergedLibrarySection(cfg, grade, section))
+          ),
+          safePublicWithFallback([] as Array<{ id: string; data: Record<string, unknown>; createTime?: string }>, () =>
+            getPollsCached(cfg)
+          ),
+          safePublicWithFallback([] as Array<{ id: string; data: Record<string, unknown>; createTime?: string }>, () =>
+            getApprovedCommentsCached(cfg)
+          ),
+          safePublicWithFallback(
+            { totalCopies: 0, copyCounts: {} as Record<string, number>, topQuestions: [] },
+            () => getQuestionStatsCached(cfg)
+          ),
           currentUser && idToken
             ? getDoc(cfg, `tool_likes/${currentUser.id}`, { idToken }).catch(() => null)
             : Promise.resolve(null),
         ]);
+
+      const siteCfg = siteCfgRes.value;
+      const toolLikesCount = toolLikesRes.value;
+      const libraryChapters = libRes.value;
+      const pollDocs = pollsRes.value;
+      const commentDocs = commentsRes.value;
+      const questionStats = qStatsRes.value;
+      const quotaDegraded =
+        siteCfgRes.degraded ||
+        toolLikesRes.degraded ||
+        libRes.degraded ||
+        pollsRes.degraded ||
+        commentsRes.degraded ||
+        qStatsRes.degraded;
 
       const sortedPolls = [...pollDocs].sort(
         (a, b) => Date.parse(normalizeIsoTimestamp(b.data.createdAt)) - Date.parse(normalizeIsoTimestamp(a.data.createdAt))
@@ -1456,23 +1996,15 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const targetPollDoc = sortedPolls[0];
 
       let pollUserChoice: string | null = null;
-      const commentLikedSet = new Set<string>();
+      let commentLikedSet = new Set<string>();
       if (currentUser && idToken) {
-        const [voteDoc] = await Promise.all([
+        const [voteDoc, likedIds] = await Promise.all([
           targetPollDoc
             ? getDoc<{ choice?: string }>(cfg, `polls/${targetPollDoc.id}/votes/${currentUser.id}`, { idToken }).catch(() => null)
             : Promise.resolve(null),
-          Promise.all(
-            commentDocs.slice(0, 50).map(async (d) => {
-              try {
-                const likeDoc = await getDoc(cfg, `comments/${d.id}/likes/${currentUser!.id}`, { idToken });
-                if (likeDoc) commentLikedSet.add(d.id);
-              } catch {
-                // Ignore individual check error
-              }
-            })
-          ),
+          getApprovedCommentLikesForUser(cfg, idToken, currentUser.id, commentDocs).catch(() => new Set<string>()),
         ]);
+        commentLikedSet = likedIds;
         if (voteDoc?.data.choice) {
           pollUserChoice = String(voteDoc.data.choice);
         }
@@ -1547,6 +2079,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           poll: pollState,
           comments,
           questionStats,
+          ...(quotaDegraded ? { quotaDegraded: true } : {}),
         },
         200,
         publicCacheHeader(Boolean(currentUser))
@@ -1554,8 +2087,16 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     }
 
     if (method === 'GET' && path === '/api/config') {
-      const merged = await getSiteConfigCached(cfg, env);
-      return jsonResponse(ctx, buildPublicConfigResponse(merged), 200, publicCacheHeader(false));
+      const merged = await safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env));
+      return jsonResponse(
+        ctx,
+        {
+          ...buildPublicConfigResponse(merged.value),
+          ...(merged.degraded ? { quotaDegraded: true } : {}),
+        },
+        200,
+        publicCacheHeader(false)
+      );
     }
 
     if (method === 'GET' && path === '/api/library') {
@@ -1564,19 +2105,32 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const section: 'js' | 'py' | 'fin' =
         grade === 'bac1' ? 'js' : secParam === 'py' || secParam === 'fin' ? secParam : 'js';
 
-      const chapters = await readPublicCached(cfg, `library:${grade}:${section}`, () =>
-        loadMergedLibrarySection(cfg, grade, section)
+      const fallbackChapters = getBundledChapters(grade, section).map((ch) => ({
+        num: ch.num,
+        title: getChapterSectionDefaultTitle(grade, section, ch.num),
+        qs: ch.qs.map((q, idx) => ({
+          id: `lib_${grade}_${section}_${ch.num}_${idx}`,
+          q: q.q,
+          a: q.a,
+          code: Boolean(q.code),
+          qIndex: idx,
+        })),
+      }));
+
+      const libRes = await safePublicWithFallback(fallbackChapters, () =>
+        readPublicCached(cfg, `library:${grade}:${section}`, () => loadMergedLibrarySection(cfg, grade, section))
       );
       return jsonResponse(
         ctx,
         {
           grade,
           section,
-          chapters: chapters.map((c) => ({
+          chapters: libRes.value.map((c) => ({
             num: c.num,
             title: c.title,
             qs: c.qs.map((q) => ({ q: q.q, a: q.a, code: q.code })),
           })),
+          ...(libRes.degraded ? { quotaDegraded: true } : {}),
         },
         200,
         publicCacheHeader(false)
@@ -1593,26 +2147,44 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { error: 'نوع الحدث غير مدعوم.' }, 400);
       }
 
-      await recordAnalyticsEvent(cfg, {
-        eventType: rawEventType,
-        visitorId,
-        userId: currentUser?.id || null,
-        path: typeof body.path === 'string' ? body.path : null,
-        grade: body.grade === 'bac2' ? 'bac2' : body.grade === 'bac1' ? 'bac1' : null,
-        section:
-          body.section === 'py' || body.section === 'fin' || body.section === 'js' ? body.section : null,
-        chapterNum: typeof body.chapterNum === 'number' ? body.chapterNum : null,
-        query: typeof body.query === 'string' ? body.query : null,
-        resultsCount: typeof body.resultsCount === 'number' ? body.resultsCount : null,
-      });
+      try {
+        await recordAnalyticsEvent(cfg, {
+          eventType: rawEventType,
+          visitorId,
+          userId: currentUser?.id || null,
+          path: typeof body.path === 'string' ? body.path : null,
+          grade: body.grade === 'bac2' ? 'bac2' : body.grade === 'bac1' ? 'bac1' : null,
+          section:
+            body.section === 'py' || body.section === 'fin' || body.section === 'js' ? body.section : null,
+          chapterNum: typeof body.chapterNum === 'number' ? body.chapterNum : null,
+          query: typeof body.query === 'string' ? body.query : null,
+          resultsCount: typeof body.resultsCount === 'number' ? body.resultsCount : null,
+        });
+      } catch (err) {
+        if (isQuotaOrTransientDbError(err)) {
+          return jsonResponse(ctx, { ok: true, skippedQuota: true }, 202);
+        }
+        throw err;
+      }
 
       return jsonResponse(ctx, { ok: true }, 202);
     }
 
     // ==================== QUESTION STATS & REPORTS ====================
     if (method === 'GET' && path === '/api/questions/stats') {
-      const statsData = await getQuestionStatsCached(cfg);
-      return jsonResponse(ctx, statsData, 200, publicCacheHeader(false));
+      const statsRes = await safePublicWithFallback(
+        { totalCopies: 0, copyCounts: {}, topQuestions: [] },
+        () => getQuestionStatsCached(cfg)
+      );
+      return jsonResponse(
+        ctx,
+        {
+          ...statsRes.value,
+          ...(statsRes.degraded ? { quotaDegraded: true } : {}),
+        },
+        200,
+        publicCacheHeader(false)
+      );
     }
 
     if (method === 'POST' && path === '/api/questions/copy') {
@@ -1635,46 +2207,54 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           : `السؤال ${qIndex + 1}`;
 
       let nextCount = 1;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const existing = await getDoc<Record<string, unknown>>(cfg, `question_stats/${questionKey}`, {
-          apiKey: cfg.apiKey,
-        });
-        if (!existing) {
-          try {
-            await createDoc(
-              cfg,
-              'question_stats',
-              questionKey,
-              {
+      try {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const existing = await getDoc<Record<string, unknown>>(cfg, `question_stats/${questionKey}`, {
+            apiKey: cfg.apiKey,
+          });
+          if (!existing) {
+            try {
+              await createDoc(
+                cfg,
+                'question_stats',
                 questionKey,
-                grade,
-                section,
-                chapterNum,
-                qIndex,
-                questionTitle,
-                copyCount: 1,
-              },
+                {
+                  questionKey,
+                  grade,
+                  section,
+                  chapterNum,
+                  qIndex,
+                  questionTitle,
+                  copyCount: 1,
+                },
+                ['updatedAt'],
+                { apiKey: cfg.apiKey }
+              );
+              nextCount = 1;
+              break;
+            } catch (createErr) {
+              if (isQuotaOrTransientDbError(createErr)) throw createErr;
+              continue;
+            }
+          } else {
+            nextCount = Math.max(0, Number(existing.data.copyCount || 0)) + 1;
+            await patchDoc(
+              cfg,
+              `question_stats/${questionKey}`,
+              { copyCount: nextCount, questionTitle },
+              ['copyCount', 'questionTitle', 'updatedAt'],
               ['updatedAt'],
-              { apiKey: cfg.apiKey }
+              { apiKey: cfg.apiKey },
+              true
             );
-            nextCount = 1;
             break;
-          } catch {
-            continue;
           }
-        } else {
-          nextCount = Math.max(0, Number(existing.data.copyCount || 0)) + 1;
-          await patchDoc(
-            cfg,
-            `question_stats/${questionKey}`,
-            { copyCount: nextCount, questionTitle },
-            ['copyCount', 'questionTitle', 'updatedAt'],
-            ['updatedAt'],
-            { apiKey: cfg.apiKey },
-            true
-          );
-          break;
         }
+      } catch (err) {
+        if (isQuotaOrTransientDbError(err)) {
+          return jsonResponse(ctx, { ok: true, questionKey, copyCount: 1, quotaDegraded: true });
+        }
+        throw err;
       }
 
       await recordAnalyticsEvent(cfg, {
@@ -1687,7 +2267,15 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         chapterNum,
       }).catch(() => {});
 
-      clearPublicReadCache('question_stats');
+      incrementCachedQuestionStat(cfg, {
+        questionKey,
+        grade,
+        section,
+        chapterNum,
+        qIndex,
+        questionTitle,
+        copyCount: nextCount,
+      });
       return jsonResponse(ctx, { ok: true, questionKey, copyCount: nextCount });
     }
 
@@ -1747,8 +2335,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 
     // ==================== PUSH NOTIFICATIONS ====================
     if (method === 'GET' && path === '/api/push/vapid-public-key') {
-      const doc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', { apiKey: cfg.apiKey });
-      const config = mergeSiteConfig(doc?.data || null, env);
+      const cfgRes = await safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env));
+      const config = cfgRes.value;
       const vapid = await resolveVapidKeys(env);
       if (!vapid) {
         return jsonResponse(ctx, {
@@ -1756,34 +2344,39 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           enabled: false,
           intervalDays: config.notificationsIntervalDays,
           error: 'مفاتيح VAPID غير مُعدّة في بيئة الإنتاج.',
+          ...(cfgRes.degraded ? { quotaDegraded: true } : {}),
         });
       }
       return jsonResponse(ctx, {
         publicKey: vapid.publicKey,
         enabled: config.notificationsEnabled,
         intervalDays: config.notificationsIntervalDays,
+        ...(cfgRes.degraded ? { quotaDegraded: true } : {}),
       });
     }
 
     if (method === 'GET' && path === '/api/push/status') {
-      const doc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', { apiKey: cfg.apiKey });
-      const config = mergeSiteConfig(doc?.data || null, env);
+      const cfgRes = await safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env));
+      const config = cfgRes.value;
       const endpointHeader = (request.headers.get('x-crovo-push-endpoint') || '').trim();
       const adminCtx = await requireAdminContext(ctx);
       let subscribed = Boolean(endpointHeader && endpointHeader.startsWith('https://'));
 
-      if (adminCtx && endpointHeader) {
+      if (adminCtx && adminCtx.idToken && endpointHeader) {
         const subId = `sub_${(await sha256Hex(endpointHeader)).slice(0, 32)}`;
         const subDoc = await getDoc<Record<string, unknown>>(cfg, `push_subscriptions/${subId}`, {
           idToken: adminCtx.idToken,
-        });
-        subscribed = Boolean(subDoc && subDoc.data.enabled === true);
+        }).catch(() => null);
+        if (subDoc) {
+          subscribed = subDoc.data.enabled === true;
+        }
       }
 
       return jsonResponse(ctx, {
         subscribed,
         notificationsEnabled: config.notificationsEnabled,
         intervalDays: config.notificationsIntervalDays,
+        ...(cfgRes.degraded ? { quotaDegraded: true } : {}),
       });
     }
 
@@ -1924,19 +2517,16 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 
     // ==================== COMMENTS & REVIEWS ====================
     if (method === 'GET' && path === '/api/comments') {
-      const docs = await getApprovedCommentsCached(cfg);
+      const docsRes = await safePublicWithFallback(
+        [] as Array<{ id: string; data: Record<string, unknown>; createTime?: string }>,
+        () => getApprovedCommentsCached(cfg)
+      );
+      const docs = docsRes.value;
 
-      const likedSet = new Set<string>();
+      let likedSet = new Set<string>();
       if (currentUser && idToken && docs.length > 0) {
-        await Promise.all(
-          docs.slice(0, 50).map(async (d) => {
-            try {
-              const likeDoc = await getDoc(cfg, `comments/${d.id}/likes/${currentUser!.id}`, { idToken });
-              if (likeDoc) likedSet.add(d.id);
-            } catch {
-              // Ignore individual check error
-            }
-          })
+        likedSet = await getApprovedCommentLikesForUser(cfg, idToken, currentUser.id, docs).catch(
+          () => new Set<string>()
         );
       }
 
@@ -1967,7 +2557,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         })
         .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 
-      return jsonResponse(ctx, { comments });
+      return jsonResponse(ctx, { comments, ...(docsRes.degraded ? { quotaDegraded: true } : {}) });
     }
 
     if (method === 'POST' && path === '/api/comments') {
@@ -2184,8 +2774,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const itemKey = rawKey && rawKey.trim() ? rawKey.trim().slice(0, 64) : 'tool';
 
       if (itemKey === 'tool') {
-        const [count, likeDoc] = await Promise.all([
-          getToolCounterCountCached(cfg),
+        const [countRes, likeDoc] = await Promise.all([
+          safePublicWithFallback(0, () => getToolCounterCountCached(cfg)),
           currentUser && idToken
             ? getDoc(cfg, `tool_likes/${currentUser.id}`, { idToken }).catch(() => null)
             : Promise.resolve(null),
@@ -2194,8 +2784,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           ctx,
           {
             itemKey: 'tool',
-            count,
+            count: countRes.value,
             liked: Boolean(likeDoc),
+            ...(countRes.degraded ? { quotaDegraded: true } : {}),
           },
           200,
           publicCacheHeader(Boolean(currentUser))
@@ -2205,16 +2796,19 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const commentMatch = itemKey.match(/^comment:([a-zA-Z0-9_-]{4,60})$/);
       if (commentMatch) {
         const cId = commentMatch[1];
-        const [cDoc, likeDoc] = await Promise.all([
-          getDoc<{ likesCount?: number }>(cfg, `comments/${cId}`, { apiKey: cfg.apiKey }),
+        const [cDocRes, likeDoc] = await Promise.all([
+          safePublicWithFallback(null, () =>
+            getDoc<{ likesCount?: number }>(cfg, `comments/${cId}`, { apiKey: cfg.apiKey })
+          ),
           currentUser && idToken
             ? getDoc(cfg, `comments/${cId}/likes/${currentUser.id}`, { idToken }).catch(() => null)
             : Promise.resolve(null),
         ]);
         return jsonResponse(ctx, {
           itemKey,
-          count: Math.max(0, Number(cDoc?.data.likesCount || 0)),
+          count: Math.max(0, Number(cDocRes.value?.data.likesCount || 0)),
           liked: Boolean(likeDoc),
+          ...(cDocRes.degraded ? { quotaDegraded: true } : {}),
         });
       }
 
@@ -2330,6 +2924,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         { idToken }
       );
       clearPublicReadCache('comments_approved');
+      clearUserCommentLikesCache(cfg, currentUser.id);
 
       return jsonResponse(ctx, { itemKey: rawKey, count: nextCount, liked: shouldLike });
     }
@@ -2337,10 +2932,14 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
     // ==================== POLL ====================
     if (method === 'GET' && path === '/api/poll') {
       const requestedPollId = (url.searchParams.get('pollId') || '').trim();
-      const [siteCfg, pollDocs] = await Promise.all([
-        getSiteConfigCached(cfg, env),
-        getPollsCached(cfg),
+      const [siteCfgRes, pollDocsRes] = await Promise.all([
+        safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env)),
+        safePublicWithFallback([] as Array<{ id: string; data: Record<string, unknown>; createTime?: string }>, () =>
+          getPollsCached(cfg)
+        ),
       ]);
+      const siteCfg = siteCfgRes.value;
+      const pollDocs = pollDocsRes.value;
 
       const targetDoc =
         (requestedPollId ? pollDocs.find((p) => p.id === requestedPollId) : null) ||
@@ -2368,6 +2967,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               { key: 'extend', label: 'أيوة، مدهولنا شوية كمان 🙏', count: 0, percent: 0 },
               { key: 'enough', label: 'لا، كده كفاية 👍', count: 0, percent: 0 },
             ],
+            ...(siteCfgRes.degraded || pollDocsRes.degraded ? { quotaDegraded: true } : {}),
           },
           200,
           publicCacheHeader(Boolean(currentUser))
@@ -2388,7 +2988,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 
       return jsonResponse(
         ctx,
-        buildPollStateFromDoc(targetDoc.id, targetDoc.data, userChoice, siteCfg.pollClosed),
+        {
+          ...buildPollStateFromDoc(targetDoc.id, targetDoc.data, userChoice, siteCfg.pollClosed),
+          ...(siteCfgRes.degraded || pollDocsRes.degraded ? { quotaDegraded: true } : {}),
+        },
         200,
         publicCacheHeader(Boolean(currentUser))
       );
@@ -2740,7 +3343,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { error: 'تعذر التحقق من حساب Firebase أو انتهت الجلسة.' }, 401);
       }
 
-      const isAdmin = await resolveAdminStatus(cfg, verified, tokenCandidate);
+      const isAdmin = isOwnerAdminUser(verified) || (await resolveAdminStatus(cfg, verified, tokenCandidate));
       if (!isAdmin) {
         return jsonResponse(
           ctx,
@@ -2749,7 +3352,19 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         );
       }
 
-      await ensureUserSerialAndProfile(cfg, verified, tokenCandidate, {});
+      verifiedAdminRoleCache.set(verified.uid, Date.now());
+      clearAuthUserCache(cfg, verified.uid);
+
+      let userProfile: AuthUser;
+      let quotaDegraded = false;
+      try {
+        userProfile = await ensureUserSerialAndProfile(cfg, verified, tokenCandidate, {});
+      } catch (err) {
+        if (!isQuotaOrTransientDbError(err)) throw err;
+        quotaDegraded = true;
+        userProfile = buildFallbackVerifiedUser(verified, true);
+      }
+
       await logAdminAudit(cfg, tokenCandidate, verified.email || verified.uid, 'admin_login_firebase', 'session', null, {
         uid: verified.uid,
       }).catch(() => {});
@@ -2757,7 +3372,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return jsonResponse(ctx, {
         ok: true,
         username: verified.email || verified.uid,
+        user: userProfile,
         hasFirebaseToken: true,
+        ...(quotaDegraded ? { quotaDegraded: true } : {}),
       });
     }
 
@@ -2776,6 +3393,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         method === 'GET' &&
         (path === '/api/admin/overview' ||
           path === '/api/admin/analytics' ||
+          path === '/api/admin/users' ||
           path === '/api/admin/library' ||
           path === '/api/admin/library/export' ||
           path === '/api/admin/tool' ||
@@ -2787,6 +3405,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           {
             error:
               'يلزم ربط جلسة Google/Firebase السحابية (أو ضبط ADMIN_FIREBASE_EMAIL و ADMIN_FIREBASE_PASSWORD) للوصول إلى البيانات المحمية وإجراء التعديلات في Firestore.',
+            requiresFirebaseLink: true,
           },
           403
         );
@@ -2795,20 +3414,40 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       if (method !== 'GET') {
         const rlResp = await applyRateLimitOr429(ctx, 'admin_mut', `${admin.username}:${ipHash}`, 60, 5 * 60);
         if (rlResp) return rlResp;
-        clearPublicReadCache();
+        clearTargetedCachesForAdminMutation(path);
       }
 
       const authObj = admin.idToken ? { idToken: admin.idToken } : { apiKey: cfg.apiKey };
       const publicOrAdminAuth = authObj;
+      const scopeKey = dbScopeKey(cfg);
 
       // ---------- GET /api/admin/overview ----------
       if (method === 'GET' && path === '/api/admin/overview') {
-        const listIfAdmin = <T = Record<string, unknown>>(
+        const overviewCacheKey = `${scopeKey}:overview:${admin.idToken ? 'auth' : 'pub'}`;
+        if (!isMockedFetchActive() && url.searchParams.get('refresh') !== '1') {
+          const hit = adminReadCache.get(overviewCacheKey);
+          if (hit && hit.expiresAt > Date.now()) {
+            return jsonResponse(ctx, hit.value);
+          }
+        }
+        const failedCols: Array<{ col: string; status: 'quota_exceeded' | 'error'; message: string }> = [];
+
+        const safeOp = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+          try {
+            return await fn();
+          } catch (err) {
+            const c = classifyDbError(err);
+            failedCols.push({ col: label, status: c.status, message: c.message });
+            return fallback;
+          }
+        };
+
+        const safeListIfAdmin = <T = Record<string, unknown>>(
           col: string,
           opts: { pageSize?: number; maxDocs?: number }
         ) =>
           admin.idToken
-            ? listCollection<T>(cfg, col, { idToken: admin.idToken }, opts)
+            ? safeOp(col, () => listCollection<T>(cfg, col, { idToken: admin.idToken! }, opts), [])
             : Promise.resolve([]);
 
         const [
@@ -2822,29 +3461,82 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           notifLogDocs,
           userDocs,
           analyticsDocs,
+          dailyDocs,
           toolRunDocs,
           toolCounterDoc,
+          backupDocs,
+          migrationDocs,
         ] = await Promise.all([
-          getDoc<Record<string, unknown>>(cfg, 'site_config/public', publicOrAdminAuth),
-          listIfAdmin<Record<string, unknown>>('orders', { pageSize: 200, maxDocs: 500 }),
+          safeOp('site_config', () => getDoc<Record<string, unknown>>(cfg, 'site_config/public', publicOrAdminAuth), null),
+          safeListIfAdmin<Record<string, unknown>>('orders', { pageSize: 300, maxDocs: 2500 }),
           admin.idToken
-            ? listCollection<Record<string, unknown>>(cfg, 'comments', { idToken: admin.idToken }, { pageSize: 200, maxDocs: 500 })
-            : runQuery<Record<string, unknown>>(
-                cfg,
+            ? safeOp(
                 'comments',
-                { filters: [{ fieldPath: 'status', op: 'EQUAL', value: 'approved' }], limit: 200 },
-                { apiKey: cfg.apiKey }
+                () => listCollection<Record<string, unknown>>(cfg, 'comments', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }),
+                []
+              )
+            : safeOp(
+                'comments',
+                () =>
+                  runQuery<Record<string, unknown>>(
+                    cfg,
+                    'comments',
+                    { filters: [{ fieldPath: 'status', op: 'EQUAL', value: 'approved' }], limit: 200 },
+                    { apiKey: cfg.apiKey }
+                  ),
+                []
               ),
-          listIfAdmin<Record<string, unknown>>('question_reports', { pageSize: 200, maxDocs: 500 }),
-          listCollection<Record<string, unknown>>(cfg, 'polls', publicOrAdminAuth, { pageSize: 50, maxDocs: 50 }),
-          listCollection<Record<string, unknown>>(cfg, 'question_stats', publicOrAdminAuth, { pageSize: 300, maxDocs: 1000 }),
-          listIfAdmin<Record<string, unknown>>('push_subscriptions', { pageSize: 300, maxDocs: 1000 }),
-          listIfAdmin<Record<string, unknown>>('notification_logs', { pageSize: 50, maxDocs: 50 }),
-          listIfAdmin<Record<string, unknown>>('users', { pageSize: 300, maxDocs: 1000 }),
-          listIfAdmin<Record<string, unknown>>('analytics_events', { pageSize: 300, maxDocs: 1000 }),
-          listIfAdmin<Record<string, unknown>>('tool_runs', { pageSize: 200, maxDocs: 500 }),
-          getDoc<{ count?: number }>(cfg, 'counters/tool', publicOrAdminAuth),
+          safeListIfAdmin<Record<string, unknown>>('question_reports', { pageSize: 300, maxDocs: 500 }),
+          safeOp('polls', () => listCollection<Record<string, unknown>>(cfg, 'polls', publicOrAdminAuth, { pageSize: 50, maxDocs: 50 }), []),
+          safeOp('question_stats', () => listCollection<Record<string, unknown>>(cfg, 'question_stats', publicOrAdminAuth, { pageSize: 300, maxDocs: 800 }), []),
+          safeListIfAdmin<Record<string, unknown>>('push_subscriptions', { pageSize: 300, maxDocs: 2500 }),
+          safeListIfAdmin<Record<string, unknown>>('notification_logs', { pageSize: 100, maxDocs: 100 }),
+          safeListIfAdmin<Record<string, unknown>>('users', { pageSize: 300, maxDocs: 2500 }),
+          safeListIfAdmin<Record<string, unknown>>('analytics_events', { pageSize: 300, maxDocs: 800 }),
+          safeListIfAdmin<Record<string, unknown>>('analytics_daily', { pageSize: 300, maxDocs: 500 }),
+          safeListIfAdmin<Record<string, unknown>>('tool_runs', { pageSize: 200, maxDocs: 400 }),
+          safeOp('counters', () => getDoc<{ count?: number }>(cfg, 'counters/tool', publicOrAdminAuth), null),
+          safeListIfAdmin<Record<string, unknown>>('system_backups', { pageSize: 40, maxDocs: 40 }),
+          safeListIfAdmin<Record<string, unknown>>('system_migrations', { pageSize: 20, maxDocs: 20 }),
         ]);
+
+        const hasQuotaFailure = failedCols.some((f) => f.status === 'quota_exceeded');
+        const dbStatus: DbStatusState =
+          failedCols.length > 0
+            ? hasQuotaFailure
+              ? 'quota_exceeded'
+              : 'error'
+            : !admin.idToken
+              ? 'auth_required'
+              : 'ok';
+
+        const dbError =
+          failedCols.length > 0
+            ? hasQuotaFailure
+              ? 'تم بلوغ الحد اليومي لقراءة Firestore (Spark Quota Exceeded). يتم عرض آخر حالة محفوظة دون مسح أو تعديل أي بيانات.'
+              : `تعذر قراءة بعض مجموعات Firestore (${failedCols.map((f) => f.col).join(', ')}): ${failedCols[0].message}`
+            : !admin.idToken
+              ? 'يلزم ربط جلسة Google/Firebase السحابية لعرض البيانات المحمية (المشتركين، الطلبات، النسخ الاحتياطية).'
+              : null;
+
+        // If DB read failed and we have a verified last-known-good server snapshot, preserve and serve it safely
+        const cachedSnapshot = !isMockedFetchActive() ? lastKnownAdminOverviewMap.get(scopeKey) : undefined;
+        if (failedCols.length > 0 && cachedSnapshot) {
+          const prevStats = (cachedSnapshot.stats || {}) as Record<string, unknown>;
+          return jsonResponse(ctx, {
+            ...cachedSnapshot,
+            dbStatus,
+            dbError,
+            staleSnapshot: true,
+            stats: {
+              ...prevStats,
+              dbIntegrity: {
+                ok: false,
+                detail: dbError || 'Database read error — serving last known good state',
+              },
+            },
+          });
+        }
 
         const siteCfg = mergeSiteConfig(cfgDoc?.data || null, env);
 
@@ -2982,6 +3674,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           range: '7d',
           trackingStartedAt: siteCfg.trackingStartedAt,
           events: analyticsDocs,
+          dailyDocs,
           users: userDocs,
           orders: orderDocs,
           questionStats: questionStatDocs,
@@ -3006,7 +3699,34 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           }))
           .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 
-        return jsonResponse(ctx, {
+        const persistedBackups = backupDocs
+          .map((b) => {
+            const summaryStr = typeof b.data.summaryJson === 'string' ? b.data.summaryJson : '';
+            const createdAt = normalizeIsoTimestamp(b.data.createdAt || b.createTime);
+            return {
+              filename: `${b.id} (${String(b.data.reason || 'snapshot')})`,
+              reason: String(b.data.reason || 'snapshot'),
+              actor: String(b.data.actor || 'admin'),
+              sizeBytes: new TextEncoder().encode(summaryStr).byteLength,
+              createdAt,
+            };
+          })
+          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+
+        const migrations = migrationDocs
+          .map((m) => ({
+            id: m.id,
+            version: String(m.data.version || m.id),
+            status: String(m.data.status || 'applied'),
+            actor: String(m.data.actor || 'admin'),
+            appliedAt: normalizeIsoTimestamp(m.data.appliedAt || m.updateTime),
+          }))
+          .sort((a, b) => Date.parse(b.appliedAt) - Date.parse(a.appliedAt));
+
+        const payload = {
+          dbStatus,
+          dbError,
+          staleSnapshot: false,
           orders: decryptedOrders,
           comments,
           questionReports,
@@ -3020,10 +3740,27 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             pendingQuestionReports: questionReports.filter((r) => r.status === 'pending').length,
             pushActiveCount,
             pushTotalCount: pushDocs.length,
-            dbIntegrity: { ok: true, detail: `Firebase Cloud Firestore (${cfg.databaseId})` },
-            backups: [],
+            dbIntegrity: {
+              ok: failedCols.length === 0 && Boolean(admin.idToken),
+              detail:
+                failedCols.length > 0
+                  ? dbError || 'Database Error'
+                  : !admin.idToken
+                    ? 'يلزم ربط جلسة Google/Firebase السحابية'
+                    : `Firebase Cloud Firestore (${cfg.databaseId}) · ${userDocs.length} حساب · ${orderDocs.length} طلب · ${commentDocs.length} تقييم`,
+              counts: {
+                users: userDocs.length,
+                orders: orderDocs.length,
+                comments: commentDocs.length,
+                polls: pollDocs.length,
+                questionStats: questionStatDocs.length,
+                backups: persistedBackups.length,
+              },
+            },
+            backups: persistedBackups,
+            migrations,
             isEphemeralStorageNotice:
-              'قاعدة البيانات الموحدة هي Firebase Cloud Firestore السحابية — جميع البيانات دائمة ومتزامنة ولا تعتمد على تخزين محلي أو SQLite.',
+              'قاعدة البيانات الموحدة هي Firebase Cloud Firestore السحابية — جميع البيانات محمية بنسخ تلقائية قبل التعديل وفحص تكامل.',
             requiresFirebaseLink: !admin.idToken,
           },
           notifications: {
@@ -3032,7 +3769,43 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             templates: NOTIFICATION_TEMPLATES,
             logs: notificationLogs,
           },
-        });
+        };
+
+        if (dbStatus === 'ok' && !isMockedFetchActive()) {
+          clearQuotaCooldown(cfg);
+          lastKnownAdminOverviewMap.set(scopeKey, payload);
+          const overviewCacheKey = `${scopeKey}:overview:${admin.idToken ? 'auth' : 'pub'}`;
+          adminReadCache.set(overviewCacheKey, {
+            value: payload,
+            expiresAt: Date.now() + ADMIN_READ_CACHE_TTL_MS,
+          });
+          adminReadCache.set(`${scopeKey}:analytics:7d::`, {
+            value: {
+              ...analytics,
+              dbStatus: 'ok' as DbStatusState,
+              dbError: null,
+              staleSnapshot: false,
+            },
+            expiresAt: Date.now() + ADMIN_READ_CACHE_TTL_MS,
+          });
+
+          // Warm shared public RAM caches from verified admin read so public site visitors get instant, synced data
+          if (cfgDoc?.data) {
+            warmPublicReadCache(cfg, 'site_config', cfgDoc.data);
+          }
+          warmPublicReadCache(cfg, 'tool_counter', toolLikesCount);
+          if (pollDocs.length > 0) {
+            warmPublicReadCache(cfg, 'polls', pollDocs);
+          }
+          const approvedForPublic = commentDocs
+            .filter((d) => !d.data.status || d.data.status === 'approved')
+            .slice(0, 200);
+          if (approvedForPublic.length > 0) {
+            warmPublicReadCache(cfg, 'comments_approved', approvedForPublic);
+          }
+        }
+
+        return jsonResponse(ctx, payload);
       }
 
       // ---------- GET /api/admin/analytics ----------
@@ -3040,44 +3813,107 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         const range = url.searchParams.get('range') || '7d';
         const fromParam = url.searchParams.get('from');
         const toParam = url.searchParams.get('to');
+        const analyticsCacheKey = `${scopeKey}:${range}:${fromParam || ''}:${toParam || ''}`;
+        const adminAnalyticsMemKey = `${scopeKey}:analytics:${range}:${fromParam || ''}:${toParam || ''}`;
 
-        const listIfAdmin = <T = Record<string, unknown>>(
-          col: string,
-          opts: { pageSize?: number; maxDocs?: number }
-        ) =>
-          admin.idToken
-            ? listCollection<T>(cfg, col, { idToken: admin.idToken }, opts)
-            : Promise.resolve([]);
+        if (admin.idToken && !isMockedFetchActive() && url.searchParams.get('refresh') !== '1') {
+          const hit = adminReadCache.get(adminAnalyticsMemKey);
+          if (hit && hit.expiresAt > Date.now()) {
+            return jsonResponse(ctx, hit.value);
+          }
+        }
 
-        const [cfgDoc, eventDocs, userDocs, orderDocs, qsDocs, trDocs, cmtDocs, pollDocs, toolCounterDoc] =
+        if (!admin.idToken) {
+          return jsonResponse(ctx, {
+            ...computeDashboardAnalytics({
+              range,
+              fromParam,
+              toParam,
+              trackingStartedAt: '2026-01-01T00:00:00.000Z',
+              events: [],
+              dailyDocs: [],
+              users: [],
+              orders: [],
+              questionStats: [],
+              toolRuns: [],
+              comments: [],
+              polls: [],
+              toolLikesCount: 0,
+            }),
+            dbStatus: 'auth_required',
+            dbError: 'يلزم ربط جلسة Google/Firebase السحابية لعرض إحصائيات المستخدمين والزيارات الكاملة.',
+            staleSnapshot: false,
+            requiresFirebaseLink: true,
+          });
+        }
+
+        const failedCols: Array<{ col: string; status: 'quota_exceeded' | 'error'; message: string }> = [];
+        const safeOp = async <T>(label: string, fn: () => Promise<T>, fallback: T): Promise<T> => {
+          try {
+            return await fn();
+          } catch (err) {
+            const c = classifyDbError(err);
+            failedCols.push({ col: label, status: c.status, message: c.message });
+            return fallback;
+          }
+        };
+
+        const [cfgDoc, eventDocs, dailyDocs, userDocs, orderDocs, qsDocs, trDocs, cmtDocs, pollDocs, toolCounterDoc] =
           await Promise.all([
-            getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj),
-            listIfAdmin<Record<string, unknown>>('analytics_events', { pageSize: 300, maxDocs: 1000 }),
-            listIfAdmin<Record<string, unknown>>('users', { pageSize: 300, maxDocs: 1000 }),
-            listIfAdmin<Record<string, unknown>>('orders', { pageSize: 300, maxDocs: 1000 }),
-            listCollection<Record<string, unknown>>(cfg, 'question_stats', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listIfAdmin<Record<string, unknown>>('tool_runs', { pageSize: 300, maxDocs: 1000 }),
-            admin.idToken
-              ? listCollection<Record<string, unknown>>(cfg, 'comments', { idToken: admin.idToken }, { pageSize: 300, maxDocs: 1000 })
-              : runQuery<Record<string, unknown>>(
-                  cfg,
-                  'comments',
-                  { filters: [{ fieldPath: 'status', op: 'EQUAL', value: 'approved' }], limit: 200 },
-                  { apiKey: cfg.apiKey }
-                ),
-            listCollection<Record<string, unknown>>(cfg, 'polls', authObj, { pageSize: 50, maxDocs: 50 }),
-            getDoc<{ count?: number }>(cfg, 'counters/tool', authObj),
+            safeOp('site_config', () => getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj), null),
+            safeOp('analytics_events', () => listCollection<Record<string, unknown>>(cfg, 'analytics_events', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 800 }), []),
+            safeOp('analytics_daily', () => listCollection<Record<string, unknown>>(cfg, 'analytics_daily', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 500 }), []),
+            safeOp('users', () => listCollection<Record<string, unknown>>(cfg, 'users', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
+            safeOp('orders', () => listCollection<Record<string, unknown>>(cfg, 'orders', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
+            safeOp('question_stats', () => listCollection<Record<string, unknown>>(cfg, 'question_stats', authObj, { pageSize: 300, maxDocs: 800 }), []),
+            safeOp('tool_runs', () => listCollection<Record<string, unknown>>(cfg, 'tool_runs', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 400 }), []),
+            safeOp('comments', () => listCollection<Record<string, unknown>>(cfg, 'comments', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
+            safeOp('polls', () => listCollection<Record<string, unknown>>(cfg, 'polls', authObj, { pageSize: 50, maxDocs: 50 }), []),
+            safeOp('counters', () => getDoc<{ count?: number }>(cfg, 'counters/tool', authObj), null),
           ]);
 
+        if (failedCols.length > 0) {
+          const hasQuota = failedCols.some((f) => f.status === 'quota_exceeded');
+          const dbStatus: DbStatusState = hasQuota ? 'quota_exceeded' : 'error';
+          const dbError = hasQuota
+            ? 'تم بلوغ الحد اليومي لقراءة Firestore مؤقتاً. يتم الحفاظ على آخر إحصائيات محفوظة دون أي مسح للبيانات.'
+            : `تعذر تحديث الإحصائيات: ${failedCols[0].message}`;
+          const prev = !isMockedFetchActive() ? lastKnownAdminAnalyticsMap.get(analyticsCacheKey) : undefined;
+          if (prev) {
+            return jsonResponse(ctx, { ...prev, dbStatus, dbError, staleSnapshot: true });
+          }
+          const siteCfg = mergeSiteConfig(cfgDoc?.data || null, env);
+          return jsonResponse(ctx, {
+            ...computeDashboardAnalytics({
+              range,
+              fromParam,
+              toParam,
+              trackingStartedAt: siteCfg.trackingStartedAt,
+              events: eventDocs,
+              dailyDocs,
+              users: userDocs,
+              orders: orderDocs,
+              questionStats: qsDocs,
+              toolRuns: trDocs,
+              comments: cmtDocs,
+              polls: pollDocs,
+              toolLikesCount: Math.max(0, Number(toolCounterDoc?.data.count || 0)),
+            }),
+            dbStatus,
+            dbError,
+            staleSnapshot: false,
+          });
+        }
+
         const siteCfg = mergeSiteConfig(cfgDoc?.data || null, env);
-        return jsonResponse(
-          ctx,
-          computeDashboardAnalytics({
+        const analyticsPayload = {
+          ...computeDashboardAnalytics({
             range,
             fromParam,
             toParam,
             trackingStartedAt: siteCfg.trackingStartedAt,
             events: eventDocs,
+            dailyDocs,
             users: userDocs,
             orders: orderDocs,
             questionStats: qsDocs,
@@ -3085,43 +3921,77 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             comments: cmtDocs,
             polls: pollDocs,
             toolLikesCount: Math.max(0, Number(toolCounterDoc?.data.count || 0)),
-          })
-        );
+          }),
+          dbStatus: 'ok' as DbStatusState,
+          dbError: null,
+          staleSnapshot: false,
+        };
+        if (!isMockedFetchActive()) {
+          lastKnownAdminAnalyticsMap.set(analyticsCacheKey, analyticsPayload);
+          adminReadCache.set(adminAnalyticsMemKey, {
+            value: analyticsPayload,
+            expiresAt: Date.now() + ADMIN_READ_CACHE_TTL_MS,
+          });
+        }
+        return jsonResponse(ctx, analyticsPayload);
       }
 
       // ---------- ADMIN USERS ----------
       if (method === 'GET' && path === '/api/admin/users') {
+        if (!admin.idToken) {
+          return jsonResponse(ctx, {
+            users: [],
+            counts: { total: 0, bac1: 0, bac2: 0, unclassified: 0 },
+            dbStatus: 'auth_required' as DbStatusState,
+            dbError: 'يلزم ربط جلسة Google/Firebase السحابية لعرض حسابات الطلاب.',
+            staleSnapshot: false,
+            requiresFirebaseLink: true,
+          });
+        }
+
         const q = (url.searchParams.get('q') || '').trim().toLowerCase();
         const roleFilter = (url.searchParams.get('role') || '').trim();
         const statusFilter = (url.searchParams.get('status') || '').trim();
+        const gradeFilter = (url.searchParams.get('grade') || '').trim();
+        const sortOrder = url.searchParams.get('sort') === 'oldest' ? 'oldest' : 'newest';
+        const usersCacheKey = `${scopeKey}:users:${q}:${roleFilter}:${statusFilter}:${gradeFilter}:${sortOrder}`;
 
-        const [userDocs, commentDocs, orderDocs] = await Promise.all([
-          listCollection<Record<string, unknown>>(cfg, 'users', authObj, { pageSize: 300, maxDocs: 1000 }),
-          listCollection<Record<string, unknown>>(cfg, 'comments', authObj, { pageSize: 300, maxDocs: 1000 }),
-          listCollection<Record<string, unknown>>(cfg, 'orders', authObj, { pageSize: 300, maxDocs: 1000 }),
-        ]);
-
-        const reviewCountMap = new Map<string, number>();
-        for (const c of commentDocs) {
-          const uid = String(c.data.authorUid || '');
-          reviewCountMap.set(uid, (reviewCountMap.get(uid) || 0) + 1);
-        }
-        const completedOrderMap = new Map<string, number>();
-        for (const o of orderDocs) {
-          if (o.data.status === 'completed' && typeof o.data.authorUid === 'string') {
-            completedOrderMap.set(o.data.authorUid, (completedOrderMap.get(o.data.authorUid) || 0) + 1);
+        if (!isMockedFetchActive() && url.searchParams.get('refresh') !== '1') {
+          const hit = adminReadCache.get(usersCacheKey);
+          if (hit && hit.expiresAt > Date.now()) {
+            return jsonResponse(ctx, hit.value);
           }
         }
 
-        const users = userDocs
-          .map((d) => {
+        try {
+          const [userDocs, commentDocs, orderDocs] = await Promise.all([
+            listCollection<Record<string, unknown>>(cfg, 'users', authObj, { pageSize: 300, maxDocs: 2500 }),
+            listCollection<Record<string, unknown>>(cfg, 'comments', authObj, { pageSize: 300, maxDocs: 2500 }),
+            listCollection<Record<string, unknown>>(cfg, 'orders', authObj, { pageSize: 300, maxDocs: 2500 }),
+          ]);
+
+          const reviewCountMap = new Map<string, number>();
+          for (const c of commentDocs) {
+            const uid = String(c.data.authorUid || '');
+            reviewCountMap.set(uid, (reviewCountMap.get(uid) || 0) + 1);
+          }
+          const completedOrderMap = new Map<string, number>();
+          for (const o of orderDocs) {
+            if (o.data.status === 'completed' && typeof o.data.authorUid === 'string') {
+              completedOrderMap.set(o.data.authorUid, (completedOrderMap.get(o.data.authorUid) || 0) + 1);
+            }
+          }
+
+          const allMapped = userDocs.map((d) => {
             const u = d.data;
+            const normalizedGrade = normalizeAdminGrade(u.grade);
             return {
               id: d.id,
               serialNumber: typeof u.serialNumber === 'string' ? u.serialNumber : null,
               name: String(u.name || ''),
               email: String(u.email || ''),
-              grade: (u.grade === 'bac2' ? 'bac2' : 'bac1') as 'bac1' | 'bac2',
+              grade: normalizedGrade,
+              rawGrade: u.grade != null ? String(u.grade) : null,
               role: (u.role === 'admin' ? 'admin' : 'user') as 'user' | 'admin',
               status: (u.status === 'suspended' ? 'suspended' : 'active') as 'active' | 'suspended',
               suspendReason: typeof u.suspendReason === 'string' ? u.suspendReason : null,
@@ -3131,22 +4001,78 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               votesCount: 0,
               completedOrdersCount: completedOrderMap.get(d.id) || 0,
             };
-          })
-          .filter((u) => {
-            if (roleFilter && u.role !== roleFilter) return false;
-            if (statusFilter && u.status !== statusFilter) return false;
-            if (q) {
-              return (
-                u.name.toLowerCase().includes(q) ||
-                u.email.toLowerCase().includes(q) ||
-                (u.serialNumber || '').toLowerCase().includes(q)
-              );
-            }
-            return true;
-          })
-          .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+          });
 
-        return jsonResponse(ctx, { users });
+          const counts = {
+            total: allMapped.length,
+            bac1: allMapped.filter((u) => u.grade === 'bac1').length,
+            bac2: allMapped.filter((u) => u.grade === 'bac2').length,
+            unclassified: allMapped.filter((u) => u.grade === 'unclassified').length,
+          };
+
+          const users = allMapped
+            .filter((u) => {
+              if (roleFilter && u.role !== roleFilter) return false;
+              if (statusFilter && u.status !== statusFilter) return false;
+              if (gradeFilter && u.grade !== gradeFilter) return false;
+              if (q) {
+                return (
+                  u.name.toLowerCase().includes(q) ||
+                  u.email.toLowerCase().includes(q) ||
+                  (u.serialNumber || '').toLowerCase().includes(q)
+                );
+              }
+              return true;
+            })
+            .sort((a, b) =>
+              sortOrder === 'oldest'
+                ? Date.parse(a.createdAt) - Date.parse(b.createdAt)
+                : Date.parse(b.createdAt) - Date.parse(a.createdAt)
+            );
+
+          const fullUnfiltered = !q && !roleFilter && !statusFilter && !gradeFilter;
+          const resultPayload = {
+            users,
+            counts,
+            dbStatus: 'ok' as DbStatusState,
+            dbError: null,
+            staleSnapshot: false,
+          };
+
+          if (fullUnfiltered && !isMockedFetchActive()) {
+            lastKnownAdminUsersMap.set(scopeKey, resultPayload);
+          }
+          if (!isMockedFetchActive()) {
+            adminReadCache.set(usersCacheKey, {
+              value: resultPayload,
+              expiresAt: Date.now() + ADMIN_READ_CACHE_TTL_MS,
+            });
+          }
+
+          return jsonResponse(ctx, resultPayload);
+        } catch (err) {
+          const classified = classifyDbError(err);
+          const dbError =
+            classified.status === 'quota_exceeded'
+              ? 'تم استهلاك حصة القراءة اليومية في Firestore. تم الاحتفاظ بآخر قائمة مستخدمين معروفة دون حذف أو تعديل.'
+              : `تعذر تحميل حسابات الطلاب: ${classified.message}`;
+          const prev = !isMockedFetchActive() ? lastKnownAdminUsersMap.get(scopeKey) : undefined;
+          if (prev) {
+            return jsonResponse(ctx, {
+              ...prev,
+              dbStatus: classified.status,
+              dbError,
+              staleSnapshot: true,
+            });
+          }
+          return jsonResponse(ctx, {
+            users: [],
+            counts: { total: 0, bac1: 0, bac2: 0, unclassified: 0 },
+            dbStatus: classified.status,
+            dbError,
+            staleSnapshot: false,
+          });
+        }
       }
 
       const userMatch = path.match(/^\/api\/admin\/users\/([a-zA-Z0-9_-]+)$/);
@@ -3267,7 +4193,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             serialNumber: typeof targetDoc.data.serialNumber === 'string' ? targetDoc.data.serialNumber : null,
             name: String(targetDoc.data.name || ''),
             email: String(targetDoc.data.email || ''),
-            grade: (targetDoc.data.grade === 'bac2' ? 'bac2' : 'bac1') as 'bac1' | 'bac2',
+            grade: normalizeAdminGrade(targetDoc.data.grade),
+            rawGrade: targetDoc.data.grade != null ? String(targetDoc.data.grade) : null,
             role: (targetDoc.data.role === 'admin' ? 'admin' : 'user') as 'user' | 'admin',
             status: (targetDoc.data.status === 'suspended' ? 'suspended' : 'active') as 'active' | 'suspended',
             suspendReason: typeof targetDoc.data.suspendReason === 'string' ? targetDoc.data.suspendReason : null,
@@ -3791,6 +4718,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         const pollDoc = await getDoc<Record<string, unknown>>(cfg, `polls/${pollId}`, authObj);
 
         if (pollDoc) {
+          await createSystemBackupSnapshot(cfg, authObj, 'pre_poll_reset', admin.username, { pollId });
           const voteDocs = await listCollection<Record<string, unknown>>(cfg, `polls/${pollId}/votes`, authObj, {
             pageSize: 300,
             maxDocs: 500,
@@ -3946,37 +4874,69 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
 
       // ---------- ADMIN SETTINGS ----------
       if (method === 'PUT' && path === '/api/admin/settings') {
-        const cfgDoc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj);
+        let cfgDoc: { id: string; data: Record<string, unknown> } | null = null;
+        try {
+          cfgDoc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj);
+        } catch (readErr) {
+          return jsonResponse(
+            ctx,
+            {
+              error: `تم إلغاء الحفظ حمايةً للبيانات: تعذر قراءة الإعدادات الحالية من Firestore (${readErr instanceof Error ? readErr.message : 'DB Error'}).`,
+            },
+            503
+          );
+        }
+
+        await createSystemBackupSnapshot(cfg, authObj, 'pre_settings_update', admin.username);
         const current = mergeSiteConfig(cfgDoc?.data || null, env);
         const body = await readJsonBody(request);
+        const resetToRegular = body.resetToRegularPrices === true;
+
+        const nextQureoOld =
+          typeof body.qureoOldPrice === 'number' && body.qureoOldPrice >= 1 ? body.qureoOldPrice : current.qureoOldPrice;
+        const nextFinOld =
+          typeof body.finOldPrice === 'number' && body.finOldPrice >= 1 ? body.finOldPrice : current.finOldPrice;
+        const nextBundleOld =
+          typeof body.bundleOldPrice === 'number' && body.bundleOldPrice >= 1
+            ? body.bundleOldPrice
+            : current.bundleOldPrice;
+
+        const nextAfterOfferMode: 'regular_price' | 'extended_offer' = resetToRegular
+          ? 'regular_price'
+          : body.afterOfferMode === 'regular_price'
+            ? 'regular_price'
+            : body.afterOfferMode === 'extended_offer'
+              ? 'extended_offer'
+              : current.afterOfferMode;
 
         const nextConfig: PublicSiteConfig = {
           ...current,
-          qureoOldPrice:
-            typeof body.qureoOldPrice === 'number' && body.qureoOldPrice >= 1 ? body.qureoOldPrice : current.qureoOldPrice,
-          qureoOfferPrice:
-            typeof body.qureoOfferPrice === 'number' && body.qureoOfferPrice >= 1
+          qureoOldPrice: nextQureoOld,
+          qureoOfferPrice: resetToRegular
+            ? nextQureoOld
+            : typeof body.qureoOfferPrice === 'number' && body.qureoOfferPrice >= 1
               ? body.qureoOfferPrice
               : current.qureoOfferPrice,
-          finOldPrice:
-            typeof body.finOldPrice === 'number' && body.finOldPrice >= 1 ? body.finOldPrice : current.finOldPrice,
-          finOfferPrice:
-            typeof body.finOfferPrice === 'number' && body.finOfferPrice >= 1
+          finOldPrice: nextFinOld,
+          finOfferPrice: resetToRegular
+            ? nextFinOld
+            : typeof body.finOfferPrice === 'number' && body.finOfferPrice >= 1
               ? body.finOfferPrice
               : current.finOfferPrice,
-          bundleOldPrice:
-            typeof body.bundleOldPrice === 'number' && body.bundleOldPrice >= 1
-              ? body.bundleOldPrice
-              : current.bundleOldPrice,
-          bundleOfferPrice:
-            typeof body.bundleOfferPrice === 'number' && body.bundleOfferPrice >= 1
+          bundleOldPrice: nextBundleOld,
+          bundleOfferPrice: resetToRegular
+            ? nextBundleOld
+            : typeof body.bundleOfferPrice === 'number' && body.bundleOfferPrice >= 1
               ? body.bundleOfferPrice
               : current.bundleOfferPrice,
-          offerEndsAt:
-            typeof body.offerEndsAt === 'string' && body.offerEndsAt.trim()
+          offerEndsAt: resetToRegular
+            ? typeof body.offerEndsAt === 'string' && body.offerEndsAt.trim()
+              ? body.offerEndsAt.trim()
+              : new Date(Date.now() - 60_000).toISOString()
+            : typeof body.offerEndsAt === 'string' && body.offerEndsAt.trim()
               ? body.offerEndsAt.trim()
               : current.offerEndsAt,
-          afterOfferMode: body.afterOfferMode === 'extended_offer' ? 'extended_offer' : current.afterOfferMode,
+          afterOfferMode: nextAfterOfferMode,
           ordersEnabled: typeof body.ordersEnabled === 'boolean' ? body.ordersEnabled : current.ordersEnabled,
           pollClosed: typeof body.pollClosed === 'boolean' ? body.pollClosed : current.pollClosed,
           whatsappNumber:
@@ -3987,7 +4947,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             typeof body.adminWhatsappDisplay === 'string' && body.adminWhatsappDisplay.trim().length >= 6
               ? body.adminWhatsappDisplay.trim().replace(/\D/g, '')
               : current.adminWhatsappDisplay,
-          offerText: typeof body.offerText === 'string' ? body.offerText.trim() : current.offerText,
+          offerText: resetToRegular
+            ? `الأسعار العادية: المنصة بـ ${nextQureoOld} جنيه والمنصتين بـ ${nextBundleOld} جنيه`
+            : typeof body.offerText === 'string'
+              ? body.offerText.trim()
+              : current.offerText,
           notificationsEnabled:
             typeof body.notificationsEnabled === 'boolean'
               ? body.notificationsEnabled
@@ -4004,32 +4968,52 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             body.promoBanner && typeof body.promoBanner === 'object'
               ? { ...current.promoBanner, ...(body.promoBanner as Partial<PublicSiteConfig['promoBanner']>) }
               : current.promoBanner,
-          libraryAd:
-            body.libraryAd && typeof body.libraryAd === 'object'
+          libraryAd: resetToRegular
+            ? {
+                ...current.libraryAd,
+                priceText: `حل المنصة بالكامل بـ ${nextQureoOld} جنيه · المنصتين معاً بـ ${nextBundleOld} جنيه`,
+              }
+            : body.libraryAd && typeof body.libraryAd === 'object'
               ? { ...current.libraryAd, ...(body.libraryAd as Partial<PublicSiteConfig['libraryAd']>) }
               : current.libraryAd,
         };
 
         await setDoc(cfg, 'site_config/public', buildSiteConfigDocPayload(nextConfig), ['updatedAt'], authObj);
+        clearPublicReadCache('site_config');
+        adminReadCache.clear();
         await logAdminAudit(cfg, admin.idToken, admin.username, 'update_settings', 'site_config');
         return jsonResponse(ctx, { ok: true, config: buildPublicConfigResponse(nextConfig) });
       }
 
       // ---------- ADMIN BACKUP & AUDIT LOGS ----------
       if (method === 'POST' && path === '/api/admin/backup') {
-        const [siteCfg, users, orders, comments, polls, qStats, qReports, libOverrides, notifLogs, auditLogs] =
-          await Promise.all([
-            getDoc(cfg, 'site_config/public', authObj),
-            listCollection(cfg, 'users', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'orders', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'comments', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'polls', authObj, { pageSize: 50, maxDocs: 100 }),
-            listCollection(cfg, 'question_stats', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'question_reports', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'library_overrides', authObj, { pageSize: 300, maxDocs: 1000 }),
-            listCollection(cfg, 'notification_logs', authObj, { pageSize: 200, maxDocs: 500 }),
-            listCollection(cfg, 'audit_logs', authObj, { pageSize: 200, maxDocs: 500 }),
-          ]);
+        const [
+          siteCfg,
+          users,
+          orders,
+          comments,
+          polls,
+          qStats,
+          qReports,
+          libOverrides,
+          notifLogs,
+          auditLogs,
+          dailyDocs,
+          pushDocs,
+        ] = await Promise.all([
+          getDoc(cfg, 'site_config/public', authObj),
+          listCollection(cfg, 'users', authObj, { pageSize: 300, maxDocs: 2500 }),
+          listCollection(cfg, 'orders', authObj, { pageSize: 300, maxDocs: 2500 }),
+          listCollection(cfg, 'comments', authObj, { pageSize: 300, maxDocs: 2500 }),
+          listCollection(cfg, 'polls', authObj, { pageSize: 50, maxDocs: 100 }),
+          listCollection(cfg, 'question_stats', authObj, { pageSize: 300, maxDocs: 2500 }),
+          listCollection(cfg, 'question_reports', authObj, { pageSize: 300, maxDocs: 1500 }),
+          listCollection(cfg, 'library_overrides', authObj, { pageSize: 300, maxDocs: 2500 }),
+          listCollection(cfg, 'notification_logs', authObj, { pageSize: 200, maxDocs: 500 }),
+          listCollection(cfg, 'audit_logs', authObj, { pageSize: 200, maxDocs: 500 }),
+          listCollection(cfg, 'analytics_daily', authObj, { pageSize: 300, maxDocs: 1500 }),
+          listCollection(cfg, 'push_subscriptions', authObj, { pageSize: 300, maxDocs: 2500 }),
+        ]);
 
         const snapshot = {
           exportedAt: new Date().toISOString(),
@@ -4047,25 +5031,44 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             library_overrides: libOverrides.map((d) => ({ id: d.id, ...d.data })),
             notification_logs: notifLogs.map((d) => ({ id: d.id, ...d.data })),
             audit_logs: auditLogs.map((d) => ({ id: d.id, ...d.data })),
+            analytics_daily: dailyDocs.map((d) => ({ id: d.id, ...d.data })),
+            push_subscriptions: pushDocs.map((d) => ({ id: d.id, ...d.data })),
           },
         };
 
         const rawJson = JSON.stringify(snapshot, null, 2);
         const filename = `crovo-firestore-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+        const sizeBytes = new TextEncoder().encode(rawJson).byteLength;
+
+        await createSystemBackupSnapshot(cfg, authObj, 'manual_export', admin.username, {
+          filename,
+          fullExportSizeBytes: sizeBytes,
+          collectionCounts: {
+            users: users.length,
+            orders: orders.length,
+            comments: comments.length,
+            polls: polls.length,
+            question_stats: qStats.length,
+            library_overrides: libOverrides.length,
+            analytics_daily: dailyDocs.length,
+            push_subscriptions: pushDocs.length,
+          },
+        });
+
         await logAdminAudit(cfg, admin.idToken, admin.username, 'create_backup', 'firestore', filename);
 
         return jsonResponse(ctx, {
           ok: true,
           backup: {
             filename,
-            sizeBytes: new TextEncoder().encode(rawJson).byteLength,
+            sizeBytes,
             createdAt: snapshot.exportedAt,
           },
           snapshot,
           backups: [
             {
               filename,
-              sizeBytes: new TextEncoder().encode(rawJson).byteLength,
+              sizeBytes,
               createdAt: snapshot.exportedAt,
             },
           ],
@@ -4092,22 +5095,33 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { logs });
       }
 
-      // ---------- ADMIN ONE-CLICK FIRESTORE SEED & LEGACY SYNC ----------
+      // ---------- ADMIN VERSIONED NON-DESTRUCTIVE FIRESTORE BASELINE SYNC ----------
       if (method === 'POST' && path === '/api/admin/migrate-legacy') {
+        const backupMeta = await createSystemBackupSnapshot(cfg, authObj, 'pre_legacy_sync', admin.username);
         const seeded: Record<string, number> = {
           siteConfig: 0,
           libraryBundles: 0,
           polls: 0,
+          skippedExisting: 0,
         };
 
-        // 1. Ensure site_config/public exists
+        // 1. Only initialize site_config/public if completely missing (NEVER overwrite existing settings!)
         const existingCfg = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj);
         if (!existingCfg) {
-          await setDoc(cfg, 'site_config/public', buildSiteConfigDocPayload(buildDefaultSiteConfig(env.ADMIN_WHATSAPP_NUMBER)), ['updatedAt'], authObj);
+          await createDoc(
+            cfg,
+            'site_config',
+            'public',
+            buildSiteConfigDocPayload(buildDefaultSiteConfig(env.ADMIN_WHATSAPP_NUMBER)),
+            ['updatedAt'],
+            authObj
+          );
           seeded.siteConfig = 1;
+        } else {
+          seeded.skippedExisting += 1;
         }
 
-        // 2. Ensure default poll exists
+        // 2. Only create default poll if missing (NEVER reset or overwrite existing poll!)
         const existingPoll = await getDoc(cfg, 'polls/poll_extend_offer', authObj);
         if (!existingPoll) {
           await createDoc(
@@ -4128,9 +5142,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             authObj
           );
           seeded.polls = 1;
+        } else {
+          seeded.skippedExisting += 1;
         }
 
-        // 3. Ensure all 4 library_bundles documents exist idempotently
+        // 3. Only seed missing library_bundles documents (NEVER overwrite existing bundles!)
         const combos: Array<{ grade: 'bac1' | 'bac2'; section: 'js' | 'py' | 'fin' }> = [
           { grade: 'bac1', section: 'js' },
           { grade: 'bac2', section: 'js' },
@@ -4139,6 +5155,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         ];
         for (const c of combos) {
           const bundleId = `${c.grade}_${c.section}`;
+          const existingBundle = await getDoc<Record<string, unknown>>(cfg, `library_bundles/${bundleId}`, authObj);
+          if (existingBundle && Array.isArray(existingBundle.data.chapters) && existingBundle.data.chapters.length > 0) {
+            seeded.skippedExisting += 1;
+            continue;
+          }
           const chapters = getBundledChapters(c.grade, c.section);
           const chaptersList = chapters.map((ch) => ({
             num: ch.num,
@@ -4156,9 +5177,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               });
             });
           }
-          await setDoc(
+          await createDoc(
             cfg,
-            `library_bundles/${bundleId}`,
+            'library_bundles',
+            bundleId,
             {
               id: bundleId,
               grade: c.grade,
@@ -4172,14 +5194,163 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           seeded.libraryBundles += 1;
         }
 
-        await logAdminAudit(cfg, admin.idToken, admin.username, 'migrate_legacy_sync', 'firestore', null, seeded);
-        return jsonResponse(ctx, { ok: true, seeded });
+        const totalNewWrites = seeded.siteConfig + seeded.polls + seeded.libraryBundles;
+        await setDoc(
+          cfg,
+          'system_migrations/v1_firestore_baseline',
+          {
+            id: 'v1_firestore_baseline',
+            version: 'v1.0',
+            status: totalNewWrites > 0 ? 'applied' : 'verified',
+            actor: admin.username.slice(0, 160),
+            detailsJson: JSON.stringify({ seeded, backupId: backupMeta?.id || null }).slice(0, 3900),
+          },
+          ['appliedAt'],
+          authObj
+        ).catch(() => {});
+
+        await logAdminAudit(cfg, admin.idToken, admin.username, 'migrate_legacy_sync', 'firestore', 'v1_firestore_baseline', seeded);
+        return jsonResponse(ctx, { ok: true, seeded, backupId: backupMeta?.id || null });
+      }
+
+      // ---------- ADMIN ZERO-LOSS LIVE SITE / JSON SNAPSHOT MIGRATION ----------
+      if (method === 'POST' && path === '/api/admin/import-live-migration') {
+        const limited = await applyRateLimitOr429(ctx, 'admin_live_migration', admin.username, 20, 300);
+        if (limited) return limited;
+
+        if (!admin.idToken) {
+          return jsonResponse(
+            ctx,
+            {
+              error:
+                'الجلسة الحالية دخلت باسم المستخدم وكلمة المرور فقط بدون ربط جلسة Google. من فضلك سجّل الخروج ثم اضغط «دخول الإدارة الآمن بحساب Google» بحساب (3mars7bry@gmail.com) لتنفيذ السحب والدمج في Cloud Firestore.',
+              requiresFirebaseLink: true,
+            },
+            403
+          );
+        }
+
+        const body = await readJsonBody(request);
+        const mode = body.mode === 'import_snapshot' ? 'import_snapshot' : 'pull_remote';
+        const dryRun = body.dryRun !== false;
+
+        let rawPayload: Record<string, unknown>;
+        let sourceLabel: string;
+
+        if (mode === 'pull_remote') {
+          const remoteUrl =
+            typeof body.remoteUrl === 'string' && body.remoteUrl.trim()
+              ? body.remoteUrl.trim()
+              : 'https://crovo-space.ai.studio';
+          const remoteUsername = typeof body.remoteUsername === 'string' ? body.remoteUsername.trim() : '';
+          const remotePassword = typeof body.remotePassword === 'string' ? body.remotePassword : '';
+
+          if (!remoteUsername || !remotePassword) {
+            return jsonResponse(
+              ctx,
+              {
+                error:
+                  'اكتب اسم المستخدم وكلمة مرور الإدارة الخاصة بالنسخة المنشورة أولاً (يُستخدمان في الذاكرة فقط ولا يتم حفظهما).',
+              },
+              400
+            );
+          }
+
+          try {
+            rawPayload = await pullRemoteLiveSnapshot({
+              remoteUrl,
+              username: remoteUsername,
+              password: remotePassword,
+            });
+            sourceLabel = remoteUrl;
+          } catch (pullErr) {
+            return jsonResponse(
+              ctx,
+              { error: pullErr instanceof Error ? pullErr.message : 'تعذر الاتصال بالنسخة المنشورة.' },
+              400
+            );
+          }
+        } else {
+          const snapshot = body.snapshot;
+          if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+            return jsonResponse(ctx, { error: 'ملف النسخة الاحتياطية JSON غير صالح.' }, 400);
+          }
+          rawPayload = snapshot as Record<string, unknown>;
+          sourceLabel =
+            typeof body.sourceLabel === 'string' && body.sourceLabel.trim()
+              ? body.sourceLabel.trim().slice(0, 120)
+              : 'uploaded-snapshot.json';
+        }
+
+        if (!dryRun) {
+          await createSystemBackupSnapshot(cfg, authObj, 'pre_live_import', admin.username, {
+            mode,
+            sourceLabel,
+          });
+        }
+
+        const result = await runLiveFirestoreMerge({
+          cfg,
+          idToken: admin.idToken,
+          mode,
+          sourceLabel,
+          rawPayload,
+          dryRun,
+          includeExportedSnapshot: mode === 'pull_remote' && dryRun,
+        });
+
+        if (!dryRun) {
+          clearPublicReadCache();
+          const migrationDocId = `v_live_${Date.now()}`;
+          await createDoc(
+            cfg,
+            'system_migrations',
+            migrationDocId,
+            {
+              id: migrationDocId,
+              version: 'live_merge_v1',
+              status: 'applied',
+              actor: admin.username.slice(0, 160),
+              detailsJson: JSON.stringify({
+                mode,
+                sourceLabel,
+                created: result.applied.created,
+                mergedOrUpdated: result.applied.mergedOrUpdated,
+                errors: result.applied.errors,
+              }).slice(0, 3900),
+            },
+            ['appliedAt'],
+            { idToken: admin.idToken }
+          ).catch(() => {});
+
+          await logAdminAudit(cfg, admin.idToken, admin.username, 'import_live_migration', 'firestore', mode, {
+            sourceLabel,
+            remoteUsers: result.remoteCounts.users,
+            remoteLikes: result.remoteCounts.toolLikes,
+            remoteCopies: result.remoteCounts.totalQuestionCopies,
+            created: result.applied.created,
+            mergedOrUpdated: result.applied.mergedOrUpdated,
+            errors: result.applied.errors,
+          }).catch(() => {});
+        }
+
+        return jsonResponse(ctx, result);
       }
     }
 
     return jsonResponse(ctx, { error: 'المسار غير موجود.' }, 404);
   } catch (err) {
     if (err instanceof FirestoreHttpError) {
+      if (err.status === 429) {
+        return jsonResponse(
+          ctx,
+          {
+            error: `تم تجاوز الحصة اليومية لقراءة أو كتابة Firestore (429 Quota Exceeded). تتجدد الحصة تلقائياً غداً أو يمكنك الترقية إلى خطة Blaze من لوحة Firebase. (${err.message})`,
+            code: 'quota_exceeded',
+          },
+          429
+        );
+      }
       return jsonResponse(ctx, { error: `Firestore Error (${err.status}): ${err.message}` }, err.status >= 400 ? err.status : 503);
     }
     return jsonResponse(

@@ -13,7 +13,8 @@ export default defineConfig(() => {
     },
     server: {
       // Disable HMR WebSocket to prevent connection failure errors in preview iframe
-      hmr: false,
+      hmr: false as const,
+      ws: false as const,
       watch: null,
     },
     build: {

@@ -16,6 +16,7 @@ import {
   Megaphone,
   MessageSquare,
   RefreshCw,
+  RotateCcw,
   Save,
   Send,
   Settings,
@@ -26,7 +27,8 @@ import {
   Vote,
   Zap,
 } from 'lucide-react';
-import { api } from '../utils/api';
+import { api, ApiError } from '../utils/api';
+import { readAdminSnapshot, writeAdminSnapshot } from '../utils/adminSnapshotCache';
 import { useAuth } from '../context/AuthContext';
 import {
   getFirebaseIdToken,
@@ -64,7 +66,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onBackToSite,
   onConfigUpdated,
 }) => {
-  const { user, logout } = useAuth();
+  const { user, loading: authLoading, logout } = useAuth();
   const [authChecked, setAuthChecked] = useState(false);
   const [authenticated, setAuthenticated] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -78,6 +80,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [data, setData] = useState<OverviewData | null>(null);
   const [loadingData, setLoadingData] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [dbOutageWarning, setDbOutageWarning] = useState<{
+    status: 'quota_exceeded' | 'error';
+    message: string;
+    snapshotTime?: string;
+  } | null>(null);
 
   // Orders filter & password reveal tracking
   const [orderSearch, setOrderSearch] = useState('');
@@ -107,6 +114,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [customPushBody, setCustomPushBody] = useState('');
   const [customPushCategory, setCustomPushCategory] = useState<'offer' | 'service' | 'update'>('offer');
   const [pushSending, setPushSending] = useState(false);
+  const [resettingPrices, setResettingPrices] = useState(false);
 
   const flashNotice = useCallback((msg: string) => {
     setStatusMessage(msg);
@@ -142,29 +150,84 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setLoadingData(true);
     try {
       const overview = await api.adminOverview();
-      setData(overview);
-      syncSettingsFields(overview);
+      if (overview.dbStatus === 'quota_exceeded' || overview.dbStatus === 'error') {
+        const localSnap = readAdminSnapshot<OverviewData>('overview');
+        if (!overview.staleSnapshot && overview.orders.length === 0 && localSnap) {
+          setData({
+            ...localSnap.data,
+            dbStatus: overview.dbStatus,
+            dbError: overview.dbError,
+            staleSnapshot: true,
+          });
+          syncSettingsFields(localSnap.data);
+          setDbOutageWarning({
+            status: overview.dbStatus,
+            message:
+              overview.dbError ||
+              'تعذر الاتصال الكامل بقاعدة البيانات. يتم عرض آخر نسخة محفوظة لمنع أي فقدان ظاهري.',
+            snapshotTime: localSnap.savedAt,
+          });
+        } else {
+          setData(overview);
+          syncSettingsFields(overview);
+          setDbOutageWarning({
+            status: overview.dbStatus,
+            message:
+              overview.dbError ||
+              'تم الحفاظ على آخر حالة معروفة من قاعدة البيانات أثناء الانقطاع المؤقت.',
+            snapshotTime: localSnap?.savedAt,
+          });
+        }
+      } else {
+        setData(overview);
+        syncSettingsFields(overview);
+        setDbOutageWarning(null);
+        if (overview.dbStatus === 'ok' && !overview.staleSnapshot && !overview.stats?.requiresFirebaseLink) {
+          writeAdminSnapshot('overview', overview);
+        }
+      }
     } catch (err) {
-      flashNotice(err instanceof Error ? err.message : 'تعذر تحميل بيانات الإدارة.');
+      const msg = err instanceof Error ? err.message : 'تعذر تحميل بيانات الإدارة.';
+      const localSnap = readAdminSnapshot<OverviewData>('overview');
+      if (localSnap) {
+        setData((prev) => prev || { ...localSnap.data, dbStatus: 'error', dbError: msg, staleSnapshot: true });
+        syncSettingsFields(localSnap.data);
+        setDbOutageWarning({
+          status: 'error',
+          message: `${msg} — تم الإبقاء على آخر نسخة محفوظة محلياً بدلاً من تفريغ لوحة التحكم.`,
+          snapshotTime: localSnap.savedAt,
+        });
+      } else {
+        setDbOutageWarning({ status: 'error', message: msg });
+      }
+      flashNotice(msg);
     } finally {
       setLoadingData(false);
     }
   }, [flashNotice, syncSettingsFields]);
 
   useEffect(() => {
+    if (authLoading) return;
+    let cancelled = false;
     api
       .adminMe()
       .then((res) => {
+        if (cancelled) return;
         if (res.authenticated) {
           setAuthenticated(true);
           loadOverview();
         }
       })
       .catch(() => {
-        setAuthenticated(false);
+        if (!cancelled) setAuthenticated(false);
       })
-      .finally(() => setAuthChecked(true));
-  }, [loadOverview]);
+      .finally(() => {
+        if (!cancelled) setAuthChecked(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, loadOverview]);
 
   // Automatic Google Admin verification when signed in via Firebase as an admin
   useEffect(() => {
@@ -172,7 +235,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     let cancelled = false;
     (async () => {
-      const idToken = await getFirebaseIdToken();
+      const idToken = await getFirebaseIdToken(true);
       if (!idToken || cancelled) return;
       try {
         await api.adminFirebaseLogin(idToken);
@@ -195,11 +258,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setLoginError(null);
     let openedPopup = false;
     try {
-      let idToken = await getFirebaseIdToken();
+      let idToken = await getFirebaseIdToken(true);
       if (!idToken) {
         openedPopup = true;
         await signInWithGoogleCloud('bac1');
-        idToken = await getFirebaseIdToken();
+        idToken = await getFirebaseIdToken(true);
       }
       if (!idToken) {
         throw new Error('تعذر الحصول على رمز التحقق من Google.');
@@ -208,11 +271,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setAuthenticated(true);
       await loadOverview();
     } catch (err) {
-      // If user was already logged into a non-admin Google account, let them switch via popup once
-      if (!openedPopup) {
+      // Only re-open the Google account picker popup when a non-admin Google account returned 403
+      const isWrongAccount403 = err instanceof ApiError && err.status === 403;
+      if (!openedPopup && isWrongAccount403) {
         try {
           await signInWithGoogleCloud('bac1');
-          const freshToken = await getFirebaseIdToken();
+          const freshToken = await getFirebaseIdToken(true);
           if (!freshToken) {
             throw new Error('تعذر الحصول على رمز التحقق من Google.');
           }
@@ -317,6 +381,52 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
+  const handleResetRegularPrices = async () => {
+    if (resettingPrices) return;
+    setResettingPrices(true);
+    try {
+      const regQureo = Math.max(1, Math.round(Number(qureoOldPrice || 100)));
+      const regFin = Math.max(1, Math.round(Number(finOldPrice || 100)));
+      const regBundle = Math.max(1, Math.round(Number(bundleOldPrice || 200)));
+      const endedIso = new Date(Date.now() - 60_000).toISOString();
+
+      const res = await api.adminUpdateSettings({
+        resetToRegularPrices: true,
+        qureoOldPrice: regQureo,
+        qureoOfferPrice: regQureo,
+        finOldPrice: regFin,
+        finOfferPrice: regFin,
+        bundleOldPrice: regBundle,
+        bundleOfferPrice: regBundle,
+        afterOfferMode: 'regular_price',
+        offerEndsAt: endedIso,
+      });
+
+      setQureoOldPrice(res.config.qureoOldPrice);
+      setQureoOfferPrice(res.config.qureoOfferPrice);
+      setFinOldPrice(res.config.finOldPrice);
+      setFinOfferPrice(res.config.finOfferPrice);
+      setBundleOldPrice(res.config.bundleOldPrice);
+      setBundleOfferPrice(res.config.bundleOfferPrice);
+      setAfterOfferMode('regular_price');
+      try {
+        const d = new Date(res.config.offerEndsAt);
+        setOfferEndsLocal(
+          new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+        );
+      } catch {
+        // ignore date conversion error
+      }
+      flashNotice('تم إرجاع جميع الأسعار للأسعار العادية وحفظها فوراً في الموقع.');
+      onConfigUpdated();
+      await loadOverview();
+    } catch (err) {
+      flashNotice(err instanceof Error ? err.message : 'تعذر إرجاع الأسعار للعادية.');
+    } finally {
+      setResettingPrices(false);
+    }
+  };
+
   const handleCommentAction = async (
     id: string,
     payload: { isVerified?: boolean; status?: 'approved' | 'hidden'; clearReports?: boolean }
@@ -418,6 +528,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </p>
             </div>
           </div>
+
+          {user?.email && (
+            <div
+              data-testid="admin-active-google-banner"
+              className={`p-3 rounded-xl text-xs font-ios border ${
+                user.role === 'admin'
+                  ? 'bg-emerald-50/90 border-emerald-200 text-emerald-800'
+                  : 'bg-amber-50/90 border-amber-200 text-amber-800'
+              }`}
+            >
+              {user.role === 'admin' ? (
+                <span>
+                  مسجّل حالياً بحساب الإدارة: <strong dir="ltr">{user.email}</strong> — اضغط زر الدخول بحساب Google بالأسفل للمتابعة.
+                </span>
+              ) : (
+                <span>
+                  الحساب المسجّل حالياً في المتصفح: <strong dir="ltr">{user.email}</strong>. للدخول إلى لوحة الإدارة اضغط الزر بالأسفل واختر حساب الإدارة الرسمي.
+                </span>
+              )}
+            </div>
+          )}
 
           {loginError && (
             <div className="p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios">
@@ -555,6 +686,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            data-testid="quick-reset-regular-prices-btn"
+            disabled={resettingPrices}
+            onClick={handleResetRegularPrices}
+            className="px-3 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-black flex items-center gap-1.5 font-ios shadow-sm disabled:opacity-60 cursor-pointer"
+          >
+            <RotateCcw className={`w-3.5 h-3.5 ${resettingPrices ? 'animate-spin' : ''}`} />
+            <span>{resettingPrices ? 'جاري الإرجاع...' : 'إرجاع الأسعار للعادية'}</span>
+          </button>
+
+          <button
+            type="button"
             onClick={loadOverview}
             className="clay-btn px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 font-ios"
           >
@@ -585,6 +727,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {statusMessage && (
         <div className="mb-4 p-3 rounded-2xl clay-inset text-xs font-bold text-indigo-700 font-ios">
           {statusMessage}
+        </div>
+      )}
+
+      {dbOutageWarning && (
+        <div
+          data-testid="admin-db-outage-banner"
+          className="mb-4 p-3.5 rounded-2xl clay-card border border-rose-300/80 bg-rose-50/70 text-xs font-ios space-y-1.5"
+        >
+          <div className="font-black text-rose-800">
+            {dbOutageWarning.status === 'quota_exceeded'
+              ? 'تنبيه حصة قراءة Firestore (تم تفعيل الحماية والاحتفاظ بآخر نسخة محفوظة):'
+              : 'تنبيه اتصال قاعدة البيانات (لم يتم حذف أي بيانات):'}
+          </div>
+          <p className="text-rose-700 font-semibold leading-relaxed">{dbOutageWarning.message}</p>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-rose-600">
+            {dbOutageWarning.snapshotTime && (
+              <span className="font-mono" dir="ltr">
+                Last Verified Snapshot: {dbOutageWarning.snapshotTime.replace('T', ' ').slice(0, 19)} UTC
+              </span>
+            )}
+            {dbOutageWarning.status === 'quota_exceeded' && (
+              <a
+                href="https://console.firebase.google.com/project/sincere-impact-wbvhw/firestore/databases/ai-studio-crovospace-2e8ccbb9-ef49-4649-ad68-54f754bd8410/data?openUpgradeDialog=true"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline font-bold text-indigo-700 hover:text-indigo-900"
+              >
+                فحص أو ترقية حصة Firestore في Firebase Console ↗
+              </a>
+            )}
+          </div>
         </div>
       )}
 
@@ -1061,7 +1234,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {tab === 'settings' && (
         <form onSubmit={handleSaveSettings} className="space-y-5 text-xs font-ios">
           <div className="clay-card p-4 sm:p-6 space-y-4">
-            <h2 className="text-base font-black font-decorative">إدارة الأسعار، العرض وواتساب Click-to-Chat</h2>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <h2 className="text-base font-black font-decorative">إدارة الأسعار، العرض وواتساب Click-to-Chat</h2>
+              <button
+                type="button"
+                data-testid="reset-regular-prices-btn"
+                disabled={resettingPrices}
+                onClick={handleResetRegularPrices}
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-black flex items-center justify-center gap-1.5 shadow-md disabled:opacity-60 cursor-pointer shrink-0"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${resettingPrices ? 'animate-spin' : ''}`} />
+                <span>
+                  {resettingPrices ? 'جاري الإرجاع والحفظ...' : 'إرجاع جميع الأسعار للعادية الآن'}
+                </span>
+              </button>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-2xl clay-inset space-y-2">
                 <div className="font-black text-slate-900">QUREO (منفردة)</div>
@@ -1336,6 +1523,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         <AdminSecurityTab
           dbIntegrity={data?.stats.dbIntegrity || { ok: true, detail: 'ok' }}
           backups={data?.stats.backups || []}
+          migrations={data?.stats.migrations || []}
+          dbStatus={data?.dbStatus}
+          dbError={data?.dbError}
           storageNotice={data?.stats.isEphemeralStorageNotice || ''}
           onNotice={flashNotice}
           onRefreshOverview={loadOverview}

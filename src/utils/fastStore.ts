@@ -58,10 +58,10 @@ function hydrateFromStorage(): void {
     if (parsed.library && typeof parsed.library === 'object') {
       memoryState.library = parsed.library;
     }
-    if (parsed.poll && typeof parsed.poll === 'object') {
+    if (parsed.poll && typeof parsed.poll === 'object' && parsed.poll.totalVotes > 0) {
       memoryState.poll = parsed.poll;
     }
-    if (Array.isArray(parsed.comments)) {
+    if (Array.isArray(parsed.comments) && parsed.comments.length > 0) {
       memoryState.comments = parsed.comments;
     }
     if (parsed.questionStats && typeof parsed.questionStats === 'object') {
@@ -214,25 +214,58 @@ export function setFastQuestionStats(stats: QuestionStatsResponse): void {
 
 export function applyBootstrapPayload(data: BootstrapResponse): void {
   hydrateFromStorage();
-  if (data.config) memoryState.config = data.config;
-  if (data.likes && data.likes.itemKey === 'tool') {
+  const isDegraded = Boolean(data.quotaDegraded);
+  let mutated = false;
+
+  if (data.config && (!isDegraded || !memoryState.config)) {
+    memoryState.config = data.config;
+    mutated = true;
+  }
+  if (data.likes && data.likes.itemKey === 'tool' && (!isDegraded || !memoryState.toolLikes.resolved)) {
     memoryState.toolLikes = {
       count: Math.max(0, Number(data.likes.count || 0)),
       liked: Boolean(data.likes.liked),
       resolved: true,
     };
+    mutated = true;
   }
   if (data.library && Array.isArray(data.library.chapters)) {
-    memoryState.library[`${data.library.grade}:${data.library.section}`] = data.library.chapters;
+    const libKey = `${data.library.grade}:${data.library.section}`;
+    const existingChapters = memoryState.library[libKey];
+    if (!isDegraded || !existingChapters || existingChapters.length === 0) {
+      memoryState.library[libKey] = data.library.chapters;
+      mutated = true;
+    }
   }
-  if (data.poll) memoryState.poll = data.poll;
-  if (Array.isArray(data.comments)) {
+  if (data.poll && (!isDegraded || (!memoryState.poll && data.poll.totalVotes > 0))) {
+    memoryState.poll = data.poll;
+    mutated = true;
+  }
+  if (
+    Array.isArray(data.comments) &&
+    (!isDegraded || data.comments.length > 0)
+  ) {
     memoryState.comments = data.comments.map((c) => ({ ...c, source: 'api' as const }));
+    mutated = true;
   }
-  if (data.questionStats) memoryState.questionStats = data.questionStats;
-  memoryState.updatedAt = Date.now();
-  schedulePersist();
-  emitStoreChange();
+  if (
+    data.questionStats &&
+    (!isDegraded || !memoryState.questionStats || data.questionStats.totalCopies > 0)
+  ) {
+    memoryState.questionStats = data.questionStats;
+    mutated = true;
+  }
+
+  if (!isDegraded && mutated) {
+    memoryState.updatedAt = Date.now();
+    schedulePersist();
+  } else if (mutated && (data.comments?.length > 0 || (data.library?.chapters?.length ?? 0) > 0)) {
+    memoryState.updatedAt = Date.now();
+    schedulePersist();
+  }
+  if (mutated) {
+    emitStoreChange();
+  }
 }
 
 const inflightBootstrap = new Map<string, Promise<BootstrapResponse>>();

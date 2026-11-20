@@ -25,11 +25,12 @@ interface QuestionCardProps {
   copyCount: number;
   chapterBadge?: string;
   isCompleted: boolean;
-  onComplete: () => void;
+  onComplete?: () => void;
+  onCompleteKey?: (questionKey: string) => void;
   onCopyRecorded?: (questionKey: string, title: string, chapterNum: number, qIndex: number) => void;
 }
 
-export const QuestionCard: React.FC<QuestionCardProps> = ({
+const QuestionCardComponent: React.FC<QuestionCardProps> = ({
   question,
   index,
   chapterNum,
@@ -40,6 +41,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   chapterBadge,
   isCompleted,
   onComplete,
+  onCompleteKey,
   onCopyRecorded,
 }) => {
   // Answers are shown by default to keep copying immediate
@@ -82,7 +84,11 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
     }
 
     setCopied(true);
-    onComplete();
+    if (onCompleteKey) {
+      onCompleteKey(questionKey);
+    } else if (onComplete) {
+      onComplete();
+    }
 
     if (onCopyRecorded) {
       onCopyRecorded(questionKey, question.q, chapterNum, index);
@@ -173,7 +179,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
   return (
     <div
       data-testid={`question-card-${questionKey}`}
-      className={`clay-card p-3.5 sm:p-5 transition-all text-right border ${
+      className={`clay-card p-3.5 sm:p-5 transition-[box-shadow,border-color] duration-150 text-right border ${
         isCompleted ? 'border-indigo-300/60 shadow-sm' : 'border-white/80'
       }`}
     >
@@ -253,7 +259,7 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
 
       {/* Answer Body */}
       {isOpen && (
-        <div className="mt-3 pt-3 border-t border-slate-200/70 animate-in fade-in duration-150 space-y-2.5">
+        <div className="mt-3 pt-3 border-t border-slate-200/70 space-y-2.5">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-bold font-decorative text-slate-500 flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-amber-500" />
@@ -366,3 +372,5 @@ export const QuestionCard: React.FC<QuestionCardProps> = ({
     </div>
   );
 };
+
+export const QuestionCard = React.memo(QuestionCardComponent);

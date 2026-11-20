@@ -6,11 +6,13 @@ import {
   Calendar,
   Heart,
   Search,
+  ShieldCheck,
   ShoppingBag,
   Users,
   Zap,
 } from 'lucide-react';
 import { AdminAnalyticsResponse, api } from '../../utils/api';
+import { readAdminSnapshot, writeAdminSnapshot } from '../../utils/adminSnapshotCache';
 
 interface AdminAnalyticsTabProps {
   initialData?: AdminAnalyticsResponse;
@@ -39,7 +41,10 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
   const [range, setRange] = useState<'today' | '7d' | '30d' | 'year' | 'custom'>('7d');
   const [customFrom, setCustomFrom] = useState('');
   const [customTo, setCustomTo] = useState('');
-  const [analytics, setAnalytics] = useState<AdminAnalyticsResponse | null>(initialData || null);
+  const [analytics, setAnalytics] = useState<AdminAnalyticsResponse | null>(() => {
+    if (initialData) return initialData;
+    return readAdminSnapshot<AdminAnalyticsResponse>('analytics')?.data || null;
+  });
   const [loading, setLoading] = useState(false);
 
   const loadAnalytics = useCallback(
@@ -51,9 +56,27 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
           nextRange === 'custom' && f ? new Date(f).toISOString() : undefined,
           nextRange === 'custom' && t ? new Date(t + 'T23:59:59').toISOString() : undefined
         );
+        if ((res.dbStatus === 'quota_exceeded' || res.dbStatus === 'error') && !res.staleSnapshot) {
+          const cached = readAdminSnapshot<AdminAnalyticsResponse>('analytics');
+          if (cached && nextRange === '7d') {
+            setAnalytics({
+              ...cached.data,
+              dbStatus: res.dbStatus,
+              dbError: res.dbError,
+              staleSnapshot: true,
+            });
+            return;
+          }
+        }
         setAnalytics(res);
+        if (nextRange === '7d' && res.dbStatus === 'ok' && !res.staleSnapshot && !res.requiresFirebaseLink) {
+          writeAdminSnapshot('analytics', res);
+        }
       } catch {
-        // Keep previous snapshot cleanly
+        const cached = readAdminSnapshot<AdminAnalyticsResponse>('analytics');
+        if (cached) {
+          setAnalytics((prev) => prev || { ...cached.data, dbStatus: 'error', staleSnapshot: true });
+        }
       } finally {
         setLoading(false);
       }
@@ -62,14 +85,41 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
   );
 
   useEffect(() => {
-    loadAnalytics();
-  }, [loadAnalytics]);
+    if (initialData) {
+      setAnalytics((prev) => (range === '7d' ? initialData : prev || initialData));
+      if (
+        initialData.dbStatus === 'ok' &&
+        !initialData.staleSnapshot &&
+        !initialData.requiresFirebaseLink
+      ) {
+        writeAdminSnapshot('analytics', initialData);
+      }
+    }
+  }, [initialData, range]);
+
+  useEffect(() => {
+    if (!initialData && range === '7d') {
+      void loadAnalytics('7d');
+    }
+  }, [initialData, range, loadAnalytics]);
 
   const timeline = analytics?.timeline || [];
   const maxVal = Math.max(1, ...timeline.map((d) => Math.max(d.visits, d.libraryOpens, 1)));
 
   return (
     <div className="space-y-5 text-xs font-ios" data-testid="admin-analytics-tab">
+      {/* Permanent Persistence Assurance Banner */}
+      <div className="p-3 rounded-2xl clay-inset flex items-center gap-2 text-indigo-900 font-bold">
+        <ShieldCheck className="w-4 h-4 shrink-0 text-indigo-600" />
+        <span>جميع إحصائيات الزيارات والنشاط محفوظة بشكل دائم وتراكمي في Cloud Firestore. أزرار الفترات (اليوم، آخر 7 أيام، الخ) تقتصر على تصفية العرض فقط دون حذف أو مسح أي بيانات تاريخية إطلاقاً.</span>
+      </div>
+
+      {(analytics?.dbStatus === 'quota_exceeded' || analytics?.dbStatus === 'error') && (
+        <div className="p-3 rounded-2xl clay-inset border border-rose-200 text-rose-800 font-bold">
+          {analytics.dbError || 'تعذر تحديث الإحصائيات لحظياً — يتم الحفاظ على آخر لقطة معروفة دون فقدان أي أرقام.'}
+        </div>
+      )}
+
       {/* Period Selector */}
       <div className="clay-card p-4 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-1.5">

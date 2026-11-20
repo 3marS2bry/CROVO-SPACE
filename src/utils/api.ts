@@ -1,9 +1,11 @@
 import type { ClientPricingConfig, OrderGrade, PlatformChoice, QureoSectionChoice } from './rules';
 import type { AcademicGrade, Chapter, SectionType } from '../types';
-import { getFirebaseIdToken } from './cloudStore';
+import { getFirebaseIdToken, getFirebaseIdTokenIfReady } from './cloudStore';
 
 const VISITOR_TOKEN_STORAGE_KEY = 'crovo_visitor_token';
 const OFFLINE_QUEUE_STORAGE_KEY = 'crovo_offline_queue';
+
+export type DbStatusState = 'ok' | 'auth_required' | 'quota_exceeded' | 'error';
 
 export interface AuthUser {
   id: string;
@@ -64,6 +66,7 @@ export interface PublicConfig extends ClientPricingConfig {
   adminWhatsappDisplay: string;
   toolVideos?: ToolVideoConfig[];
   toolServices?: ToolServiceConfig[];
+  quotaDegraded?: boolean;
 }
 
 export interface CommentItem {
@@ -108,12 +111,14 @@ export interface PollState {
   enoughPercent: number;
   userChoice: string | null;
   options?: PollOptionState[];
+  quotaDegraded?: boolean;
 }
 
 export interface LikesState {
   itemKey: string;
   count: number;
   liked: boolean;
+  quotaDegraded?: boolean;
 }
 
 export interface QuestionStatsResponse {
@@ -128,6 +133,7 @@ export interface QuestionStatsResponse {
     questionTitle: string;
     copyCount: number;
   }>;
+  quotaDegraded?: boolean;
 }
 
 export interface OrderReceipt {
@@ -197,6 +203,10 @@ export interface AdminAnalyticsResponse {
     libraryOpens: number;
     searches: number;
   }>;
+  dbStatus?: DbStatusState;
+  dbError?: string | null;
+  staleSnapshot?: boolean;
+  requiresFirebaseLink?: boolean;
 }
 
 export interface BootstrapResponse {
@@ -206,6 +216,7 @@ export interface BootstrapResponse {
   poll: PollState;
   comments: CommentItem[];
   questionStats: QuestionStatsResponse;
+  quotaDegraded?: boolean;
 }
 
 export interface AdminUserItem {
@@ -213,7 +224,8 @@ export interface AdminUserItem {
   serialNumber?: string | null;
   name: string;
   email: string;
-  grade: 'bac1' | 'bac2';
+  grade: 'bac1' | 'bac2' | 'unclassified';
+  rawGrade?: string | null;
   role: 'user' | 'admin';
   status: 'active' | 'suspended';
   suspendReason: string | null;
@@ -245,6 +257,49 @@ export interface AdminAuditLogItem {
   targetId: string | null;
   detailsJson: string | null;
   createdAt: string;
+}
+
+export interface LiveMigrationResponse {
+  ok: boolean;
+  dryRun: boolean;
+  mode: 'pull_remote' | 'import_snapshot';
+  sourceLabel: string;
+  remoteCounts: {
+    users: number;
+    orders: number;
+    comments: number;
+    questionStats: number;
+    questionReports: number;
+    polls: number;
+    toolLikes: number;
+    totalQuestionCopies: number;
+    totalVisits: number;
+    uniqueVisitors: number;
+    dailyAnalyticsDays: number;
+    analyticsEvents: number;
+    pushSubscriptions: number;
+    notificationLogs: number;
+    toolRuns: number;
+  };
+  currentFirestoreCounts: {
+    users: number;
+    orders: number;
+    comments: number;
+    questionStats: number;
+    toolLikes: number;
+    totalQuestionCopies: number;
+    pollVotes: number;
+    dailyAnalyticsDays: number;
+    pushSubscriptions: number;
+  };
+  applied: {
+    created: number;
+    mergedOrUpdated: number;
+    skippedExisting: number;
+    errors: number;
+    errorSamples: string[];
+  };
+  exportedSnapshot?: Record<string, unknown>;
 }
 
 function readStorage(key: string): string | null {
@@ -372,6 +427,24 @@ export function notifyAuthUpdated(user: AuthUser | null): void {
   }
 }
 
+function isPublicFastEndpoint(url: string): boolean {
+  const path = url.split('?')[0];
+  return (
+    path === '/api/bootstrap' ||
+    path === '/api/config' ||
+    path === '/api/library' ||
+    path === '/api/questions/stats' ||
+    path === '/api/questions/copy' ||
+    path === '/api/comments' ||
+    path === '/api/poll' ||
+    path === '/api/likes' ||
+    path === '/api/push/vapid-public-key' ||
+    path === '/api/push/status' ||
+    path === '/api/analytics/event' ||
+    path === '/api/push/log-error'
+  );
+}
+
 async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || 'GET').toUpperCase();
   const canDedupe = method === 'GET' && !init?.signal;
@@ -383,7 +456,19 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const execute = async (): Promise<T> => {
     const extraHeaders: Record<string, string> = {};
     const visitorToken = readStorage(VISITOR_TOKEN_STORAGE_KEY);
-    const idToken = await getFirebaseIdToken();
+    const hasCustomAuthHeader = Boolean(
+      init?.headers &&
+        typeof init.headers === 'object' &&
+        !Array.isArray(init.headers) &&
+        ('Authorization' in init.headers || 'authorization' in init.headers)
+    );
+    const idToken = hasCustomAuthHeader
+      ? null
+      : isPublicFastEndpoint(url) && method === 'GET'
+      ? await getFirebaseIdTokenIfReady()
+      : isPublicFastEndpoint(url) && (url.startsWith('/api/analytics/') || url.startsWith('/api/push/') || url === '/api/questions/copy')
+      ? await getFirebaseIdTokenIfReady()
+      : await getFirebaseIdToken();
 
     if (visitorToken) extraHeaders['X-Crovo-Visitor'] = visitorToken;
     if (idToken) extraHeaders['Authorization'] = `Bearer ${idToken}`;
@@ -576,7 +661,7 @@ export const api = {
     }
   },
 
-  getComments: () => apiFetch<{ comments: CommentItem[] }>('/api/comments'),
+  getComments: () => apiFetch<{ comments: CommentItem[]; quotaDegraded?: boolean }>('/api/comments'),
 
   createComment: (payload: {
     authorName: string;
@@ -671,7 +756,13 @@ export const api = {
     }),
 
   adminFirebaseLogin: async (idToken: string) => {
-    const res = await apiFetch<{ ok: boolean; username: string; user?: AuthUser; hasFirebaseToken?: boolean }>(
+    const res = await apiFetch<{
+      ok: boolean;
+      username: string;
+      user?: AuthUser;
+      hasFirebaseToken?: boolean;
+      quotaDegraded?: boolean;
+    }>(
       '/api/admin/firebase-login',
       {
         method: 'POST',
@@ -691,6 +782,9 @@ export const api = {
 
   adminOverview: () =>
     apiFetch<{
+      dbStatus?: DbStatusState;
+      dbError?: string | null;
+      staleSnapshot?: boolean;
       orders: Array<{
         id: string;
         orderCode: string;
@@ -764,8 +858,21 @@ export const api = {
         pendingQuestionReports: number;
         pushActiveCount: number;
         pushTotalCount: number;
-        dbIntegrity: { ok: boolean; detail: string };
-        backups: Array<{ filename: string; sizeBytes: number; createdAt: string }>;
+        dbIntegrity: { ok: boolean; detail: string; counts?: Record<string, number> };
+        backups: Array<{
+          filename: string;
+          reason?: string;
+          actor?: string;
+          sizeBytes: number;
+          createdAt: string;
+        }>;
+        migrations?: Array<{
+          id: string;
+          version: string;
+          status: string;
+          actor: string;
+          appliedAt: string;
+        }>;
         isEphemeralStorageNotice: string;
         requiresFirebaseLink?: boolean;
       };
@@ -801,12 +908,28 @@ export const api = {
     return apiFetch<AdminAnalyticsResponse>(`/api/admin/analytics?${params.toString()}`);
   },
 
-  adminUsers: (params?: { q?: string; role?: string; status?: string }) => {
+  adminUsers: (params?: {
+    q?: string;
+    role?: string;
+    status?: string;
+    grade?: string;
+    sort?: 'newest' | 'oldest';
+  }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);
     if (params?.role) qs.set('role', params.role);
     if (params?.status) qs.set('status', params.status);
-    return apiFetch<{ users: AdminUserItem[] }>(`/api/admin/users?${qs.toString()}`);
+    if (params?.grade) qs.set('grade', params.grade);
+    if (params?.sort) qs.set('sort', params.sort);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return apiFetch<{
+      users: AdminUserItem[];
+      counts?: { total: number; bac1: number; bac2: number; unclassified: number };
+      dbStatus?: DbStatusState;
+      dbError?: string | null;
+      staleSnapshot?: boolean;
+      requiresFirebaseLink?: boolean;
+    }>(`/api/admin/users${suffix}`);
   },
 
   adminUpdateUser: (
@@ -1064,8 +1187,25 @@ export const api = {
     }),
 
   adminMigrateLegacy: () =>
-    apiFetch<{ ok: boolean; seeded: Record<string, number> }>('/api/admin/migrate-legacy', {
+    apiFetch<{ ok: boolean; seeded: Record<string, number>; backupId?: string | null }>(
+      '/api/admin/migrate-legacy',
+      {
+        method: 'POST',
+      }
+    ),
+
+  adminImportLiveMigration: (payload: {
+    mode: 'pull_remote' | 'import_snapshot';
+    dryRun: boolean;
+    remoteUrl?: string;
+    remoteUsername?: string;
+    remotePassword?: string;
+    snapshot?: Record<string, unknown>;
+    sourceLabel?: string;
+  }) =>
+    apiFetch<LiveMigrationResponse>('/api/admin/import-live-migration', {
       method: 'POST',
+      body: JSON.stringify(payload),
     }),
 
   adminResetPoll: (pollId = 'poll_extend_offer') =>
@@ -1074,7 +1214,7 @@ export const api = {
       body: JSON.stringify({ pollId }),
     }),
 
-  adminUpdateSettings: (payload: Record<string, unknown>) =>
+  adminUpdateSettings: (payload: Record<string, unknown> & { resetToRegularPrices?: boolean }) =>
     apiFetch<{ ok: boolean; config: PublicConfig }>('/api/admin/settings', {
       method: 'PUT',
       body: JSON.stringify(payload),

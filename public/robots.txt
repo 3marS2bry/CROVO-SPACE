@@ -5,4 +5,4 @@ Allow: /reviews
 Disallow: /admin
 Disallow: /api/
 
-Sitemap: /sitemap.xml
+Sitemap: https://crovo-space.ai.studio/sitemap.xml

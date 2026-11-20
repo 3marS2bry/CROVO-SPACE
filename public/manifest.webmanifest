@@ -1,16 +1,28 @@
 {
   "id": "/",
-  "name": "CROVO SPACE - مكتبة حلول كوريو وأداة الاختبارات",
+  "name": "CROVO SPACE - مكتبة حلول كوريو QUREO والبرمجة والثقافة المالية",
   "short_name": "CROVO SPACE",
-  "description": "مكتبة حلول منصة كوريو اليابانية والبرمجة جافا وبايثون والثقافة المالية مع أداة إنهاء المنصة.",
+  "description": "منصة CROVO SPACE (كروفو سبيس) لحل منصة كوريو اليابانية QUREO والبرمجة Java وPython والثقافة المالية للبكالوريا المصرية.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "dir": "rtl",
-  "lang": "ar",
+  "lang": "ar-EG",
   "theme_color": "#EEF2F7",
   "background_color": "#EEF2F7",
   "icons": [
+    {
+      "src": "/icon-48.png",
+      "sizes": "48x48",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-96.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any"
+    },
     {
       "src": "/icon-192.png",
       "sizes": "192x192",
@@ -21,7 +33,7 @@
       "src": "/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any"
+      "purpose": "any maskable"
     }
   ]
 }

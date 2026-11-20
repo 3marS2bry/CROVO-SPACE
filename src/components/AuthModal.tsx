@@ -34,6 +34,7 @@ export const AuthModal: React.FC = () => {
   const { isAuthModalOpen, authPromptReason, closeAuthModal, consumePendingAction, loginWithGoogle } =
     useAuth();
   const [mode, setMode] = useState<'login' | 'register'>('register');
+  const [showEmailForm, setShowEmailForm] = useState(false);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -83,36 +84,28 @@ export const AuthModal: React.FC = () => {
     setBusy(true);
     setError(null);
     try {
-      if (mode === 'register') {
-        const cloudUser = await registerWithEmailCloud({ name, email, password, grade });
-        let finalUser = cloudUser;
+      const cloudUser =
+        mode === 'register'
+          ? await registerWithEmailCloud({ name, email, password, grade })
+          : await signInWithEmailCloud({ email, password });
+
+      let finalUser = cloudUser;
+      try {
         const idToken = await getFirebaseIdToken();
         if (idToken) {
           const synced = await api.authCloudSync({
             idToken,
             name: cloudUser.name,
-            grade,
+            grade: mode === 'register' ? grade : cloudUser.grade,
             serialNumber: cloudUser.serialNumber,
           });
           finalUser = synced.user;
         }
-        consumePendingAction(finalUser);
-      } else {
-        const cloudUser = await signInWithEmailCloud({ email, password });
-        let finalUser = cloudUser;
-        const idToken = await getFirebaseIdToken();
-        if (idToken) {
-          const synced = await api.authCloudSync({
-            idToken,
-            name: cloudUser.name,
-            grade: cloudUser.grade,
-            serialNumber: cloudUser.serialNumber,
-          });
-          finalUser = synced.user;
-        }
-        consumePendingAction(finalUser);
+      } catch {
+        // Keep Firebase-authenticated user active even during temporary Firestore quota outages
       }
       setPassword('');
+      consumePendingAction(finalUser);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر إتمام العملية.');
     } finally {
@@ -155,7 +148,7 @@ export const AuthModal: React.FC = () => {
             </p>
           )}
           <p className="mt-1 text-xs text-slate-600 font-ios">
-            سجّل حسابك برقم خاص بيك عشان تعليقاتك وطلباتك وإعجاباتك تفضل معاك دايماً.
+            سجّل دخولك بنقرة واحدة بحساب Google عشان تعليقاتك وطلباتك وإعجاباتك تفضل محفوظة معاك على طول.
           </p>
         </div>
 
@@ -190,126 +183,140 @@ export const AuthModal: React.FC = () => {
         </div>
 
         {error && (
-          <div className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios">
+          <div
+            data-testid="auth-error-box"
+            className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios leading-relaxed"
+          >
             {error}
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-3 text-xs font-ios">
-          {mode === 'register' && (
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">الاسم الكامل</label>
-              <div className="relative">
-                <input
-                  type="text"
-                  required
-                  minLength={2}
-                  data-testid="auth-name-input"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="مثال: عمر صبري"
-                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-semibold"
-                />
-                <User className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-              </div>
-            </div>
-          )}
-
-          <div>
-            <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني</label>
-            <div className="relative">
-              <input
-                type="email"
-                required
-                dir="ltr"
-                data-testid="auth-email-input"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="name@example.com"
-                className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
-              />
-              <Mail className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+        {mode === 'register' && (
+          <div className="mb-3 text-xs font-ios">
+            <label className="block font-bold text-slate-700 mb-1">الصف الدراسي</label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setGrade('bac1')}
+                className={`py-2 rounded-xl font-bold ${
+                  grade === 'bac1' ? 'clay-pill-active' : 'clay-inset text-slate-600'
+                }`}
+              >
+                أولى بكالوريا
+              </button>
+              <button
+                type="button"
+                onClick={() => setGrade('bac2')}
+                className={`py-2 rounded-xl font-bold ${
+                  grade === 'bac2' ? 'clay-pill-active' : 'clay-inset text-slate-600'
+                }`}
+              >
+                تانية بكالوريا
+              </button>
             </div>
           </div>
-
-          <div>
-            <label className="block font-bold text-slate-700 mb-1">كلمة المرور</label>
-            <div className="relative">
-              <input
-                type="password"
-                required
-                minLength={6}
-                dir="ltr"
-                data-testid="auth-password-input"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
-              />
-              <Lock className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-            </div>
-          </div>
-
-          {mode === 'register' && (
-            <div>
-              <label className="block font-bold text-slate-700 mb-1">الصف الدراسي</label>
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setGrade('bac1')}
-                  className={`py-2 rounded-xl font-bold ${
-                    grade === 'bac1' ? 'clay-pill-active' : 'clay-inset text-slate-600'
-                  }`}
-                >
-                  أولى بكالوريا
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setGrade('bac2')}
-                  className={`py-2 rounded-xl font-bold ${
-                    grade === 'bac2' ? 'clay-pill-active' : 'clay-inset text-slate-600'
-                  }`}
-                >
-                  تانية بكالوريا
-                </button>
-              </div>
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={busy || googleBusy}
-            data-testid="auth-submit-btn"
-            className="w-full clay-apple-blue py-3 rounded-2xl text-sm font-black text-white shadow-md disabled:opacity-60 mt-2"
-          >
-            {busy
-              ? 'جاري التنفيذ...'
-              : mode === 'register'
-              ? 'إنشاء الحساب والمتابعة'
-              : 'تسجيل الدخول'}
-          </button>
-        </form>
-
-        <div className="relative flex items-center justify-center my-3.5">
-          <div className="w-full border-t border-slate-300/60" />
-          <span className="px-2.5 bg-[#EEF2F7] text-[10px] font-bold text-slate-500 font-ios whitespace-nowrap">
-            أو الدخول السريع عبر Google
-          </span>
-          <div className="w-full border-t border-slate-300/60" />
-        </div>
+        )}
 
         <button
           type="button"
           data-testid="auth-google-btn"
           disabled={googleBusy || busy}
           onClick={handleGoogleLogin}
-          className="w-full py-2.5 px-4 rounded-2xl bg-white hover:bg-slate-50 border border-slate-200 shadow-sm flex items-center justify-center gap-2.5 text-xs sm:text-sm font-black text-slate-800 font-ios transition-all disabled:opacity-60"
+          className="w-full py-3 px-4 rounded-2xl bg-white hover:bg-slate-50 border border-indigo-200 shadow-md flex items-center justify-center gap-2.5 text-xs sm:text-sm font-black text-slate-900 font-ios transition-all disabled:opacity-60 active:scale-[0.99]"
         >
           <GoogleMark />
           <span>
-            {googleBusy ? 'جاري الربط بحساب Google...' : 'المتابعة باستخدام حساب Google'}
+            {googleBusy ? 'جاري الربط بحساب Google...' : 'المتابعة باستخدام حساب Google (الأسرع)'}
           </span>
         </button>
+
+        <div className="relative flex items-center justify-center my-3.5">
+          <div className="w-full border-t border-slate-300/60" />
+          <button
+            type="button"
+            data-testid="auth-toggle-email-form"
+            aria-expanded={showEmailForm}
+            onClick={() => {
+              setShowEmailForm((prev) => !prev);
+              setError(null);
+            }}
+            className="px-3 py-1 bg-[#EEF2F7] text-[10px] font-bold text-slate-600 hover:text-indigo-700 font-ios whitespace-nowrap rounded-full"
+          >
+            {showEmailForm ? 'إخفاء الدخول بالبريد الإلكتروني ▲' : 'أو الدخول بالبريد الإلكتروني وكلمة المرور ▼'}
+          </button>
+          <div className="w-full border-t border-slate-300/60" />
+        </div>
+
+        {showEmailForm && (
+          <form onSubmit={handleSubmit} className="space-y-3 text-xs font-ios pt-1">
+            {mode === 'register' && (
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">الاسم الكامل</label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    required
+                    minLength={2}
+                    data-testid="auth-name-input"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="مثال: عمر صبري"
+                    className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-semibold"
+                  />
+                  <User className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">البريد الإلكتروني</label>
+              <div className="relative">
+                <input
+                  type="email"
+                  required
+                  dir="ltr"
+                  data-testid="auth-email-input"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="name@example.com"
+                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
+                />
+                <Mail className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+            </div>
+
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">كلمة المرور</label>
+              <div className="relative">
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  dir="ltr"
+                  data-testid="auth-password-input"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
+                />
+                <Lock className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={busy || googleBusy}
+              data-testid="auth-submit-btn"
+              className="w-full clay-apple-blue py-3 rounded-2xl text-sm font-black text-white shadow-md disabled:opacity-60 mt-2"
+            >
+              {busy
+                ? 'جاري التنفيذ...'
+                : mode === 'register'
+                ? 'إنشاء الحساب بالبريد والمتابعة'
+                : 'تسجيل الدخول بالبريد'}
+            </button>
+          </form>
+        )}
       </div>
     </div>
   );

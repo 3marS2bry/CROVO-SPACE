@@ -1,7 +1,9 @@
 import { initializeApp } from 'firebase/app';
-import { GoogleAuthProvider, getAuth } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore, initializeFirestore } from 'firebase/firestore';
+import { GoogleAuthProvider, getAuth, setPersistence, browserLocalPersistence } from 'firebase/auth';
+import { getFirestore, initializeFirestore, setLogLevel } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
+
+setLogLevel('silent');
 
 const app = initializeApp(firebaseConfig);
 
@@ -9,7 +11,9 @@ function createFirestoreDb() {
   try {
     return initializeFirestore(
       app,
-      { experimentalForceLongPolling: true },
+      {
+        experimentalAutoDetectLongPolling: true,
+      },
       firebaseConfig.firestoreDatabaseId
     );
   } catch {
@@ -19,6 +23,7 @@ function createFirestoreDb() {
 
 export const db = createFirestoreDb();
 export const auth = getAuth(app);
+setPersistence(auth, browserLocalPersistence).catch(() => {});
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 export const FIREBASE_OAUTH_CLIENT_ID = firebaseConfig.oAuthClientId || '';
@@ -87,35 +92,3 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
-function isOfflineConnectionError(error: unknown): boolean {
-  const code = (error as { code?: string })?.code || '';
-  const msg = (error instanceof Error ? error.message : String(error)).toLowerCase();
-  return (
-    code === 'unavailable' ||
-    msg.includes('the client is offline') ||
-    msg.includes('could not reach cloud firestore backend')
-  );
-}
-
-async function testFirestoreConnection(): Promise<void> {
-  if (typeof window === 'undefined') return;
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-
-  const probe = () => getDocFromServer(doc(db, 'counters', 'tool'));
-  try {
-    await probe();
-  } catch (firstError) {
-    if (!isOfflineConnectionError(firstError)) return;
-    await new Promise((resolve) => window.setTimeout(resolve, 1500));
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-    try {
-      await probe();
-    } catch (retryError) {
-      if (isOfflineConnectionError(retryError)) {
-        console.error('Please check your Firebase configuration.');
-      }
-    }
-  }
-}
-
-void testFirestoreConnection();

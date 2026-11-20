@@ -27,9 +27,12 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 function mergeUsers(backendUser: AuthUser | null, cloudUser: AuthUser | null): AuthUser | null {
   if (backendUser && cloudUser) {
+    const role: 'user' | 'admin' =
+      backendUser.role === 'admin' || cloudUser.role === 'admin' ? 'admin' : 'user';
     return {
       ...cloudUser,
       ...backendUser,
+      role,
       serialNumber: cloudUser.serialNumber ?? backendUser.serialNumber ?? null,
     };
   }
@@ -60,50 +63,55 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     let mounted = true;
+    let lastSyncedUid: string | null = null;
     prewarmGoogleAuth();
     const unsubFirebase = subscribeFirebaseAuth(async (cloudUser) => {
       if (!mounted) return;
-      let backendUser: AuthUser | null = null;
-      try {
-        const res = await api.authMe();
-        backendUser = res.authenticated ? res.user : null;
-      } catch {
-        backendUser = null;
+      if (!cloudUser) {
+        lastSyncedUid = null;
+        setIsCloudUser(false);
+        setUser(null);
+        setLoading(false);
+        return;
       }
 
-      if (
-        cloudUser &&
-        (!backendUser ||
-          backendUser.email.toLowerCase() !== cloudUser.email.toLowerCase() ||
-          (cloudUser.serialNumber && backendUser.serialNumber !== cloudUser.serialNumber))
-      ) {
+      // Immediately reflect authenticated cloud user so UI responds instantly
+      setIsCloudUser(true);
+      setUser((prev) => mergeUsers(prev && prev.id === cloudUser.id ? prev : null, cloudUser));
+      setLoading(false);
+
+      if (lastSyncedUid !== cloudUser.id || !cloudUser.serialNumber) {
+        lastSyncedUid = cloudUser.id;
         try {
           const idToken = await getFirebaseIdToken();
-          if (idToken) {
+          if (idToken && mounted) {
             const synced = await api.authCloudSync({
               idToken,
               name: cloudUser.name,
               grade: cloudUser.grade,
               serialNumber: cloudUser.serialNumber,
             });
-            backendUser = synced.user;
+            if (mounted && synced.user) {
+              setUser((prev) => mergeUsers(synced.user, prev || cloudUser));
+            }
           }
         } catch {
           // Non-fatal: keep cloudUser active even if backend sync fails transiently
         }
       }
-
-      if (!mounted) return;
-      setIsCloudUser(Boolean(cloudUser));
-      setUser(mergeUsers(backendUser, cloudUser));
-      setLoading(false);
     });
 
     const handleAuthUpdated = (ev: Event) => {
       const custom = ev as CustomEvent<AuthUser | null>;
       setUser((prev) => {
         if (!custom.detail) return null;
-        return prev ? { ...prev, ...custom.detail, serialNumber: custom.detail.serialNumber ?? prev.serialNumber ?? null } : custom.detail;
+        if (!prev) return custom.detail;
+        return {
+          ...prev,
+          ...custom.detail,
+          role: prev.role === 'admin' || custom.detail.role === 'admin' ? 'admin' : 'user',
+          serialNumber: custom.detail.serialNumber ?? prev.serialNumber ?? null,
+        };
       });
       setIsCloudUser(Boolean(getFirebaseUid()));
     };
@@ -137,6 +145,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
           ? {
               ...prev,
               ...loggedInUser,
+              role: prev.role === 'admin' || loggedInUser.role === 'admin' ? 'admin' : 'user',
               serialNumber: loggedInUser.serialNumber ?? prev.serialNumber ?? null,
             }
           : loggedInUser
@@ -155,10 +164,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const loginWithGoogle = useCallback(async (preferredGrade: 'bac1' | 'bac2' = 'bac1') => {
     const cloudUser = await signInWithGoogleCloud(preferredGrade);
-    setUser((prev) => mergeUsers(prev && !isCloudUser ? prev : null, cloudUser));
+    let finalUser = cloudUser;
+    try {
+      const idToken = await getFirebaseIdToken();
+      if (idToken) {
+        const synced = await api.authCloudSync({
+          idToken,
+          name: cloudUser.name,
+          grade: preferredGrade,
+          serialNumber: cloudUser.serialNumber,
+        });
+        finalUser = mergeUsers(synced.user, cloudUser) || cloudUser;
+      }
+    } catch {
+      // Non-fatal: Firebase Auth succeeded; keep cloudUser
+    }
+    setUser(finalUser);
     setIsCloudUser(true);
-    return cloudUser;
-  }, [isCloudUser]);
+    return finalUser;
+  }, []);
 
   const logout = useCallback(async () => {
     await Promise.allSettled([signOutCloud(), api.authLogout()]);

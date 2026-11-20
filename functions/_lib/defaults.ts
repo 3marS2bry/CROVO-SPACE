@@ -3,8 +3,8 @@ import {
   chaptersFin,
   chaptersJs,
   chaptersPy,
-} from '../../src/data/chaptersData';
-import type { Chapter } from '../../src/types';
+} from '../../src/data/chaptersData.ts';
+import type { Chapter } from '../../src/types/index.ts';
 
 export interface ToolVideoConfig {
   id: string;

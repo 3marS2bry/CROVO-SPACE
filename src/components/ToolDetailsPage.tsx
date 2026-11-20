@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { ArrowLeft, Play, ShieldCheck, Zap, Sparkles, Flame, Eye, X, ThumbsUp, MessageSquare } from 'lucide-react';
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
 import { toolVideos as fallbackVideos, toolScreenshots, examSolverFaqs } from '../data/chaptersData';
-import { api, ApiError, PublicConfig } from '../utils/api';
+import { api, ApiError, notifyLikesUpdated, PublicConfig } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
+import { getFirebaseUid, logCloudActivity, toggleToolLikeCloud } from '../utils/cloudStore';
 import { getCachedToolLikes, hasCompletedInitialBootstrap, setFastToolLikes, subscribeFastStore } from '../utils/fastStore';
 import confetti from 'canvas-confetti';
 
@@ -96,15 +96,6 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         .catch(() => {});
     }
 
-    const unsubCloud = subscribeToolLikesCloud(
-      isCloudUser ? getFirebaseUid() : null,
-      (state) => {
-        if (!mounted) return;
-        setCloudLikesCount(state.count);
-        setCloudHasLiked(state.liked);
-      }
-    );
-
     const onLikesUpdated = (ev: Event) => {
       const detail = (ev as CustomEvent<{ itemKey: string; count: number; liked: boolean }>).detail;
       if (detail?.itemKey === 'tool') {
@@ -116,10 +107,9 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
     return () => {
       mounted = false;
       unsubFast();
-      unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
-  }, [isCloudUser, user?.id]);
+  }, [user?.id]);
 
   const handleToggleLike = async () => {
     if (liking) return;
@@ -135,6 +125,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         setCloudLikesCount(res.count);
         setCloudHasLiked(res.liked);
         setFastToolLikes(res);
+        notifyLikesUpdated(res);
         nextLiked = res.liked;
       } catch (apiErr) {
         if (apiErr instanceof ApiError && apiErr.status === 401) {
@@ -364,7 +355,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
               </h3>
             </div>
             <p className="text-[11px] text-slate-600 font-ios leading-normal">
-              الامتحان كله بيتحل بـ {config?.qureoOfferPrice ?? 50}ج فقط في أقل من 4 دقايق، وبتاخد درجاتك كاملة 100% ورادار المهارات متقفل وأنت مروّق جمجمتك.
+              الامتحان كله بيتحل بـ {config ? (config.offerActive ? config.qureoOfferPrice : config.qureoOldPrice) : 50}ج فقط في أقل من 4 دقايق، وبتاخد درجاتك كاملة 100% ورادار المهارات متقفل وأنت مروّق جمجمتك.
             </p>
           </div>
         </div>

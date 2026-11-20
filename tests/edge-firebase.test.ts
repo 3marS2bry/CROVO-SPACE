@@ -8,7 +8,13 @@ import {
   resolveVapidKeys,
   sendWebPushMessage,
 } from '../functions/_lib/webPush.ts';
-import { handleApiRequest } from '../functions/_lib/router.ts';
+import {
+  clearPublicReadCache,
+  handleApiRequest,
+  resetFirestoreQuotaCooldown,
+  setAllowQuotaCooldownInMock,
+} from '../functions/_lib/router.ts';
+import { runLiveFirestoreMerge, validateSafeRemoteUrl } from '../functions/_lib/liveMigration.ts';
 import { parseD1SqlExport } from '../scripts/migrate-sqlite-to-firestore.ts';
 import type { Env, KVNamespace } from '../functions/_lib/types.ts';
 
@@ -38,6 +44,7 @@ interface MockFirestoreHarness {
   cfg: firestoreRest.FirestoreConfig;
   restoreFetch: () => void;
   setOutage: (failWith503: boolean) => void;
+  setQuotaError: (failWith429: boolean) => void;
 }
 
 function installMockFirestoreFetch(): MockFirestoreHarness {
@@ -46,9 +53,17 @@ function installMockFirestoreFetch(): MockFirestoreHarness {
   const basePrefix = firestoreRest.getDocumentsBasePath(cfg);
   const originalFetch = globalThis.fetch;
   let forceOutage = false;
+  let forceQuota429 = false;
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (forceQuota429 && urlStr.includes('firestore.googleapis.com')) {
+      return new Response(
+        JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', message: 'Quota exceeded.' } }),
+        { status: 429, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     if (forceOutage && urlStr.includes('firestore.googleapis.com')) {
       return new Response(
@@ -227,6 +242,9 @@ function installMockFirestoreFetch(): MockFirestoreHarness {
     },
     setOutage: (v: boolean) => {
       forceOutage = v;
+    },
+    setQuotaError: (v: boolean) => {
+      forceQuota429 = v;
     },
   };
 }
@@ -579,6 +597,916 @@ test('Edge Router (Firebase Firestore backend) enforces security, pricing, outag
     }
     assert.equal(hit429, true);
   } finally {
+    harness.restoreFetch();
+  }
+});
+
+test('Live Migration enforces SSRF safety, dry-run preview, monotonic Math.max merge, and analytics_daily aggregation', async () => {
+  // 1. SSRF checks
+  assert.throws(() => validateSafeRemoteUrl('http://crovo-space.ai.studio'), /https:\/\//);
+  assert.throws(() => validateSafeRemoteUrl('https://localhost:3000'), /داخلية|محلية/);
+  assert.throws(() => validateSafeRemoteUrl('https://127.0.0.1/api'), /داخلية|محلية/);
+  assert.equal(validateSafeRemoteUrl('https://crovo-space.ai.studio/').origin, 'https://crovo-space.ai.studio');
+
+  const harness = installMockFirestoreFetch();
+  const kv = createMemoryKv();
+  const env: Env = {
+    RATE_LIMIT_KV: kv,
+    SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    CREDENTIAL_ENCRYPTION_KEY: 'test-encrypt-secret-fedcba9876543210',
+    ADMIN_USERNAME: 'omar_admin',
+    ADMIN_PASSWORD: 'StrongAdminPass!2026',
+    NODE_ENV: 'production',
+  };
+
+  // Seed initial lower values in Firestore to ensure Math.max never regresses existing counts
+  harness.docs.set('counters/tool', firestoreRest.encodeDocumentFields({ id: 'tool', count: 7 }));
+  harness.docs.set('counters/user_serial', firestoreRest.encodeDocumentFields({ id: 'user_serial', count: 1005 }));
+  harness.docs.set(
+    'question_stats/bac1-js-1-0',
+    firestoreRest.encodeDocumentFields({
+      questionKey: 'bac1-js-1-0',
+      grade: 'bac1',
+      section: 'js',
+      chapterNum: 1,
+      qIndex: 0,
+      questionTitle: 'Existing High Q',
+      copyCount: 50,
+    })
+  );
+  harness.docs.set(
+    'polls/poll_extend_offer',
+    firestoreRest.encodeDocumentFields({
+      id: 'poll_extend_offer',
+      question: 'إيه رأيكم نمد العرض؟',
+      options: [
+        { key: 'extend', label: 'أيوة', count: 14 },
+        { key: 'enough', label: 'لا', count: 2 },
+      ],
+      totalVotes: 16,
+      isOpen: true,
+    })
+  );
+
+  // Create RS256 keypair + signed Firebase Admin JWT and mock Google JWK endpoint on top of mock Firestore fetch
+  const kp = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const pubJwk = (await crypto.subtle.exportKey('jwk', kp.publicKey)) as JsonWebKey & { kid?: string };
+  pubJwk.kid = 'test-kid-1';
+
+  const toB64Url = (buf: Uint8Array) =>
+    btoa(String.fromCharCode(...buf)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const hdrB64 = toB64Url(new TextEncoder().encode(JSON.stringify({ alg: 'RS256', kid: 'test-kid-1' })));
+  const payB64 = toB64Url(
+    new TextEncoder().encode(
+      JSON.stringify({
+        aud: 'sincere-impact-wbvhw',
+        iss: 'https://securetoken.google.com/sincere-impact-wbvhw',
+        sub: 'admin_omar_uid',
+        email: '3mars7bry@gmail.com',
+        email_verified: true,
+        name: 'Omar Sabry',
+        iat: nowSec - 10,
+        exp: nowSec + 3600,
+      })
+    )
+  );
+  const sigBuf = await crypto.subtle.sign(
+    { name: 'RSASSA-PKCS1-v1_5' },
+    kp.privateKey,
+    new TextEncoder().encode(`${hdrB64}.${payB64}`)
+  );
+  const adminIdToken = `${hdrB64}.${payB64}.${toB64Url(new Uint8Array(sigBuf))}`;
+
+  harness.docs.set(
+    'admins/admin_omar_uid',
+    firestoreRest.encodeDocumentFields({
+      uid: 'admin_omar_uid',
+      email: '3mars7bry@gmail.com',
+    })
+  );
+  harness.docs.set(
+    'users/admin_omar_uid',
+    firestoreRest.encodeDocumentFields({
+      uid: 'admin_omar_uid',
+      name: 'Omar Sabry',
+      email: '3mars7bry@gmail.com',
+      grade: 'bac1',
+      role: 'admin',
+      status: 'active',
+    })
+  );
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (urlStr.includes('securetoken@system.gserviceaccount.com')) {
+      return new Response(JSON.stringify({ keys: [pubJwk] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=300' },
+      });
+    }
+    return prevFetch(input, init);
+  }) as typeof fetch;
+
+  const sampleRemoteSnapshot = {
+    overview: {
+      likes: [{ itemKey: 'tool', count: 9 }],
+      poll: {
+        pollId: 'poll_extend_offer',
+        question: 'إيه رأيكم نمد العرض؟',
+        options: [
+          { key: 'extend', label: 'أيوة', count: 5 },
+          { key: 'enough', label: 'لا', count: 4 },
+        ],
+        totalVotes: 9,
+      },
+      orders: [
+        {
+          id: 'ord_live_101',
+          orderCode: 'CRV-301',
+          fullName: 'محمد محمود',
+          grade: 'bac1',
+          platformLabel: 'QUREO',
+          platformUsername: 'mohamed_301',
+          oldPrice: 100,
+          finalPrice: 50,
+          offerApplied: true,
+          paymentMethod: 'Vodafone Cash',
+          status: 'completed',
+        },
+      ],
+    },
+    usersEndpoint: {
+      users: Array.from({ length: 12 }, (_, idx) => ({
+        id: `live_u_${idx + 1}`,
+        serialNumber: `CRV-${1300 + idx}`,
+        name: `عميل قديم ${idx + 1}`,
+        email: `client${idx + 1}@example.com`,
+        grade: idx % 2 === 0 ? 'bac1' : 'bac2',
+        role: 'user',
+        status: 'active',
+      })),
+    },
+    commentsEndpoint: {
+      comments: [
+        {
+          id: 'cmt_cf12ed9641880b10',
+          authorName: 'Malik Muhammad',
+          grade: 'أولى بكالوريا',
+          rating: 5,
+          content: 'منصة ممتازة وسريعة جداً في التنفيذ',
+          isVerified: true,
+          likesCount: 3,
+        },
+      ],
+    },
+    questionStatsEndpoint: {
+      copyCounts: {
+        'bac1-js-1-0': 10, // lower than existing 50 -> must stay 50
+        'bac1-js-2-1': 37, // new -> must be created with 37
+      },
+    },
+    analyticsEndpoint: {
+      visitors: { totalVisits: 540, uniqueVisitors: 320 },
+      timeline: [
+        { day: '2026-10-15', visits: 300, uniqueVisitors: 180, libraryOpens: 120, searches: 45 },
+        { day: '2026-10-16', visits: 240, uniqueVisitors: 140, libraryOpens: 90, searches: 30 },
+      ],
+    },
+  };
+
+  try {
+    // 2. Cookie-only session without Firebase Google idToken returns 403 requiresFirebaseLink
+    const loginRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'omar_admin', password: 'StrongAdminPass!2026' }),
+      }),
+      env
+    );
+    const cookieVal = (loginRes.headers.get('set-cookie') || '').match(/crovo_admin_session=([^;]+)/)?.[1] || '';
+
+    const blockedRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/import-live-migration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Cookie: `crovo_admin_session=${cookieVal}` },
+        body: JSON.stringify({ mode: 'import_snapshot', dryRun: true, snapshot: sampleRemoteSnapshot }),
+      }),
+      env
+    );
+    assert.equal(blockedRes.status, 403);
+    const blockedJson = await blockedRes.json();
+    assert.equal(blockedJson.requiresFirebaseLink, true);
+
+    // 3. Dry-run preview returns exact remote vs current counts without mutating Firestore
+    const dryRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/import-live-migration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({
+          mode: 'import_snapshot',
+          dryRun: true,
+          snapshot: sampleRemoteSnapshot,
+          sourceLabel: 'crovo-space.ai.studio',
+        }),
+      }),
+      env
+    );
+    assert.equal(dryRes.status, 200);
+    const dryJson = await dryRes.json();
+    assert.equal(dryJson.dryRun, true);
+    assert.equal(dryJson.remoteCounts.users, 12);
+    assert.equal(dryJson.remoteCounts.toolLikes, 9);
+    assert.equal(dryJson.remoteCounts.totalVisits, 540);
+    assert.equal(firestoreRest.decodeFirestoreValue(harness.docs.get('counters/tool')?.count), 7);
+
+    // 4. Direct merge verifies monotonic Math.max and additive inserts
+    const applyRes = await runLiveFirestoreMerge({
+      cfg: harness.cfg,
+      idToken: adminIdToken,
+      mode: 'import_snapshot',
+      sourceLabel: 'crovo-space.ai.studio',
+      rawPayload: sampleRemoteSnapshot,
+      dryRun: false,
+    });
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.applied.errors, 0);
+
+    // Counters upgraded monotonically: tool likes 7->9, serial 1005->1311
+    assert.equal(firestoreRest.decodeFirestoreValue(harness.docs.get('counters/tool')?.count), 9);
+    assert.equal(firestoreRest.decodeFirestoreValue(harness.docs.get('counters/user_serial')?.count), 1311);
+
+    // Question stats: existing 50 preserved (> 10), missing 37 added
+    assert.equal(firestoreRest.decodeFirestoreValue(harness.docs.get('question_stats/bac1-js-1-0')?.copyCount), 50);
+    assert.equal(firestoreRest.decodeFirestoreValue(harness.docs.get('question_stats/bac1-js-2-1')?.copyCount), 37);
+
+    // Poll options took Math.max per option: extend=max(14,5)=14, enough=max(2,4)=4, totalVotes=18
+    const mergedPoll = firestoreRest.decodeDocument<Record<string, unknown>>(
+      { name: `${firestoreRest.getDocumentsBasePath(harness.cfg)}/polls/poll_extend_offer`, fields: harness.docs.get('polls/poll_extend_offer') },
+      harness.cfg
+    );
+    assert.equal(mergedPoll.data.totalVotes, 18);
+
+    // Comment Malik Muhammad & Order & All 12 Users migrated cleanly
+    assert.ok(harness.docs.has('comments/cmt_cf12ed9641880b10'));
+    assert.ok(harness.docs.has('orders/ord_live_101'));
+    assert.ok(harness.docs.has('users/live_u_12'));
+    assert.ok(harness.docs.has('analytics_daily/2026-10-15'));
+
+    // 5. Analytics API (range=all) reflects analytics_daily historical visits + all users
+    const analyticsRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/analytics?range=all', {
+        headers: { Authorization: `Bearer ${adminIdToken}` },
+      }),
+      env
+    );
+    assert.equal(analyticsRes.status, 200);
+    const analyticsJson = await analyticsRes.json();
+    assert.equal(analyticsJson.visitors.totalVisits, 540);
+    assert.equal(analyticsJson.visitors.uniqueVisitors, 320);
+    assert.equal(analyticsJson.users.totalRegistered, 13);
+    assert.ok(analyticsJson.timeline.some((t: { day: string; visits: number }) => t.day === '2026-10-15' && t.visits === 300));
+  } finally {
+    harness.restoreFetch();
+  }
+});
+
+test('Admin recovery protections preserve unclassified grades, distinguish DB errors, create pre-mutation backups, and never overwrite existing docs', async () => {
+  const harness = installMockFirestoreFetch();
+  const kv = createMemoryKv();
+  const env: Env = {
+    RATE_LIMIT_KV: kv,
+    SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    CREDENTIAL_ENCRYPTION_KEY: 'test-encrypt-secret-fedcba9876543210',
+    ADMIN_USERNAME: 'omar_admin',
+    ADMIN_PASSWORD: 'StrongAdminPass!2026',
+    NODE_ENV: 'production',
+  };
+
+  // Generate ephemeral RS256 Firebase Admin JWT
+  const kp = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const pubJwk = (await crypto.subtle.exportKey('jwk', kp.publicKey)) as JsonWebKey & { kid?: string };
+  pubJwk.kid = 'test-kid-2';
+  const toB64Url = (buf: Uint8Array) =>
+    btoa(String.fromCharCode(...buf)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const hdrB64 = toB64Url(new TextEncoder().encode(JSON.stringify({ alg: 'RS256', kid: 'test-kid-2' })));
+  const payB64 = toB64Url(
+    new TextEncoder().encode(
+      JSON.stringify({
+        aud: 'sincere-impact-wbvhw',
+        iss: 'https://securetoken.google.com/sincere-impact-wbvhw',
+        sub: 'admin_omar_uid',
+        email: '3mars7bry@gmail.com',
+        email_verified: true,
+        name: 'Omar Sabry',
+        iat: nowSec - 10,
+        exp: nowSec + 3600,
+      })
+    )
+  );
+  const sigBuf = await crypto.subtle.sign(
+    { name: 'RSASSA-PKCS1-v1_5' },
+    kp.privateKey,
+    new TextEncoder().encode(`${hdrB64}.${payB64}`)
+  );
+  const adminIdToken = `${hdrB64}.${payB64}.${toB64Url(new Uint8Array(sigBuf))}`;
+
+  harness.docs.set(
+    'admins/admin_omar_uid',
+    firestoreRest.encodeDocumentFields({ uid: 'admin_omar_uid', email: '3mars7bry@gmail.com' })
+  );
+  harness.docs.set(
+    'users/u_bac1',
+    firestoreRest.encodeDocumentFields({
+      name: 'طالب أولى',
+      email: 'bac1@example.com',
+      grade: 'bac1',
+      role: 'user',
+      status: 'active',
+      createdAt: '2026-10-01T10:00:00.000Z',
+    })
+  );
+  harness.docs.set(
+    'users/u_bac2',
+    firestoreRest.encodeDocumentFields({
+      name: 'طالب تانية',
+      email: 'bac2@example.com',
+      grade: 'bac2',
+      role: 'user',
+      status: 'active',
+      createdAt: '2026-10-02T10:00:00.000Z',
+    })
+  );
+  harness.docs.set(
+    'users/u_missing_grade',
+    firestoreRest.encodeDocumentFields({
+      name: 'عميل بمرحلة ناقصة',
+      email: 'missing@example.com',
+      role: 'user',
+      status: 'active',
+      createdAt: '2026-10-03T10:00:00.000Z',
+    })
+  );
+  harness.docs.set(
+    'users/u_invalid_grade',
+    firestoreRest.encodeDocumentFields({
+      name: 'عميل بمرحلة غير صالحة',
+      email: 'invalid@example.com',
+      grade: 'bac3_legacy',
+      role: 'user',
+      status: 'active',
+      createdAt: '2026-10-04T10:00:00.000Z',
+    })
+  );
+
+  // Pre-seed custom site_config & bundle to verify migrate-legacy & settings protections
+  harness.docs.set(
+    'site_config/public',
+    firestoreRest.encodeDocumentFields({
+      qureoOfferPrice: 77,
+      qureoOldPrice: 150,
+      ordersEnabled: true,
+    })
+  );
+  harness.docs.set(
+    'library_bundles/bac1_js',
+    firestoreRest.encodeDocumentFields({
+      id: 'bac1_js',
+      grade: 'bac1',
+      section: 'js',
+      chapters: [{ num: 1, title: 'عنوان مخصص محفوظ' }],
+      questions: [],
+    })
+  );
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (urlStr.includes('securetoken@system.gserviceaccount.com')) {
+      return new Response(JSON.stringify({ keys: [pubJwk] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=300' },
+      });
+    }
+    return prevFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    // 1. Missing/invalid grades remain 'unclassified' without misclassifying as bac1
+    const usersRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/users?sort=newest', {
+        headers: { Authorization: `Bearer ${adminIdToken}` },
+      }),
+      env
+    );
+    assert.equal(usersRes.status, 200);
+    const usersJson = await usersRes.json();
+    assert.equal(usersJson.dbStatus, 'ok');
+    assert.deepEqual(usersJson.counts, {
+      total: 4,
+      bac1: 1,
+      bac2: 1,
+      unclassified: 2,
+    });
+    const missingUser = usersJson.users.find((u: { id: string }) => u.id === 'u_missing_grade');
+    const invalidUser = usersJson.users.find((u: { id: string }) => u.id === 'u_invalid_grade');
+    assert.equal(missingUser.grade, 'unclassified');
+    assert.equal(invalidUser.grade, 'unclassified');
+    assert.equal(invalidUser.rawGrade, 'bac3_legacy');
+
+    // User activity detail also preserves 'unclassified'
+    const actRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/users/u_invalid_grade/activity', {
+        headers: { Authorization: `Bearer ${adminIdToken}` },
+      }),
+      env
+    );
+    assert.equal(actRes.status, 200);
+    const actJson = await actRes.json();
+    assert.equal(actJson.user.grade, 'unclassified');
+
+    // 2. Cookie-only session without Firebase token surfaces auth_required cleanly
+    const cookieLogin = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: 'omar_admin', password: 'StrongAdminPass!2026' }),
+      }),
+      env
+    );
+    const cookieVal =
+      (cookieLogin.headers.get('set-cookie') || '').match(/crovo_admin_session=([^;]+)/)?.[1] || '';
+
+    const unlinkedUsersRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/users', {
+        headers: { Cookie: `crovo_admin_session=${cookieVal}` },
+      }),
+      env
+    );
+    assert.equal(unlinkedUsersRes.status, 200);
+    const unlinkedUsersJson = await unlinkedUsersRes.json();
+    assert.equal(unlinkedUsersJson.dbStatus, 'auth_required');
+    assert.equal(unlinkedUsersJson.requiresFirebaseLink, true);
+
+    // 3. Firestore 429 quota error returns dbStatus: 'quota_exceeded' instead of fake empty success
+    harness.setQuotaError(true);
+    const quotaUsersRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/users', {
+        headers: { Authorization: `Bearer ${adminIdToken}` },
+      }),
+      env
+    );
+    assert.equal(quotaUsersRes.status, 200);
+    const quotaUsersJson = await quotaUsersRes.json();
+    assert.equal(quotaUsersJson.dbStatus, 'quota_exceeded');
+    assert.ok(quotaUsersJson.dbError);
+    harness.setQuotaError(false);
+
+    // 4. PUT /api/admin/settings aborts with 503 on outage (never overwrites existing config with defaults)
+    harness.setOutage(true);
+    const outagePutRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({ qureoOfferPrice: 12 }),
+      }),
+      env
+    );
+    assert.equal(outagePutRes.status, 503);
+    harness.setOutage(false);
+    assert.equal(
+      firestoreRest.decodeFirestoreValue(harness.docs.get('site_config/public')?.qureoOfferPrice),
+      77
+    );
+
+    // 5. POST /api/admin/migrate-legacy skips pre-existing site_config and library_bundles & writes system_backups + system_migrations
+    const migRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/migrate-legacy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+      }),
+      env
+    );
+    assert.equal(migRes.status, 200);
+    const migJson = await migRes.json();
+    assert.equal(migJson.ok, true);
+    assert.equal(migJson.seeded.siteConfig, 0);
+    assert.ok(migJson.seeded.skippedExisting >= 2);
+    assert.equal(
+      firestoreRest.decodeFirestoreValue(harness.docs.get('site_config/public')?.qureoOfferPrice),
+      77
+    );
+    const preservedBundle = firestoreRest.decodeDocument<{ chapters: Array<{ title: string }> }>(
+      {
+        name: `${firestoreRest.getDocumentsBasePath(harness.cfg)}/library_bundles/bac1_js`,
+        fields: harness.docs.get('library_bundles/bac1_js'),
+      },
+      harness.cfg
+    );
+    assert.equal(preservedBundle.data.chapters[0].title, 'عنوان مخصص محفوظ');
+    assert.ok(harness.docs.has('system_migrations/v1_firestore_baseline'));
+    assert.ok(Array.from(harness.docs.keys()).some((k) => k.startsWith('system_backups/')));
+
+    // 6. PUT /api/admin/settings when healthy creates pre-mutation backup + updates target field only
+    const putOkRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({ qureoOfferPrice: 65 }),
+      }),
+      env
+    );
+    assert.equal(putOkRes.status, 200);
+    assert.equal(
+      firestoreRest.decodeFirestoreValue(harness.docs.get('site_config/public')?.qureoOfferPrice),
+      65
+    );
+
+    // 7. PUT /api/admin/settings supports switching extended_offer -> regular_price and one-click resetToRegularPrices
+    const extRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({
+          qureoOldPrice: 150,
+          qureoOfferPrice: 60,
+          finOldPrice: 120,
+          finOfferPrice: 55,
+          bundleOldPrice: 270,
+          bundleOfferPrice: 110,
+          afterOfferMode: 'extended_offer',
+          offerEndsAt: new Date(Date.now() + 86400000).toISOString(),
+        }),
+      }),
+      env
+    );
+    assert.equal(extRes.status, 200);
+    const extJson = await extRes.json();
+    assert.equal(extJson.config.afterOfferMode, 'extended_offer');
+
+    const regSwitchRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({ afterOfferMode: 'regular_price' }),
+      }),
+      env
+    );
+    assert.equal(regSwitchRes.status, 200);
+    const regSwitchJson = await regSwitchRes.json();
+    assert.equal(regSwitchJson.config.afterOfferMode, 'regular_price');
+
+    const resetRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminIdToken}` },
+        body: JSON.stringify({ resetToRegularPrices: true }),
+      }),
+      env
+    );
+    assert.equal(resetRes.status, 200);
+    const resetJson = await resetRes.json();
+    assert.equal(resetJson.config.qureoOfferPrice, 150);
+    assert.equal(resetJson.config.finOfferPrice, 120);
+    assert.equal(resetJson.config.bundleOfferPrice, 270);
+    assert.equal(resetJson.config.afterOfferMode, 'regular_price');
+    assert.equal(resetJson.config.offerActive, false);
+    assert.ok(String(resetJson.config.libraryAd?.priceText || '').includes('150'));
+
+    // 8. Cold-start 429 quota error degrades gracefully on public endpoints & analytics while /api/health returns 503
+    const coldEnv: Env = { ...env, FIREBASE_DATABASE_ID: 'quota_cold_test_db' };
+    harness.setQuotaError(true);
+
+    const coldHealth = await handleApiRequest(new Request('https://crovo.pages.dev/api/health'), coldEnv);
+    assert.equal(coldHealth.status, 503);
+
+    const coldCfg = await handleApiRequest(new Request('https://crovo.pages.dev/api/config'), coldEnv);
+    assert.equal(coldCfg.status, 200);
+    const coldCfgJson = await coldCfg.json();
+    assert.equal(coldCfgJson.quotaDegraded, true);
+    assert.equal(typeof coldCfgJson.qureoOldPrice, 'number');
+
+    const coldLib = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/library?grade=bac1&section=js'),
+      coldEnv
+    );
+    assert.equal(coldLib.status, 200);
+    const coldLibJson = await coldLib.json();
+    assert.equal(coldLibJson.quotaDegraded, true);
+    assert.ok(Array.isArray(coldLibJson.chapters) && coldLibJson.chapters.length >= 42);
+
+    const coldBoot = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/bootstrap?grade=bac1&section=js'),
+      coldEnv
+    );
+    assert.equal(coldBoot.status, 200);
+    const coldBootJson = await coldBoot.json();
+    assert.equal(coldBootJson.quotaDegraded, true);
+    assert.ok(Array.isArray(coldBootJson.library?.chapters) && coldBootJson.library.chapters.length >= 42);
+
+    const coldEv = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/analytics/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'page_view', path: '/' }),
+      }),
+      coldEnv
+    );
+    assert.equal(coldEv.status, 202);
+    const coldEvJson = await coldEv.json();
+    assert.equal(coldEvJson.skippedQuota, true);
+    harness.setQuotaError(false);
+  } finally {
+    harness.restoreFetch();
+  }
+});
+
+test('Owner admin Firebase login, /api/auth/cloud-sync, and /api/auth/me stay resilient under 429 quota while rejecting non-admins with 403', async () => {
+  const harness = installMockFirestoreFetch();
+  const kv = createMemoryKv();
+  const env: Env = {
+    RATE_LIMIT_KV: kv,
+    SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    CREDENTIAL_ENCRYPTION_KEY: 'test-encrypt-secret-fedcba9876543210',
+    NODE_ENV: 'production',
+  };
+
+  const kp = await crypto.subtle.generateKey(
+    {
+      name: 'RSASSA-PKCS1-v1_5',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: 'SHA-256',
+    },
+    true,
+    ['sign', 'verify']
+  );
+  const pubJwk = (await crypto.subtle.exportKey('jwk', kp.publicKey)) as JsonWebKey & { kid?: string };
+  pubJwk.kid = 'test-kid-quota';
+  const toB64Url = (buf: Uint8Array) =>
+    btoa(String.fromCharCode(...buf)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  const signMockJwt = async (payload: Record<string, unknown>) => {
+    const hdr = toB64Url(new TextEncoder().encode(JSON.stringify({ alg: 'RS256', kid: 'test-kid-quota' })));
+    const pay = toB64Url(new TextEncoder().encode(JSON.stringify(payload)));
+    const sig = await crypto.subtle.sign(
+      { name: 'RSASSA-PKCS1-v1_5' },
+      kp.privateKey,
+      new TextEncoder().encode(`${hdr}.${pay}`)
+    );
+    return `${hdr}.${pay}.${toB64Url(new Uint8Array(sig))}`;
+  };
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const ownerToken = await signMockJwt({
+    aud: 'sincere-impact-wbvhw',
+    iss: 'https://securetoken.google.com/sincere-impact-wbvhw',
+    sub: 'owner_quota_uid',
+    email: '3mars7bry@gmail.com',
+    email_verified: true,
+    name: 'Omar Owner',
+    iat: nowSec - 10,
+    exp: nowSec + 3600,
+  });
+
+  const studentToken = await signMockJwt({
+    aud: 'sincere-impact-wbvhw',
+    iss: 'https://securetoken.google.com/sincere-impact-wbvhw',
+    sub: 'student_quota_uid',
+    email: 'student.quota@example.com',
+    email_verified: true,
+    name: 'طالب تجريبي',
+    iat: nowSec - 10,
+    exp: nowSec + 3600,
+  });
+
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (urlStr.includes('securetoken@system.gserviceaccount.com')) {
+      return new Response(JSON.stringify({ keys: [pubJwk] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'max-age=300' },
+      });
+    }
+    return prevFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    harness.setQuotaError(true);
+
+    // 1. Owner Google login succeeds even during 429 quota without requiring admins/{uid} read
+    const ownerAdminLogin = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/firebase-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ownerToken}` },
+        body: JSON.stringify({ idToken: ownerToken }),
+      }),
+      env
+    );
+    assert.equal(ownerAdminLogin.status, 200);
+    const ownerAdminJson = await ownerAdminLogin.json();
+    assert.equal(ownerAdminJson.ok, true);
+    assert.equal(ownerAdminJson.hasFirebaseToken, true);
+    assert.equal(ownerAdminJson.quotaDegraded, true);
+    assert.equal(ownerAdminJson.user.role, 'admin');
+    assert.equal(ownerAdminJson.user.email, '3mars7bry@gmail.com');
+
+    // 2. /api/admin/me recognizes owner Bearer token immediately during 429
+    const adminMeRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/me', {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+      }),
+      env
+    );
+    assert.equal(adminMeRes.status, 200);
+    const adminMeJson = await adminMeRes.json();
+    assert.equal(adminMeJson.authenticated, true);
+    assert.equal(adminMeJson.hasFirebaseToken, true);
+
+    // 3. /api/auth/me returns verified admin for owner and verified user for student under 429
+    const ownerAuthMe = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/auth/me', {
+        headers: { Authorization: `Bearer ${ownerToken}` },
+      }),
+      env
+    );
+    assert.equal(ownerAuthMe.status, 200);
+    const ownerAuthMeJson = await ownerAuthMe.json();
+    assert.equal(ownerAuthMeJson.authenticated, true);
+    assert.equal(ownerAuthMeJson.user.role, 'admin');
+
+    const studentAuthMe = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/auth/me', {
+        headers: { Authorization: `Bearer ${studentToken}` },
+      }),
+      env
+    );
+    assert.equal(studentAuthMe.status, 200);
+    const studentAuthMeJson = await studentAuthMe.json();
+    assert.equal(studentAuthMeJson.authenticated, true);
+    assert.equal(studentAuthMeJson.user.role, 'user');
+
+    // 4. /api/auth/cloud-sync returns 200 degraded profile instead of 503 under 429
+    const studentSyncRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/auth/cloud-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${studentToken}` },
+        body: JSON.stringify({ idToken: studentToken, grade: 'bac2', name: 'طالب باك 2' }),
+      }),
+      env
+    );
+    assert.equal(studentSyncRes.status, 200);
+    const studentSyncJson = await studentSyncRes.json();
+    assert.equal(studentSyncJson.ok, true);
+    assert.equal(studentSyncJson.quotaDegraded, true);
+    assert.equal(studentSyncJson.user.grade, 'bac2');
+    assert.equal(studentSyncJson.user.role, 'user');
+
+    // 5. Non-admin Firebase token on /api/admin/firebase-login is strictly rejected with 403
+    const nonAdminRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/firebase-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${studentToken}` },
+        body: JSON.stringify({ idToken: studentToken }),
+      }),
+      env
+    );
+    assert.equal(nonAdminRes.status, 403);
+
+    // 6. Email/Password unverified student token syncs profile cleanly while denied admin
+    const emailPassStudentToken = await signMockJwt({
+      aud: 'sincere-impact-wbvhw',
+      iss: 'https://securetoken.google.com/sincere-impact-wbvhw',
+      sub: 'email_student_uid_01',
+      email: 'student.emailpass@example.com',
+      email_verified: false,
+      name: 'أحمد تانية باك',
+      iat: nowSec - 10,
+      exp: nowSec + 3600,
+    });
+    harness.setQuotaError(false);
+    const emailSyncRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/auth/cloud-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${emailPassStudentToken}` },
+        body: JSON.stringify({ idToken: emailPassStudentToken, grade: 'bac2', name: 'أحمد تانية باك' }),
+      }),
+      env
+    );
+    assert.equal(emailSyncRes.status, 200);
+    const emailSyncJson = await emailSyncRes.json();
+    assert.equal(emailSyncJson.ok, true);
+    assert.equal(emailSyncJson.user.grade, 'bac2');
+    assert.equal(emailSyncJson.user.role, 'user');
+
+    const unverifiedOwnerAttempt = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/admin/firebase-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${emailPassStudentToken}` },
+        body: JSON.stringify({ idToken: emailPassStudentToken }),
+      }),
+      env
+    );
+    assert.equal(unverifiedOwnerAttempt.status, 403);
+  } finally {
+    harness.setQuotaError(false);
+    harness.restoreFetch();
+  }
+});
+
+test('Firestore 429 quota cooldown circuit breaker fast-fails repeated public/analytics fetches and propagates quotaDegraded flags', async () => {
+  const harness = installMockFirestoreFetch();
+  const kv = createMemoryKv();
+  const env: Env = {
+    RATE_LIMIT_KV: kv,
+    FIREBASE_DATABASE_ID: 'cooldown_circuit_test_db',
+    SESSION_SECRET: 'test-session-secret-0123456789abcdef',
+    CREDENTIAL_ENCRYPTION_KEY: 'test-encrypt-secret-fedcba9876543210',
+    NODE_ENV: 'production',
+  };
+
+  let firestoreNetworkHits = 0;
+  const wrappedFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (urlStr.startsWith('https://firestore.googleapis.com/')) {
+      firestoreNetworkHits += 1;
+    }
+    return wrappedFetch(input, init);
+  }) as typeof fetch;
+
+  try {
+    clearPublicReadCache();
+    resetFirestoreQuotaCooldown();
+    setAllowQuotaCooldownInMock(true);
+    harness.setQuotaError(true);
+
+    // Trigger initial 429 via /api/health
+    const h1 = await handleApiRequest(new Request('https://crovo.pages.dev/api/health'), env);
+    assert.equal(h1.status, 503);
+    assert.equal(firestoreNetworkHits, 1);
+
+    // Subsequent public endpoints during 30s cooldown must NOT hit Firestore over network
+    const hitsBefore = firestoreNetworkHits;
+    const cRes = await handleApiRequest(new Request('https://crovo.pages.dev/api/comments'), env);
+    assert.equal(cRes.status, 200);
+    const cJson = await cRes.json();
+    assert.equal(cJson.quotaDegraded, true);
+    assert.deepEqual(cJson.comments, []);
+
+    const pRes = await handleApiRequest(new Request('https://crovo.pages.dev/api/poll'), env);
+    assert.equal(pRes.status, 200);
+    const pJson = await pRes.json();
+    assert.equal(pJson.quotaDegraded, true);
+    assert.equal(pJson.totalVotes, 0);
+
+    const lRes = await handleApiRequest(new Request('https://crovo.pages.dev/api/likes?itemKey=tool'), env);
+    assert.equal(lRes.status, 200);
+    const lJson = await lRes.json();
+    assert.equal(lJson.quotaDegraded, true);
+
+    const evRes = await handleApiRequest(
+      new Request('https://crovo.pages.dev/api/analytics/event', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'page_view', path: '/' }),
+      }),
+      env
+    );
+    assert.equal(evRes.status, 202);
+
+    assert.equal(firestoreNetworkHits, hitsBefore, 'Cooldown must prevent redundant 429 Firestore roundtrips');
+
+    // Recovering health clears cooldown cleanly
+    harness.setQuotaError(false);
+    const h2 = await handleApiRequest(new Request('https://crovo.pages.dev/api/health'), env);
+    assert.equal(h2.status, 200);
+  } finally {
+    setAllowQuotaCooldownInMock(false);
+    resetFirestoreQuotaCooldown();
+    clearPublicReadCache();
+    harness.setQuotaError(false);
     harness.restoreFetch();
   }
 });

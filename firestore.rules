@@ -394,18 +394,45 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidSystemBackup(data) {
+      return data.keys().hasAll(['id', 'reason', 'actor', 'summaryJson', 'createdAt'])
+        && data.keys().hasOnly(['id', 'reason', 'actor', 'summaryJson', 'countsJson', 'createdAt'])
+        && isValidId(data.id) && data.id.size() >= 4 && data.id.size() <= 80
+        && data.reason is string && data.reason.size() >= 2 && data.reason.size() <= 80
+        && data.actor is string && data.actor.size() >= 2 && data.actor.size() <= 160
+        && data.summaryJson is string && data.summaryJson.size() <= 64000
+        && (!('countsJson' in data) || (data.countsJson is string && data.countsJson.size() <= 2000))
+        && data.createdAt is timestamp;
+    }
+
+    function isValidSystemMigration(data) {
+      return data.keys().hasAll(['id', 'version', 'status', 'actor', 'appliedAt'])
+        && data.keys().hasOnly(['id', 'version', 'status', 'actor', 'detailsJson', 'appliedAt'])
+        && isValidId(data.id) && data.id.size() >= 2 && data.id.size() <= 80
+        && data.version is string && data.version.size() >= 1 && data.version.size() <= 32
+        && data.status in ['applied', 'verified', 'skipped']
+        && data.actor is string && data.actor.size() >= 2 && data.actor.size() <= 160
+        && (!('detailsJson' in data) || (data.detailsJson is string && data.detailsJson.size() <= 4000))
+        && data.appliedAt is timestamp;
+    }
+
     // 4. Collection Rules
     match /users/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
       allow list: if isAdmin();
       allow create: if isValidId(userId)
-        && isOwner(userId)
         && isValidUserProfile(incoming())
         && incoming().uid == userId
-        && incoming().role == 'user'
-        && incoming().status == 'active'
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isOwner(userId)
+            && incoming().role == 'user'
+            && incoming().status == 'active'
+          )
+        );
       allow update: if isValidId(userId)
         && isValidUserProfile(incoming())
         && incoming().uid == existing().uid
@@ -464,12 +491,17 @@ service cloud.firestore {
         && isSignedIn()
         && isValidComment(incoming())
         && incoming().id == commentId
-        && incoming().authorUid == request.auth.uid
-        && incoming().isVerified == false
-        && incoming().status == 'approved'
-        && incoming().likesCount == 0
-        && incoming().reportsCount == 0
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          isAdmin() ||
+          (
+            incoming().authorUid == request.auth.uid
+            && incoming().isVerified == false
+            && incoming().status == 'approved'
+            && incoming().likesCount == 0
+            && incoming().reportsCount == 0
+          )
+        );
 
       allow update: if isValidId(commentId)
         && isValidComment(incoming())
@@ -589,6 +621,11 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && (
           (
+            isAdmin()
+            && counterId in ['tool', 'user_serial']
+            && incoming().id == counterId
+          ) ||
+          (
             counterId == 'tool'
             && incoming().id == 'tool'
             && incoming().count == 1
@@ -608,6 +645,10 @@ service cloud.firestore {
         && incoming().updatedAt == request.time
         && incoming().diff(existing()).affectedKeys().hasOnly(['count', 'updatedAt'])
         && (
+          (
+            isAdmin()
+            && counterId in ['tool', 'user_serial']
+          ) ||
           (
             counterId == 'tool'
             && (
@@ -898,6 +939,33 @@ service cloud.firestore {
         && incoming().createdAt == request.time;
       allow update: if false;
       allow delete: if isValidId(runId) && isAdmin();
+    }
+
+    match /system_backups/{backupId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(backupId)
+        && isAdmin()
+        && isValidSystemBackup(incoming())
+        && incoming().id == backupId
+        && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /system_migrations/{migrationId} {
+      allow get, list: if isAdmin();
+      allow create: if isValidId(migrationId)
+        && isAdmin()
+        && isValidSystemMigration(incoming())
+        && incoming().id == migrationId
+        && incoming().appliedAt == request.time;
+      allow update: if isValidId(migrationId)
+        && isAdmin()
+        && isValidSystemMigration(incoming())
+        && incoming().id == existing().id
+        && incoming().version == existing().version
+        && incoming().appliedAt == request.time;
+      allow delete: if false;
     }
   }
 }

@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowDown, Zap, CheckCircle2, ShieldCheck, Sparkles, BookOpen, ThumbsUp } from 'lucide-react';
 import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
-import { api, ApiError } from '../utils/api';
+import { api, ApiError, notifyLikesUpdated } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
-import { getFirebaseUid, logCloudActivity, subscribeToolLikesCloud, toggleToolLikeCloud } from '../utils/cloudStore';
+import { getFirebaseUid, logCloudActivity, toggleToolLikeCloud } from '../utils/cloudStore';
 import { getCachedToolLikes, hasCompletedInitialBootstrap, setFastToolLikes, subscribeFastStore } from '../utils/fastStore';
 
 interface HeroSectionProps {
@@ -48,25 +48,20 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
         .getLikes('tool')
         .then((res) => {
           if (!mounted) return;
+          if (res.quotaDegraded && res.count === 0 && getCachedToolLikes().count > 0) {
+            setApiHasLiked(res.liked);
+            setLikesResolved(true);
+            return;
+          }
           setApiLikesCount(res.count);
           setApiHasLiked(res.liked);
           setLikesResolved(true);
-          setFastToolLikes(res);
+          if (!res.quotaDegraded || res.count > 0) {
+            setFastToolLikes(res);
+          }
         })
         .catch(() => {});
     }
-
-    const unsubCloud = subscribeToolLikesCloud(
-      isCloudUser ? getFirebaseUid() : null,
-      (state) => {
-        if (!mounted) return;
-        setCloudLikesCount(state.count);
-        setCloudHasLiked(state.liked);
-        if (state.count > 0) {
-          setLikesResolved(true);
-        }
-      }
-    );
 
     const onLikesUpdated = (ev: Event) => {
       const detail = (ev as CustomEvent<{ itemKey: string; count: number; liked: boolean }>).detail;
@@ -80,10 +75,9 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
     return () => {
       mounted = false;
       unsubFast();
-      unsubCloud();
       window.removeEventListener('crovo:likes-updated', onLikesUpdated);
     };
-  }, [isCloudUser, user?.id]);
+  }, [user?.id]);
 
   // Finite attention bursts for "تصفح مكتبة الحلول المجانية" (plays 4 times spaced apart, then rests naturally)
   useEffect(() => {
@@ -128,6 +122,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
       setCloudHasLiked(res.liked);
       setLikesResolved(true);
       setFastToolLikes(res);
+      notifyLikesUpdated(res);
       const fbUid = getFirebaseUid();
       if (fbUid) {
         void logCloudActivity(fbUid, {
@@ -159,8 +154,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   return (
     <section className="relative overflow-hidden py-4 sm:py-8 px-3 sm:px-6">
       <div className="max-w-6xl mx-auto clay-card p-5 sm:p-10 relative overflow-hidden text-right border border-white/80">
-        {/* Subtle Ambient Soft Indigo/Purple Glow in Corner */}
-        <div className="absolute top-0 left-0 w-80 h-80 bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-transparent rounded-full blur-3xl pointer-events-none" />
+        {/* Subtle Ambient Soft Indigo/Purple Glow in Corner (zero filter-blur cost) */}
+        <div className="hidden sm:block absolute top-0 left-0 w-80 h-80 bg-[radial-gradient(circle_at_top_left,rgba(99,102,241,0.12),rgba(168,85,247,0.06)_50%,transparent_75%)] pointer-events-none" />
 
         <div className="relative z-10 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-6 sm:gap-8">
           {/* Main Content Side */}

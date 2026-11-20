@@ -27,7 +27,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
             <div className="w-10 h-10 rounded-2xl clay-card flex items-center justify-center p-1.5 shadow-sm">
               <img
                 src="/icon-192.png"
-                alt="Logo"
+                alt="شعار CROVO SPACE — مكتبة الحلول"
                 className="w-full h-full object-contain rounded-xl"
                 onError={(e) => {
                   (e.currentTarget as HTMLElement).style.display = 'none';
@@ -36,10 +36,10 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
             </div>
             <div>
               <span className="text-lg font-bold font-decorative text-slate-900">
-                CROVO SPACE — مكتبة الحلول
+                CROVO SPACE — كروفو سبيس
               </span>
               <div className="text-xs font-bold text-indigo-600 font-decorative mt-0.5">
-                𝕯𝖊𝖛 : عُـمـر صَـبـري
+                تطوير وتصميم: عمر صبري — Omar Sabry
               </div>
             </div>
           </div>
@@ -107,9 +107,11 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
         </p>
 
         <div className="flex flex-col sm:flex-row items-center justify-between text-[11px] text-slate-500 font-medium text-center gap-3">
-          <span>© {new Date().getFullYear()} جميع الحلول والأكواد جاهزة لدعم وحوش البرمجة</span>
+          <span>
+            © {new Date().getFullYear()} CROVO SPACE (كروفو سبيس) — تطوير عمر صبري (Omar Sabry). جميع الحقوق محفوظة.
+          </span>
           <div className="flex items-center gap-3 justify-center text-slate-600">
-            <span>صُنع خصيصاً لمساعدة الطلاب على التفوق والراحة</span>
+            <span>مكتبة حلول QUREO والثقافة المالية للبكالوريا المصرية</span>
             <a
               href="/admin"
               onClick={(e) => {

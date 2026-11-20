@@ -1,9 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { BarChart3, CheckCircle2, Lock, LogIn, ShieldCheck } from 'lucide-react';
-import { api, ApiError, PollState } from '../utils/api';
+import { api, ApiError, AuthUser, PollState } from '../utils/api';
 import {
   getFirebaseUid,
-  subscribeActivePollCloud,
   votePollCloud,
 } from '../utils/cloudStore';
 import { useAuth } from '../context/AuthContext';
@@ -16,12 +15,26 @@ export const PollSection: React.FC = () => {
   const [loading, setLoading] = useState(() => !getCachedPoll());
   const [submitting, setSubmitting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const lastFetchedAuthUidRef = useRef<string | null | undefined>(undefined);
 
   const loadPoll = useCallback(async () => {
     try {
       const data = await api.getPoll();
+      if (data.quotaDegraded && data.totalVotes === 0) {
+        const cached = getCachedPoll();
+        if (cached && cached.totalVotes > 0) {
+          setPoll(cached);
+          setError(null);
+          return;
+        }
+        setPoll((prev) => (prev && prev.totalVotes > 0 ? prev : data));
+        setError(null);
+        return;
+      }
       setPoll(data);
-      setFastPoll(data);
+      if (!data.quotaDegraded || data.totalVotes > 0) {
+        setFastPoll(data);
+      }
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تحميل التصويت.');
@@ -39,21 +52,24 @@ export const PollSection: React.FC = () => {
       }
     });
 
-    if (user?.id || (hasCompletedInitialBootstrap() && !getCachedPoll())) {
+    const currentUid = user?.id || null;
+    if (
+      lastFetchedAuthUidRef.current !== currentUid &&
+      (Boolean(currentUid) || (hasCompletedInitialBootstrap() && !getCachedPoll()))
+    ) {
+      lastFetchedAuthUidRef.current = currentUid;
       void loadPoll();
     }
 
-    const unsubCloud = subscribeActivePollCloud(getFirebaseUid(), (cp) => {
-      setCloudPoll(cp);
-      setLoading(false);
-    });
-    const onAuthChanged = () => {
+    const onAuthChanged = (ev: Event) => {
+      const nextUid = ((ev as CustomEvent<AuthUser | null>).detail?.id) || null;
+      if (nextUid === lastFetchedAuthUidRef.current) return;
+      lastFetchedAuthUidRef.current = nextUid;
       void loadPoll();
     };
     window.addEventListener('crovo:auth-updated', onAuthChanged);
     return () => {
       unsubFast();
-      unsubCloud();
       window.removeEventListener('crovo:auth-updated', onAuthChanged);
     };
   }, [loadPoll, user?.id]);

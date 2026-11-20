@@ -86,6 +86,8 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
       }
   );
 
+  const [isAdExpanded, setIsAdExpanded] = useState(false);
+
   const loadStats = useCallback(async () => {
     try {
       const statsData = await api.getQuestionStats().catch(() => fetchQuestionStatsCloud());
@@ -216,53 +218,56 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
     }
   };
 
-  const handleCopyRecorded = async (
-    questionKey: string,
-    questionTitle: string,
-    chapterNum: number,
-    qIndex: number
-  ) => {
-    setStats((prev) => ({
-      ...prev,
-      totalCopies: prev.totalCopies + 1,
-      copyCounts: {
-        ...prev.copyCounts,
-        [questionKey]: (prev.copyCounts[questionKey] || 0) + 1,
-      },
-    }));
-
-    if (onCopyTrigger) {
-      onCopyTrigger();
-    }
-
-    try {
-      const saved = await api.recordQuestionCopy({
-        questionKey,
-        grade: academicGrade,
-        section: activeSection,
-        chapterNum,
-        qIndex,
-        questionTitle,
-      });
+  const handleCopyRecorded = useCallback(
+    async (
+      questionKey: string,
+      questionTitle: string,
+      chapterNum: number,
+      qIndex: number
+    ) => {
       setStats((prev) => ({
         ...prev,
+        totalCopies: prev.totalCopies + 1,
         copyCounts: {
           ...prev.copyCounts,
-          [saved.questionKey]: Math.max(prev.copyCounts[saved.questionKey] || 0, saved.copyCount),
+          [questionKey]: (prev.copyCounts[questionKey] || 0) + 1,
         },
       }));
-      void loadStats();
-    } catch {
-      void incrementQuestionCopyCloud({
-        questionKey,
-        grade: academicGrade,
-        section: activeSection,
-        chapterNum,
-        qIndex,
-        questionTitle,
-      });
-    }
-  };
+
+      if (onCopyTrigger) {
+        onCopyTrigger();
+      }
+
+      try {
+        const saved = await api.recordQuestionCopy({
+          questionKey,
+          grade: academicGrade,
+          section: activeSection,
+          chapterNum,
+          qIndex,
+          questionTitle,
+        });
+        setStats((prev) => ({
+          ...prev,
+          copyCounts: {
+            ...prev.copyCounts,
+            [saved.questionKey]: Math.max(prev.copyCounts[saved.questionKey] || 0, saved.copyCount),
+          },
+        }));
+        void loadStats();
+      } catch {
+        void incrementQuestionCopyCloud({
+          questionKey,
+          grade: academicGrade,
+          section: activeSection,
+          chapterNum,
+          qIndex,
+          questionTitle,
+        });
+      }
+    },
+    [academicGrade, activeSection, onCopyTrigger, loadStats]
+  );
 
   const handleJumpToPopularQuestion = (item: QuestionStatsResponse['topQuestions'][number]) => {
     if (item.grade !== academicGrade) {
@@ -613,26 +618,79 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
                 </div>
               </div>
             ) : (
-              displayedQuestions.map((entry) => (
-                <QuestionCard
-                  key={entry.questionKey}
-                  question={entry.question}
-                  index={entry.qIdx}
-                  chapterIndex={entry.chapterIdx}
-                  chapterNum={entry.chapterNum}
-                  grade={academicGrade}
-                  section={activeSection}
-                  questionKey={entry.questionKey}
-                  copyCount={entry.copyCount}
-                  chapterBadge={
-                    searchAllChapters && debouncedSearch.trim()
-                      ? `${activeSection === 'js' ? 'المستوى' : 'الفصل'} ${entry.chapterNum}`
-                      : undefined
-                  }
-                  isCompleted={entry.isCompleted}
-                  onComplete={() => onCompleteQuestion(entry.questionKey)}
-                  onCopyRecorded={handleCopyRecorded}
-                />
+              displayedQuestions.map((entry, idx) => (
+                <React.Fragment key={entry.questionKey}>
+                  <QuestionCard
+                    question={entry.question}
+                    index={entry.qIdx}
+                    chapterIndex={entry.chapterIdx}
+                    chapterNum={entry.chapterNum}
+                    grade={academicGrade}
+                    section={activeSection}
+                    questionKey={entry.questionKey}
+                    copyCount={entry.copyCount}
+                    chapterBadge={
+                      searchAllChapters && debouncedSearch.trim()
+                        ? `${activeSection === 'js' ? 'المستوى' : 'الفصل'} ${entry.chapterNum}`
+                        : undefined
+                    }
+                    isCompleted={entry.isCompleted}
+                    onCompleteKey={onCompleteQuestion}
+                    onCopyRecorded={handleCopyRecorded}
+                  />
+
+                  {idx === 0 && (
+                    <div className="clay-card p-3.5 sm:p-4 bg-gradient-to-r from-indigo-50/90 via-sky-50/80 to-purple-50/90 border border-indigo-200/70 text-right space-y-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsAdExpanded(!isAdExpanded)}
+                        className="w-full flex items-center justify-between gap-2 text-right focus:outline-none"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl clay-apple-blue flex items-center justify-center shrink-0 shadow-sm">
+                            <Zap className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 fill-amber-300" />
+                          </div>
+                          <span className="text-xs sm:text-sm font-bold font-ios text-slate-900">
+                            إعلان ترويجي للأداة (اضغط للعرض)
+                          </span>
+                        </div>
+                        <span className="text-xs font-bold text-indigo-600 font-mono px-2 py-0.5 rounded-lg clay-inset">
+                          {isAdExpanded ? 'إخفاء ▲' : 'عرض ▼'}
+                        </span>
+                      </button>
+
+                      {isAdExpanded && (
+                        <div className="pt-2 border-t border-indigo-200/50 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 text-right">
+                          <div>
+                            <div className="text-xs sm:text-sm font-bold font-ios text-slate-900">
+                              عايز تخلص كل الفصول دي في 4 دقايق بمحاكاة بشرية تامة؟
+                            </div>
+                            <p className="text-[11px] sm:text-xs text-slate-600 font-ios mt-0.5 leading-relaxed">
+                              أداتي بتسجل كأنك أنت بالظبط وتكتب وتجاوب بنعومة تامة بدون كشفك في المنصة.
+                            </p>
+                          </div>
+                          <div className="flex flex-row items-center gap-2 shrink-0 w-full sm:w-auto">
+                            <button
+                              type="button"
+                              onClick={onOpenToolDetails}
+                              className="clay-btn flex-1 sm:flex-initial py-1.5 px-3 text-xs font-bold text-indigo-600 font-ios text-center whitespace-nowrap"
+                            >
+                              شرح الميكانيزم
+                            </button>
+                            <button
+                              type="button"
+                              onClick={onOpenSubscription}
+                              className="clay-whatsapp flex-1 sm:flex-initial px-3.5 py-1.5 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 font-ios whitespace-nowrap"
+                            >
+                              <WhatsAppIcon className="w-4 h-4" />
+                              <span>عاوز اشترك يخوياااا</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </React.Fragment>
               ))
             )}
           </div>
@@ -660,43 +718,6 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
             >
               المستوى القادم
             </button>
-          </div>
-
-          {/* 5. Non-intrusive Tool Promo Card below Questions */}
-          <div className="clay-card p-4 sm:p-5 bg-gradient-to-r from-indigo-50/90 via-sky-50/80 to-purple-50/90 border border-indigo-200/70 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 sm:gap-4 text-right">
-            <div className="flex items-start sm:items-center gap-3">
-              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-2xl clay-apple-blue flex items-center justify-center shrink-0 shadow-md">
-                <Zap className="w-4 h-4 sm:w-5 sm:h-5 text-amber-300 fill-amber-300" />
-              </div>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs sm:text-sm font-bold font-ios text-slate-900">
-                    عايز تخلص كل الفصول دي في 4 دقايق بمحاكاة بشرية تامة؟
-                  </span>
-                </div>
-                <p className="text-[11px] sm:text-xs text-slate-600 font-ios mt-0.5 leading-relaxed">
-                  أداتي بتسجل كأنك أنت بالظبط وتكتب وتجاوب بنعومة تامة بدون كشفك في المنصة.
-                </p>
-              </div>
-            </div>
-
-            <div className="flex flex-row items-center gap-2 shrink-0 w-full sm:w-auto">
-              <button
-                type="button"
-                onClick={onOpenToolDetails}
-                className="clay-btn flex-1 sm:flex-initial py-2 px-3 text-xs font-bold text-indigo-600 font-ios text-center whitespace-nowrap"
-              >
-                شرح الميكانيزم
-              </button>
-              <button
-                type="button"
-                onClick={onOpenSubscription}
-                className="clay-whatsapp flex-1 sm:flex-initial px-3.5 py-2 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 font-ios whitespace-nowrap"
-              >
-                <WhatsAppIcon className="w-4 h-4" />
-                <span>عاوز اشترك يخوياااا</span>
-              </button>
-            </div>
           </div>
 
           {/* 6. Real Most Copied Questions Strip */}

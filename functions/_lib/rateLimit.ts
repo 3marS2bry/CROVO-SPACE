@@ -1,7 +1,7 @@
 // Distributed Cloudflare KV fixed-window rate limiter (free-tier safe: 0 KV writes on GET)
 // Falls back gracefully to in-memory Map in local Node dev/test environments.
 
-import type { Env } from './types';
+import type { Env } from './types.ts';
 
 export interface RateLimitResult {
   allowed: boolean;

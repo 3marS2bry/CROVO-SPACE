@@ -13,7 +13,7 @@ import { PollSection } from './components/PollSection';
 import { NotificationPrompt } from './components/NotificationPrompt';
 import { CopyAdBanner } from './components/CopyAdBanner';
 import { ContactFooter } from './components/ContactFooter';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import { TelegramModalProvider } from './context/TelegramModalContext';
 import { AuthModal } from './components/AuthModal';
 import { OptionalWelcomeBanner } from './components/OptionalWelcomeBanner';
@@ -24,11 +24,6 @@ import { CommentsSection } from './components/CommentsSection';
 import { HelpCenterSection } from './components/HelpCenterSection';
 import { AcademicGrade, Chapter, SectionType } from './types';
 import { api, PublicConfig } from './utils/api';
-import {
-  LibraryOverrideItem,
-  subscribeLibraryOverridesCloud,
-  subscribeSiteConfigCloud,
-} from './utils/cloudStore';
 import {
   ensureBootstrap,
   getCachedConfig,
@@ -137,10 +132,10 @@ const SectionSkeleton: React.FC = () => (
 );
 
 function AppContent() {
+  useAuth();
   const [activeView, setActiveView] = useState<AppView>(resolveInitialView);
 
   const [siteConfig, setSiteConfig] = useState<PublicConfig | null>(() => getCachedConfig());
-  const [cloudConfigPatch, setCloudConfigPatch] = useState<Partial<PublicConfig> | null>(null);
   const [serverOffsetMs, setServerOffsetMs] = useState<number>(() => {
     const cached = getCachedConfig();
     if (cached?.serverTime) {
@@ -153,6 +148,9 @@ function AppContent() {
   const loadSiteConfig = useCallback(async () => {
     try {
       const cfg = await api.getConfig();
+      if (cfg.quotaDegraded && getCachedConfig()) {
+        return;
+      }
       setFastConfig(cfg);
       setSiteConfig(cfg);
       const serverMs = Date.parse(cfg.serverTime);
@@ -175,14 +173,10 @@ function AppContent() {
         }
       }
     });
-    const timer = window.setInterval(loadSiteConfig, 60000);
-    const unsubCloud = subscribeSiteConfigCloud((patch) => {
-      setCloudConfigPatch(patch);
-    });
+    const timer = window.setInterval(loadSiteConfig, 120000);
     return () => {
       unsubFast();
       window.clearInterval(timer);
-      unsubCloud();
     };
   }, [loadSiteConfig]);
 
@@ -202,20 +196,11 @@ function AppContent() {
 
   const effectiveConfig: PublicConfig | null = React.useMemo(() => {
     if (!siteConfig) return null;
-    if (!cloudConfigPatch) return siteConfig;
-    const merged: PublicConfig = {
+    return {
       ...siteConfig,
-      ...cloudConfigPatch,
-      libraryAd: cloudConfigPatch.libraryAd
-        ? { ...siteConfig.libraryAd, ...cloudConfigPatch.libraryAd }
-        : siteConfig.libraryAd,
-      promoBanner: cloudConfigPatch.promoBanner
-        ? { ...(siteConfig.promoBanner || { enabled: true, text: '' }), ...cloudConfigPatch.promoBanner }
-        : siteConfig.promoBanner,
+      offerActive: isOfferActiveClient(siteConfig, Date.now() + serverOffsetMs),
     };
-    merged.offerActive = isOfferActiveClient(merged, Date.now() + serverOffsetMs);
-    return merged;
-  }, [siteConfig, cloudConfigPatch, serverOffsetMs]);
+  }, [siteConfig, serverOffsetMs]);
 
   useEffect(() => {
     applyRouteSeo(activeView);
@@ -291,41 +276,12 @@ function AppContent() {
   const [chapters, setChapters] = useState<Chapter[]>(() => {
     return getCachedLibrary(academicGrade, effectiveSection) || [];
   });
-  const [libraryOverrides, setLibraryOverrides] = useState<LibraryOverrideItem[]>([]);
   const [loadingChapters, setLoadingChapters] = useState<boolean>(() => {
     const cached = getCachedLibrary(academicGrade, effectiveSection);
     return !(cached && cached.length > 0);
   });
 
-  useEffect(() => {
-    return subscribeLibraryOverridesCloud((items) => {
-      setLibraryOverrides(items);
-    });
-  }, []);
-
-  const effectiveChapters = React.useMemo(() => {
-    if (libraryOverrides.length === 0) return chapters;
-    const relevant = libraryOverrides.filter(
-      (item) => item.grade === academicGrade && item.section === effectiveSection
-    );
-    if (relevant.length === 0) return chapters;
-
-    const cloned = chapters.map((ch) => ({ ...ch, qs: [...ch.qs] }));
-    for (const ov of relevant) {
-      const ch = cloned.find((c) => c.num === ov.chapterNum);
-      if (!ch) continue;
-      if (ov.deleted) {
-        if (ov.qIndex >= 0 && ov.qIndex < ch.qs.length) {
-          ch.qs = ch.qs.filter((_, idx) => idx !== ov.qIndex);
-        }
-      } else if (ov.qIndex >= 0 && ov.qIndex < ch.qs.length) {
-        ch.qs[ov.qIndex] = { q: ov.qText, a: ov.aText, code: ov.isCode };
-      } else {
-        ch.qs.push({ q: ov.qText, a: ov.aText, code: ov.isCode });
-      }
-    }
-    return cloned;
-  }, [chapters, libraryOverrides, academicGrade, effectiveSection]);
+  const effectiveChapters = chapters;
 
   const loadLibrarySection = useCallback(
     async (grade: AcademicGrade, section: SectionType, signal?: AbortSignal, bypassCache = false) => {
@@ -396,16 +352,17 @@ function AppContent() {
   );
 
   useEffect(() => {
-    if (activeView === 'admin') {
-      if (!siteConfig) {
-        void loadSiteConfig();
-      }
-      return;
+    if (activeView === 'admin' && !siteConfig) {
+      void loadSiteConfig();
     }
+  }, [activeView, siteConfig, loadSiteConfig]);
+
+  useEffect(() => {
+    if (activeView === 'admin') return;
     const controller = new AbortController();
     loadLibrarySection(academicGrade, effectiveSection, controller.signal);
     return () => controller.abort();
-  }, [academicGrade, effectiveSection, activeView, loadLibrarySection, siteConfig, loadSiteConfig]);
+  }, [academicGrade, effectiveSection, activeView, loadLibrarySection]);
 
   const [isSubModalOpen, setIsSubModalOpen] = useState(false);
   const [isQuranModalOpen, setIsQuranModalOpen] = useState(false);
@@ -564,6 +521,7 @@ function AppContent() {
 
   const handleAdminConfigUpdated = useCallback(() => {
     libraryCacheRef.current.clear();
+    sessionSyncedSectionsRef.current.clear();
     loadSiteConfig();
     loadLibrarySection(academicGrade, effectiveSection, undefined, true);
   }, [loadSiteConfig, loadLibrarySection, academicGrade, effectiveSection]);

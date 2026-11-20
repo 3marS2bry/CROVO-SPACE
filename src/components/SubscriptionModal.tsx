@@ -933,14 +933,20 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                   {platformUsername}
                 </span>
               </div>
+              {pricing.offerApplied && pricing.oldPrice > pricing.finalPrice && (
+                <div className="flex justify-between gap-2">
+                  <span className="text-slate-500">السعر قبل الخصم:</span>
+                  <span className="font-mono line-through text-slate-400">
+                    {pricing.oldPrice} جنيه
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between gap-2">
-                <span className="text-slate-500">السعر قبل الخصم:</span>
-                <span className="font-mono line-through text-slate-400">
-                  {pricing.oldPrice} جنيه
+                <span className="text-slate-500">
+                  {pricing.offerApplied && pricing.oldPrice > pricing.finalPrice
+                    ? 'السعر بعد الخصم:'
+                    : 'السعر النهائي:'}
                 </span>
-              </div>
-              <div className="flex justify-between gap-2">
-                <span className="text-slate-500">السعر بعد الخصم:</span>
                 <span className="font-mono font-black text-emerald-600">
                   {pricing.finalPrice} جنيه
                 </span>

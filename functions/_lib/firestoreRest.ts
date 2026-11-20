@@ -1,8 +1,8 @@
 // Zero-billing Web-Standard Firestore REST v1 client (zero node:* or Service Account deps)
 // Runs identically in Cloudflare Pages Functions and Node.js Express.
 
-import firebaseConfig from '../../firebase-applet-config.json';
-import type { Env } from './types';
+import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
+import type { Env } from './types.ts';
 
 export interface FirestoreConfig {
   projectId: string;

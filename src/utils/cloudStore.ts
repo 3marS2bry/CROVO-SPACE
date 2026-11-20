@@ -92,10 +92,24 @@ function resolveVerifiedUid(uid?: string | null): string | null {
   return raw === activeUid ? activeUid : null;
 }
 
-export async function getFirebaseIdToken(): Promise<string | null> {
+export async function getFirebaseIdToken(forceRefresh = false): Promise<string | null> {
+  try {
+    await auth.authStateReady();
+  } catch {
+    // ignore init error
+  }
   if (!auth.currentUser) return null;
   try {
-    return await auth.currentUser.getIdToken();
+    return await auth.currentUser.getIdToken(forceRefresh);
+  } catch {
+    return null;
+  }
+}
+
+export async function getFirebaseIdTokenIfReady(forceRefresh = false): Promise<string | null> {
+  if (!auth.currentUser) return null;
+  try {
+    return await auth.currentUser.getIdToken(forceRefresh);
   } catch {
     return null;
   }
@@ -103,12 +117,39 @@ export async function getFirebaseIdToken(): Promise<string | null> {
 
 const inFlightProfileSyncs = new Map<string, Promise<AuthUser>>();
 let pendingPreferredGrade: 'bac1' | 'bac2' | null = null;
+let pendingPreferredName: string | null = null;
 
 const SERIAL_NUMBER_REGEX = /^CRV-[0-9]{4,}$/;
 
-function isOfflineOrUnavailableError(err: unknown): boolean {
-  const code = (err as { code?: string })?.code || '';
-  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+const PROFILE_CACHE_TTL_MS = 15 * 60_000;
+const ADMIN_PROBE_CACHE_TTL_MS = 15 * 60_000;
+const OWNER_ADMIN_EMAIL = '3mars7bry@gmail.com';
+
+export function isOwnerAdminEmail(email?: string | null, emailVerified?: boolean): boolean {
+  return Boolean(
+    emailVerified &&
+      typeof email === 'string' &&
+      email.trim().toLowerCase() === OWNER_ADMIN_EMAIL
+  );
+}
+
+export function isFirestoreQuotaError(err: unknown): boolean {
+  const code = String((err as { code?: string })?.code || '').toLowerCase();
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    msg.includes('resource-exhausted') ||
+    msg.includes('resource_exhausted') ||
+    msg.includes('quota exceeded') ||
+    msg.includes('quota') ||
+    msg.includes('429')
+  );
+}
+
+function isOfflineUnavailableOrQuotaError(err: unknown): boolean {
+  if (isFirestoreQuotaError(err)) return true;
+  const code = String((err as { code?: string })?.code || '').toLowerCase();
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
   return (
     code === 'unavailable' ||
     msg.includes('the client is offline') ||
@@ -116,6 +157,53 @@ function isOfflineOrUnavailableError(err: unknown): boolean {
     msg.includes('could not reach cloud firestore backend') ||
     msg.includes('unavailable')
   );
+}
+
+function readCachedCloudProfile(uid: string): AuthUser | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(`crovo_cloud_profile_${uid}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { savedAt?: number; user?: AuthUser };
+    if (!parsed?.user || Date.now() - Number(parsed.savedAt || 0) > PROFILE_CACHE_TTL_MS) {
+      return null;
+    }
+    return parsed.user;
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedCloudProfile(uid: string, user: AuthUser): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      `crovo_cloud_profile_${uid}`,
+      JSON.stringify({ savedAt: Date.now(), user })
+    );
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+function hasRecentNegativeAdminProbe(uid: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = window.localStorage.getItem(`crovo_admin_probe_${uid}`);
+    if (!raw) return false;
+    return Date.now() - Number(raw) < ADMIN_PROBE_CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+function recordNegativeAdminProbe(uid: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(`crovo_admin_probe_${uid}`, String(Date.now()));
+  } catch {
+    // ignore
+  }
 }
 
 function normalizeSerialNumber(val: unknown): string | null {
@@ -153,13 +241,31 @@ export async function syncCloudUserProfile(
 ): Promise<AuthUser> {
   const uid = fbUser.uid;
   const existingPromise = inFlightProfileSyncs.get(uid);
-  if (existingPromise) {
+  if (existingPromise && !preferredGrade && !preferredName && !serialNumber) {
     return existingPromise;
+  }
+  if (existingPromise) {
+    try {
+      await existingPromise;
+    } catch {
+      // proceed to re-sync with explicit preferences
+    }
   }
 
   const effectiveGrade: 'bac1' | 'bac2' =
     preferredGrade || pendingPreferredGrade || 'bac1';
+  const effectivePreferredName = (preferredName || pendingPreferredName || '').trim();
   const validSerial = normalizeSerialNumber(serialNumber);
+
+  const isOwnerUser = isOwnerAdminEmail(fbUser.email, fbUser.emailVerified);
+
+  // Use cached profile on routine reloads when no explicit profile edits were requested
+  if (!preferredGrade && !preferredName && !validSerial && !pendingPreferredGrade && !pendingPreferredName) {
+    const cached = readCachedCloudProfile(uid);
+    if (cached && cached.status === 'active') {
+      return isOwnerUser && cached.role !== 'admin' ? { ...cached, role: 'admin' } : cached;
+    }
+  }
 
   const syncTask = (async (): Promise<AuthUser> => {
     const userPath = `users/${uid}`;
@@ -167,47 +273,51 @@ export async function syncCloudUserProfile(
 
     let existingSnap;
     try {
-      try {
-        existingSnap = await getDocFromServer(userRef);
-      } catch (serverErr) {
-        if (isOfflineOrUnavailableError(serverErr)) {
-          existingSnap = await getDoc(userRef);
-        } else {
-          throw serverErr;
-        }
-      }
+      existingSnap = await getDoc(userRef);
     } catch (err) {
-      if (isOfflineOrUnavailableError(err)) {
+      if (isOfflineUnavailableOrQuotaError(err)) {
+        const cached = readCachedCloudProfile(uid);
+        if (cached) {
+          return isOwnerUser && cached.role !== 'admin' ? { ...cached, role: 'admin' } : cached;
+        }
         return buildImmediateAuthUser(fbUser, effectiveGrade);
       }
       handleFirestoreError(err, OperationType.GET, userPath);
     }
 
     const normalizedEmail = (fbUser.email || '').trim().toLowerCase().slice(0, 160);
-    const displayName = (preferredName || fbUser.displayName || normalizedEmail.split('@')[0] || 'طالب CROVO')
+    const displayName = (effectivePreferredName || fbUser.displayName || normalizedEmail.split('@')[0] || 'طالب CROVO')
       .trim()
       .slice(0, 80);
     const safeName = displayName.length >= 2 ? displayName : `${displayName} طالب`;
     const safeEmail = normalizedEmail.length >= 3 ? normalizedEmail : `${uid}@users.crovo.local`.slice(0, 160);
 
-    let isAdminBootstrap = false;
-    try {
-      const adminMarkerRef = doc(db, 'admins', uid);
-      const adminMarkerSnap = await getDoc(adminMarkerRef);
-      if (adminMarkerSnap.exists()) {
-        isAdminBootstrap = true;
-      } else if (fbUser.emailVerified) {
-        // Probe list /admins: only succeeds if firestore.rules isAdmin() passes for this verified user
-        await getDocs(query(collection(db, 'admins'), limit(1)));
-        isAdminBootstrap = true;
-        await setDoc(adminMarkerRef, {
-          uid,
-          email: safeEmail,
-          createdAt: serverTimestamp(),
-        }).catch(() => {});
+    const isOwnerEmail = isOwnerAdminEmail(normalizedEmail, fbUser.emailVerified);
+    const existingDocRole = existingSnap.exists() ? existingSnap.data().role : null;
+    let isAdminBootstrap = isOwnerEmail || existingDocRole === 'admin';
+
+    if (!isAdminBootstrap && existingSnap.exists() && fbUser.emailVerified && !hasRecentNegativeAdminProbe(uid)) {
+      try {
+        const adminMarkerRef = doc(db, 'admins', uid);
+        const adminMarkerSnap = await getDoc(adminMarkerRef);
+        if (adminMarkerSnap.exists()) {
+          isAdminBootstrap = true;
+        } else {
+          recordNegativeAdminProbe(uid);
+        }
+      } catch (err) {
+        isAdminBootstrap = false;
+        if (!isOfflineUnavailableOrQuotaError(err)) {
+          recordNegativeAdminProbe(uid);
+        }
       }
-    } catch {
-      isAdminBootstrap = false;
+    } else if (isOwnerEmail) {
+      // Ensure admins/{uid} marker exists in Firestore best-effort without blocking or burning probes
+      void setDoc(
+        doc(db, 'admins', uid),
+        { uid, email: safeEmail, createdAt: serverTimestamp() },
+        { merge: true }
+      ).catch(() => {});
     }
 
     if (!existingSnap.exists()) {
@@ -249,29 +359,32 @@ export async function syncCloudUserProfile(
           }
           return nextSerial;
         });
-      } catch {
+      } catch (txErr) {
+        if (isOfflineUnavailableOrQuotaError(txErr)) {
+          return readCachedCloudProfile(uid) || buildImmediateAuthUser(fbUser, effectiveGrade);
+        }
         // Fallback single-doc create if transaction contended or counter blocked
         try {
           if (validSerial) basePayload.serialNumber = validSerial;
           await setDoc(userRef, basePayload);
           assignedSerial = validSerial;
         } catch (err) {
+          if (isOfflineUnavailableOrQuotaError(err)) {
+            return readCachedCloudProfile(uid) || buildImmediateAuthUser(fbUser, effectiveGrade);
+          }
           try {
             const recheckSnap = await getDocFromServer(userRef);
             if (recheckSnap.exists()) {
               return mapUserProfileDoc(uid, recheckSnap.data(), safeName, safeEmail, isAdminBootstrap);
             }
           } catch {
-            // Fall through to offline/structured error handling below
-          }
-          if (isOfflineOrUnavailableError(err)) {
-            return buildImmediateAuthUser(fbUser, effectiveGrade);
+            // Fall through to structured error handling below
           }
           handleFirestoreError(err, OperationType.CREATE, userPath);
         }
       }
 
-      return {
+      const createdUser: AuthUser = {
         id: uid,
         serialNumber: assignedSerial,
         name: safeName,
@@ -281,6 +394,8 @@ export async function syncCloudUserProfile(
         status: 'active',
         suspendReason: null,
       };
+      writeCachedCloudProfile(uid, createdUser);
+      return createdUser;
     }
 
     const existingData = existingSnap.data();
@@ -311,6 +426,7 @@ export async function syncCloudUserProfile(
         // Non-fatal fallback
       }
     }
+    writeCachedCloudProfile(uid, mapped);
     return mapped;
   })();
 
@@ -323,10 +439,19 @@ export async function syncCloudUserProfile(
 }
 
 function mapFirebaseAuthError(err: unknown): Error {
-  const code = (err as { code?: string })?.code || '';
+  const rawCode = String((err as { code?: string })?.code || '');
+  const rawMsg = err instanceof Error ? err.message : String(err || '');
+  const code = rawCode || (rawMsg.match(/\(?(auth\/[a-z0-9-]+)\)?/i)?.[1] || '').toLowerCase();
+
+  if (code === 'auth/operation-not-allowed' || rawMsg.includes('PASSWORD_LOGIN_DISABLED')) {
+    return new Error(
+      'تسجيل الدخول بالبريد الإلكتروني وكلمة المرور غير مفعّل حالياً في إعدادات Firebase Authentication — اضغط على «المتابعة باستخدام حساب Google» بالأعلى للدخول الفوري.'
+    );
+  }
+
   switch (code) {
     case 'auth/email-already-in-use':
-      return new Error('البريد الإلكتروني مستخدم بالفعل. جرّب تسجيل الدخول أو التحقق من كلمة المرور.');
+      return new Error('البريد الإلكتروني مستخدم بالفعل. جرّب تسجيل الدخول أو استخدم حساب Google.');
     case 'auth/invalid-credential':
     case 'auth/wrong-password':
     case 'auth/user-not-found':
@@ -335,11 +460,30 @@ function mapFirebaseAuthError(err: unknown): Error {
       return new Error('كلمة المرور ضعيفة، يجب أن تكون 6 أحرف أو أرقام على الأقل.');
     case 'auth/invalid-email':
       return new Error('صيغة البريد الإلكتروني غير صحيحة.');
+    case 'auth/popup-blocked':
+      return new Error('المتصفح منع النافذة المنبثقة لتسجيل الدخول بحساب Google. اسمح بالـ Popups لهذا الموقع ثم أعد المحاولة.');
+    case 'auth/popup-closed-by-user':
+      return new Error('تم إغلاق نافذة تسجيل الدخول بحساب Google قبل إتمام العملية.');
+    case 'auth/cancelled-popup-request':
+      return new Error('تم فتح أكثر من نافذة دخول في نفس الوقت — انتظر لحظة وحاول مرة واحدة.');
+    case 'auth/unauthorized-domain':
+      return new Error(
+        `هذا النطاق (${typeof window !== 'undefined' ? window.location.hostname : ''}) غير مضاف ضمن Authorized Domains في Firebase Authentication.`
+      );
+    case 'auth/operation-not-supported-in-this-environment':
+      return new Error('بيئة المتصفح الحالية لا تدعم نافذة Google المنبثقة. افتح الموقع في نافذة مستقلة ثم سجّل الدخول.');
+    case 'auth/account-exists-with-different-credential':
+      return new Error('هذا البريد مرتبط بطريقة دخول أخرى. جرّب الدخول باستخدام حساب Google.');
+    case 'auth/user-disabled':
+      return new Error('تم تعطيل هذا الحساب من قِبل الإدارة.');
     case 'auth/too-many-requests':
       return new Error('تم حظر المحاولات مؤقتاً بسبب كثرة التجارب، حاول بعد دقائق.');
     case 'auth/network-request-failed':
       return new Error('تعذر الاتصال بخدمة المصادقة. تأكد من اتصالك بالإنترنت وحاول تاني.');
     default:
+      if (isFirestoreQuotaError(err)) {
+        return new Error('تم بلوغ الحد اليومي لقراءة Firestore مؤقتاً، لكن يمكنك المتابعة بحساب Google.');
+      }
       return err instanceof Error ? err : new Error('تعذر إتمام عملية المصادقة عبر Firebase.');
   }
 }
@@ -351,6 +495,8 @@ export async function registerWithEmailCloud(payload: {
   grade: 'bac1' | 'bac2';
   serialNumber?: string | null;
 }): Promise<AuthUser> {
+  pendingPreferredGrade = payload.grade;
+  pendingPreferredName = payload.name.trim() || null;
   try {
     let user: User;
     try {
@@ -359,8 +505,14 @@ export async function registerWithEmailCloud(payload: {
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code;
       if (code === 'auth/email-already-in-use') {
-        const cred = await signInWithEmailAndPassword(auth, payload.email.trim(), payload.password);
-        user = cred.user;
+        try {
+          const cred = await signInWithEmailAndPassword(auth, payload.email.trim(), payload.password);
+          user = cred.user;
+        } catch {
+          throw new Error(
+            'هذا البريد الإلكتروني مسجّل بالفعل بكلمة مرور مختلفة. انتقل إلى تبويب «لديّ حساب» لتسجيل الدخول أو استخدم Google.'
+          );
+        }
       } else {
         throw err;
       }
@@ -371,6 +523,9 @@ export async function registerWithEmailCloud(payload: {
     return await syncCloudUserProfile(user, payload.grade, payload.serialNumber, payload.name);
   } catch (err) {
     throw mapFirebaseAuthError(err);
+  } finally {
+    pendingPreferredGrade = null;
+    pendingPreferredName = null;
   }
 }
 
@@ -443,13 +598,14 @@ function buildImmediateAuthUser(fbUser: User, preferredGrade: 'bac1' | 'bac2' = 
     .trim()
     .slice(0, 80);
   const safeName = displayName.length >= 2 ? displayName : `${displayName} طالب`;
+  const isOwner = isOwnerAdminEmail(normalizedEmail, fbUser.emailVerified);
   return {
     id: fbUser.uid,
     serialNumber: null,
     name: safeName,
     email: normalizedEmail,
     grade: preferredGrade,
-    role: 'user',
+    role: isOwner ? 'admin' : 'user',
     status: 'active',
     suspendReason: null,
   };
@@ -476,82 +632,34 @@ function isFedCmAllowedInDocument(): boolean {
   }
 }
 
-export function launchInstantGoogleChooser(options: {
+export function launchInstantGoogleChooser(_options: {
   preferredGrade?: 'bac1' | 'bac2';
   onSignedIn: (user: AuthUser) => void;
 }): () => void {
   prewarmGoogleAuth();
-  const preferredGrade = options.preferredGrade || 'bac1';
-  if (!FIREBASE_OAUTH_CLIENT_ID || typeof window === 'undefined' || !isFedCmAllowedInDocument()) {
-    return () => {};
-  }
-
-  let cancelled = false;
-  let attempts = 0;
-
-  const tryInit = () => {
-    if (cancelled) return;
-    const accounts = getWindowGoogleGsi();
-    if (!accounts) {
-      if (attempts < 15) {
-        attempts += 1;
-        window.setTimeout(tryInit, 120);
-      }
-      return;
-    }
-
-    try {
-      accounts.id.initialize({
-        client_id: FIREBASE_OAUTH_CLIENT_ID,
-        auto_select: false,
-        cancel_on_tap_outside: true,
-        context: 'signin',
-        itp_support: true,
-        use_fedcm_for_prompt: true,
-        callback: async (response) => {
-          if (cancelled || !response.credential) return;
-          try {
-            pendingPreferredGrade = preferredGrade;
-            const cred = GoogleAuthProvider.credential(response.credential);
-            const result = await signInWithCredential(auth, cred);
-            void syncCloudUserProfile(result.user, preferredGrade).catch(() => {});
-            options.onSignedIn(buildImmediateAuthUser(result.user, preferredGrade));
-          } catch {
-            // Silently leave normal & popup button ready if token exchange fails
-          } finally {
-            pendingPreferredGrade = null;
-          }
-        },
-      });
-      accounts.id.prompt();
-    } catch {
-      // Ignore GIS origin / browser restrictions cleanly
-    }
-  };
-
-  tryInit();
-
-  return () => {
-    cancelled = true;
-    try {
-      getWindowGoogleGsi()?.id.cancel();
-    } catch {
-      // ignore
-    }
-  };
+  return () => {};
 }
 
 export async function signInWithGoogleCloud(preferredGrade: 'bac1' | 'bac2' = 'bac1'): Promise<AuthUser> {
   pendingPreferredGrade = preferredGrade;
   prewarmGoogleAuth();
   try {
+    getWindowGoogleGsi()?.id.cancel();
+  } catch {
+    // ignore GIS cancel errors
+  }
+  try {
     const credential = await signInWithPopup(auth, googleProvider);
     if (!credential.user.emailVerified) {
       throw new Error('حساب Google غير موثق البريد الإلكتروني.');
     }
-    // Sync Firestore user doc without blocking immediate login completion
-    void syncCloudUserProfile(credential.user, preferredGrade).catch(() => {});
-    return buildImmediateAuthUser(credential.user, preferredGrade);
+    try {
+      return await syncCloudUserProfile(credential.user, preferredGrade);
+    } catch {
+      return buildImmediateAuthUser(credential.user, preferredGrade);
+    }
+  } catch (err) {
+    throw mapFirebaseAuthError(err);
   } finally {
     pendingPreferredGrade = null;
   }
@@ -575,17 +683,7 @@ export function subscribeFirebaseAuth(
       const profile = await syncCloudUserProfile(fbUser);
       onUser(profile, fbUser);
     } catch {
-      onUser(
-        {
-          id: fbUser.uid,
-          name: fbUser.displayName || 'طالب CROVO',
-          email: fbUser.email || '',
-          grade: 'bac1',
-          role: 'user',
-          status: 'active',
-        },
-        fbUser
-      );
+      onUser(buildImmediateAuthUser(fbUser, pendingPreferredGrade || 'bac1'), fbUser);
     }
   });
 }
@@ -622,7 +720,7 @@ function subscribeSharedToolCounter(cb: (count: number) => void): () => void {
         }
       },
       (err) => {
-        if (!isOfflineOrUnavailableError(err)) {
+        if (!isOfflineUnavailableOrQuotaError(err)) {
           handleFirestoreError(err, OperationType.GET, 'counters/tool');
         }
       }
@@ -661,7 +759,7 @@ export function subscribeToolLikesCloud(
         emit();
       },
       (err) => {
-        if (!isOfflineOrUnavailableError(err)) {
+        if (!isOfflineUnavailableOrQuotaError(err)) {
           handleFirestoreError(err, OperationType.GET, `tool_likes/${verifiedUid}`);
         }
       }
@@ -680,7 +778,7 @@ async function getFreshSnap(ref: ReturnType<typeof doc>) {
   try {
     return await getDocFromServer(ref);
   } catch (err) {
-    if (isOfflineOrUnavailableError(err)) {
+    if (isOfflineUnavailableOrQuotaError(err)) {
       return getDoc(ref);
     }
     throw err;
@@ -710,6 +808,9 @@ export async function toggleToolLikeCloud(
     try {
       [counterSnap, likeSnap] = await Promise.all([getFreshSnap(counterRef), getFreshSnap(likeRef)]);
     } catch (err) {
+      if (isFirestoreQuotaError(err)) {
+        throw new Error('تم بلوغ الحد اليومي لقاعدة البيانات مؤقتاً. حاول مرة أخرى لاحقاً.');
+      }
       handleFirestoreError(err, OperationType.GET, 'counters/tool');
     }
 
@@ -847,7 +948,7 @@ export function subscribeCloudComments(
       }
     },
     (err) => {
-      if (isOfflineOrUnavailableError(err)) {
+      if (isOfflineUnavailableOrQuotaError(err)) {
         if (onError) onError(err instanceof Error ? err : new Error(String(err)));
         return;
       }
@@ -858,6 +959,51 @@ export function subscribeCloudComments(
       }
     }
   );
+}
+
+export async function fetchApprovedCommentsCloudOneShot(
+  currentUid?: string | null
+): Promise<CommentItem[]> {
+  const q = query(
+    collection(db, 'comments'),
+    where('status', '==', 'approved'),
+    limit(100)
+  );
+  const snapshot = await getDocs(q);
+  const verifiedUid = resolveVerifiedUid(currentUid || null);
+  return snapshot.docs
+    .map((d) => {
+      const data = d.data();
+      const beforeUrl =
+        typeof data.attachmentBeforeDataUrl === 'string' && data.attachmentBeforeDataUrl
+          ? data.attachmentBeforeDataUrl
+          : null;
+      const afterUrl =
+        typeof data.attachmentAfterDataUrl === 'string' && data.attachmentAfterDataUrl
+          ? data.attachmentAfterDataUrl
+          : null;
+      return {
+        id: d.id,
+        authorName: String(data.authorName || ''),
+        grade: String(data.grade || 'تانية بكالوريا'),
+        rating: Number(data.rating || 5),
+        content: String(data.content || ''),
+        avatarUrl: typeof data.avatarDataUrl === 'string' ? data.avatarDataUrl : null,
+        attachmentUrl: beforeUrl,
+        attachmentBeforeUrl: beforeUrl,
+        attachmentAfterUrl: afterUrl,
+        contactPhone: null,
+        showContactPublicly: false,
+        isVerified: Boolean(data.isVerified),
+        isOwner: Boolean(verifiedUid && data.authorUid === verifiedUid),
+        likesCount: Math.max(0, Number(data.likesCount || 0)),
+        hasLiked: false,
+        createdAt: toIsoString(data.createdAt),
+        updatedAt: data.updatedAt ? toIsoString(data.updatedAt) : null,
+        source: 'cloud' as const,
+      };
+    })
+    .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
 }
 
 export async function createCloudComment(
@@ -1032,6 +1178,9 @@ export async function toggleCloudCommentLike(
     try {
       [commentSnap, likeSnap] = await Promise.all([getFreshSnap(commentRef), getFreshSnap(likeRef)]);
     } catch (err) {
+      if (isFirestoreQuotaError(err)) {
+        throw new Error('تم بلوغ الحد اليومي لقاعدة البيانات مؤقتاً. حاول مرة أخرى لاحقاً.');
+      }
       handleFirestoreError(err, OperationType.GET, `comments/${commentId}`);
     }
 
