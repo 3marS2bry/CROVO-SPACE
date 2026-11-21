@@ -233,7 +233,7 @@ export const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
             <span>محتاج الأداة تحللك البنك كله؟</span>
           </div>
           <p className="text-[11px] text-slate-600 mb-2 leading-relaxed">
-            بتخلّص أي امتحان في 4 دقائق بمحاكاة بشرية تامة. كلمني وأنا هظبطك:
+            بتنفذ المهام بهدوء ومحاكاة بشرية وتوفر عليك ساعات من الحل. كلمني وأنا هظبطك:
           </p>
           <button
             type="button"

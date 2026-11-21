@@ -1,6 +1,9 @@
 import type { ClientPricingConfig, OrderGrade, PlatformChoice, QureoSectionChoice } from './rules';
 import type { AcademicGrade, Chapter, SectionType } from '../types';
 import { getFirebaseIdToken, getFirebaseIdTokenIfReady } from './cloudStore';
+import { classifyApiError, type ApiErrorKind } from './errorClassifier';
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
 
 const VISITOR_TOKEN_STORAGE_KEY = 'crovo_visitor_token';
 const OFFLINE_QUEUE_STORAGE_KEY = 'crovo_offline_queue';
@@ -35,6 +38,22 @@ export interface ToolServiceConfig {
   isVisible: boolean;
 }
 
+export type AdWorkflowStatus = 'draft' | 'preview' | 'approved' | 'published' | 'archived';
+
+export interface LibraryAdDraftConfig {
+  title: string;
+  subtitle: string;
+  priceText: string;
+  ctaText: string;
+  ctaLink?: string;
+  imageUrl?: string;
+  delaySeconds?: number;
+  cooldownHours?: number;
+  templateMode?: 'classic' | 'rich_crovo';
+  workflowStatus: AdWorkflowStatus;
+  updatedAt?: string;
+}
+
 export interface PublicConfig extends ClientPricingConfig {
   ordersEnabled: boolean;
   pollClosed: boolean;
@@ -51,6 +70,8 @@ export interface PublicConfig extends ClientPricingConfig {
     delaySeconds?: number;
     cooldownHours?: number;
     templateMode?: 'classic' | 'rich_crovo';
+    workflowStatus?: AdWorkflowStatus;
+    draft?: LibraryAdDraftConfig | null;
   };
   heroPromo: {
     enabled: boolean;
@@ -136,6 +157,19 @@ export interface QuestionStatsResponse {
   quotaDegraded?: boolean;
 }
 
+export type OrderPaymentStatus = 'pending_verification' | 'paid' | 'unpaid' | 'refunded';
+export type OrderSubscriptionStatus = 'pending_confirmation' | 'active' | 'expired' | 'cancelled';
+
+export interface OrderChangeLogEntry {
+  at: string;
+  by: string;
+  fromStatus: string | null;
+  toStatus: string;
+  paymentStatus?: string;
+  subscriptionStatus?: string;
+  note?: string;
+}
+
 export interface OrderReceipt {
   id: string;
   orderCode: string;
@@ -148,7 +182,18 @@ export interface OrderReceipt {
   offerApplied: boolean;
   paymentMethod: string;
   status: 'new' | 'reviewing' | 'completed' | 'cancelled';
+  paymentStatus?: OrderPaymentStatus;
+  subscriptionStatus?: OrderSubscriptionStatus;
+  serverRecorded?: boolean;
   createdAt: string;
+}
+
+export interface CreateOrderResponse {
+  deduplicated: boolean;
+  savedToServer?: boolean;
+  pendingManualConfirmation?: boolean;
+  dbSaveStatus?: 'saved' | 'quota_exceeded' | 'db_error' | 'timeout' | 'offline';
+  order: OrderReceipt;
 }
 
 export interface AdminAnalyticsResponse {
@@ -406,10 +451,14 @@ if (typeof window !== 'undefined') {
 export class ApiError extends Error {
   status: number;
   requiresAuth?: boolean;
-  constructor(message: string, status: number, requiresAuth?: boolean) {
+  kind: ApiErrorKind;
+  retryable: boolean;
+  constructor(message: string, status: number, requiresAuth?: boolean, kind?: ApiErrorKind, retryable = false) {
     super(message);
     this.status = status;
     this.requiresAuth = requiresAuth;
+    this.kind = kind || classifyApiError(status, message).kind;
+    this.retryable = retryable;
   }
 }
 
@@ -445,7 +494,7 @@ function isPublicFastEndpoint(url: string): boolean {
   );
 }
 
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T>(url: string, init?: RequestInit & { timeoutMs?: number }): Promise<T> {
   const method = (init?.method || 'GET').toUpperCase();
   const canDedupe = method === 'GET' && !init?.signal;
 
@@ -473,11 +522,17 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     if (visitorToken) extraHeaders['X-Crovo-Visitor'] = visitorToken;
     if (idToken) extraHeaders['Authorization'] = `Bearer ${idToken}`;
 
+    const timeoutMs = typeof init?.timeoutMs === 'number' ? init.timeoutMs : DEFAULT_REQUEST_TIMEOUT_MS;
+    const timeoutCtrl = !init?.signal && typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = timeoutCtrl ? setTimeout(() => timeoutCtrl.abort(), timeoutMs) : null;
+
     let response: Response;
     try {
+      const { timeoutMs: _t, ...fetchInit } = init || {};
       response = await fetch(url, {
         credentials: 'include',
-        ...init,
+        ...fetchInit,
+        signal: init?.signal || timeoutCtrl?.signal,
         headers: {
           'Content-Type': 'application/json',
           ...extraHeaders,
@@ -485,14 +540,18 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
         },
       });
     } catch (err) {
+      if (timer) clearTimeout(timer);
       if (err instanceof DOMException && err.name === 'AbortError') {
-        throw err;
+        if (init?.signal?.aborted) {
+          throw err;
+        }
+        const classified = classifyApiError(408, 'Request timed out');
+        throw new ApiError(classified.userMessage, 408, false, 'timeout_error', true);
       }
-      throw new ApiError(
-        'مفيش اتصال بالإنترنت أو الخادم مش متاح حالياً. بياناتك محفوظة، جرب تاني.',
-        0
-      );
+      const classified = classifyApiError(0, err instanceof Error ? err.message : 'Network error');
+      throw new ApiError(classified.userMessage, 0, false, classified.kind, classified.retryable);
     }
+    if (timer) clearTimeout(timer);
 
     const returnedVisitorToken = response.headers.get('X-Crovo-Visitor-Token');
     if (returnedVisitorToken) {
@@ -508,11 +567,22 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
     if (!response.ok) {
       const obj = data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
-      const errMsg =
+      const rawErrMsg =
         obj && typeof obj.error === 'string'
           ? obj.error
           : `حدث خطأ غير متوقع (${response.status}).`;
-      throw new ApiError(errMsg, response.status, Boolean(obj?.requiresAuth));
+      const classified = classifyApiError(response.status, rawErrMsg);
+      const userFriendly =
+        obj && typeof obj.error === 'string' && response.status < 500 && classified.kind !== 'quota_exceeded'
+          ? obj.error
+          : classified.userMessage;
+      throw new ApiError(
+        userFriendly,
+        response.status,
+        Boolean(obj?.requiresAuth),
+        classified.kind,
+        classified.retryable
+      );
     }
 
     return data as T;
@@ -617,6 +687,8 @@ export const api = {
     qIndex: number;
     questionTitle: string;
     description: string;
+    reason?: string;
+    suggestedSolution?: string;
   }) =>
     apiFetch<{ ok: boolean; reportId: string; message: string }>('/api/questions/report', {
       method: 'POST',
@@ -670,12 +742,15 @@ export const api = {
     content: string;
     contactPhone?: string;
     showContactPublicly?: boolean;
+    moderationPending?: boolean;
+    orderCode?: string;
+    source?: 'standard' | 'post_whatsapp';
     avatarDataUrl?: string | null;
     attachmentDataUrl?: string | null;
     attachmentBeforeDataUrl?: string | null;
     attachmentAfterDataUrl?: string | null;
   }) =>
-    apiFetch<{ comment: CommentItem }>('/api/comments', {
+    apiFetch<{ comment: CommentItem; moderationPending?: boolean; message?: string }>('/api/comments', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
@@ -743,9 +818,10 @@ export const api = {
     paymentMethod: string;
     clientRequestId: string;
   }) =>
-    apiFetch<{ deduplicated: boolean; order: OrderReceipt }>('/api/orders', {
+    apiFetch<CreateOrderResponse>('/api/orders', {
       method: 'POST',
       body: JSON.stringify(payload),
+      timeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     }),
 
   // Admin Session (Username/Password + Google/Firebase Auth)
@@ -803,6 +879,11 @@ export const api = {
         offerApplied: boolean;
         paymentMethod: string;
         status: 'new' | 'reviewing' | 'completed' | 'cancelled';
+        paymentStatus?: OrderPaymentStatus;
+        subscriptionStatus?: OrderSubscriptionStatus;
+        source?: string;
+        adminNote?: string | null;
+        changeLog?: OrderChangeLogEntry[];
         createdAt: string;
         updatedAt: string | null;
       }>;
@@ -819,7 +900,9 @@ export const api = {
         contactPhone: string | null;
         showContactPublicly: boolean;
         isVerified: boolean;
-        status: 'approved' | 'hidden' | 'flagged';
+        status: 'approved' | 'pending' | 'hidden' | 'flagged';
+        orderCode?: string | null;
+        source?: string;
         likesCount?: number;
         reportsCount: number;
         reports: Array<{ reason: string; createdAt: string }>;
@@ -834,6 +917,8 @@ export const api = {
         qIndex: number;
         questionTitle: string;
         description: string;
+        reason?: string | null;
+        suggestedSolution?: string | null;
         status: 'pending' | 'reviewed' | 'resolved' | 'dismissed';
         adminNote: string | null;
         createdAt: string;
@@ -914,6 +999,9 @@ export const api = {
     status?: string;
     grade?: string;
     sort?: 'newest' | 'oldest';
+    page?: number;
+    pageSize?: number;
+    all?: boolean;
   }) => {
     const qs = new URLSearchParams();
     if (params?.q) qs.set('q', params.q);
@@ -921,9 +1009,16 @@ export const api = {
     if (params?.status) qs.set('status', params.status);
     if (params?.grade) qs.set('grade', params.grade);
     if (params?.sort) qs.set('sort', params.sort);
+    if (params?.page) qs.set('page', String(params.page));
+    if (params?.pageSize) qs.set('pageSize', String(params.pageSize));
+    if (params?.all) qs.set('all', '1');
     const suffix = qs.toString() ? `?${qs.toString()}` : '';
     return apiFetch<{
       users: AdminUserItem[];
+      page?: number;
+      pageSize?: number;
+      totalMatching?: number;
+      totalPages?: number;
       counts?: { total: number; bac1: number; bac2: number; unclassified: number };
       dbStatus?: DbStatusState;
       dbError?: string | null;
@@ -1113,11 +1208,44 @@ export const api = {
 
   adminAuditLogs: () => apiFetch<{ logs: AdminAuditLogItem[] }>('/api/admin/audit-logs'),
 
+  adminCreateManualOrder: (payload: {
+    orderCode?: string;
+    fullName: string;
+    grade: OrderGrade;
+    platforms: PlatformChoice[];
+    platformUsername: string;
+    paymentMethod?: string;
+    finalPrice?: number;
+    status?: 'new' | 'reviewing' | 'completed' | 'cancelled';
+    paymentStatus?: OrderPaymentStatus;
+    subscriptionStatus?: OrderSubscriptionStatus;
+    adminNote?: string;
+  }) =>
+    apiFetch<{ ok: boolean; order: OrderReceipt }>('/api/admin/orders/manual', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
   adminUpdateOrder: (
     id: string,
-    payload: { status?: 'new' | 'reviewing' | 'completed' | 'cancelled'; purgeCredentials?: boolean }
+    payload: {
+      status?: 'new' | 'reviewing' | 'completed' | 'cancelled';
+      expectedCurrentStatus?: string;
+      paymentStatus?: OrderPaymentStatus;
+      subscriptionStatus?: OrderSubscriptionStatus;
+      adminNote?: string;
+      purgeCredentials?: boolean;
+    }
   ) =>
-    apiFetch<{ ok: boolean; status: string; credentialsPurged: boolean }>(
+    apiFetch<{
+      ok: boolean;
+      status: string;
+      paymentStatus?: OrderPaymentStatus;
+      subscriptionStatus?: OrderSubscriptionStatus;
+      adminNote?: string | null;
+      changeLog?: OrderChangeLogEntry[];
+      credentialsPurged: boolean;
+    }>(
       `/api/admin/orders/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
@@ -1132,7 +1260,7 @@ export const api = {
 
   adminUpdateComment: (
     id: string,
-    payload: { isVerified?: boolean; status?: 'approved' | 'hidden' | 'flagged'; clearReports?: boolean }
+    payload: { isVerified?: boolean; status?: 'approved' | 'pending' | 'hidden' | 'flagged'; clearReports?: boolean }
   ) =>
     apiFetch<{ ok: boolean }>(`/api/admin/comments/${encodeURIComponent(id)}`, {
       method: 'PATCH',

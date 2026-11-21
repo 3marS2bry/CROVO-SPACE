@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppView, Navbar } from './components/Navbar';
 import { PromoTopBanner } from './components/PromoTopBanner';
 import { HeroSection } from './components/HeroSection';
@@ -39,6 +39,11 @@ import {
   shouldShowTimedLibraryAd,
 } from './utils/rules';
 import { applyRouteSeo } from './utils/seo';
+import {
+  isEligibleForReturnReviewPrompt,
+  loadPostWhatsAppReviewState,
+  PostWhatsAppReviewState,
+} from './utils/orderDraft';
 
 function lazyWithRetry<T extends React.ComponentType<any>>(
   importer: () => Promise<{ default: T }>
@@ -105,6 +110,9 @@ const SubscriptionModal = lazyWithRetry(() =>
 );
 const QuranPlayer = lazyWithRetry(() =>
   import('./components/QuranPlayer').then((m) => ({ default: m.QuranPlayer }))
+);
+const ReturnReviewPrompt = lazyWithRetry(() =>
+  import('./components/ReturnReviewPrompt').then((m) => ({ default: m.ReturnReviewPrompt }))
 );
 
 const LIBRARY_AD_DISMISSED_KEY = 'crovo_library_ad_dismissed_at';
@@ -366,6 +374,7 @@ function AppContent() {
 
   const [isSubModalOpen, setIsSubModalOpen] = useState(false);
   const [isQuranModalOpen, setIsQuranModalOpen] = useState(false);
+  const [returnReviewState, setReturnReviewState] = useState<PostWhatsAppReviewState | null>(null);
 
   const isPreviewRichAd =
     typeof window !== 'undefined' && window.location.search.includes('adPreview=1');
@@ -467,33 +476,61 @@ function AppContent() {
     }
   }, []);
 
-  const handleSelectGrade = (grade: AcademicGrade) => {
+  const checkReturnReviewEligibility = useCallback(() => {
+    if (activeView === 'admin' || isSubModalOpen || isQuranModalOpen) return;
+    const state = loadPostWhatsAppReviewState();
+    if (isEligibleForReturnReviewPrompt(state)) {
+      setReturnReviewState(state);
+    }
+  }, [activeView, isSubModalOpen, isQuranModalOpen]);
+
+  useEffect(() => {
+    checkReturnReviewEligibility();
+    const onFocus = () => checkReturnReviewEligibility();
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        checkReturnReviewEligibility();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [checkReturnReviewEligibility]);
+
+  const handleSelectGrade = useCallback((grade: AcademicGrade) => {
     setAcademicGrade(grade);
     localStorage.setItem('student_academic_grade', grade);
     if (grade === 'bac1') {
       setActiveSection('js');
     }
-  };
+  }, []);
 
-  const handleCompleteQuestion = (key: string) => {
-    if (!completedQuestions[key]) {
-      const nextCompleted = { ...completedQuestions, [key]: true };
-      setCompletedQuestions(nextCompleted);
+  const handleCompleteQuestion = useCallback((key: string) => {
+    setCompletedQuestions((prev) => {
+      if (prev[key]) return prev;
+      const nextCompleted = { ...prev, [key]: true };
       localStorage.setItem('student_completed_qs', JSON.stringify(nextCompleted));
+      setXp((prevXp) => {
+        const nextXp = prevXp + 25;
+        localStorage.setItem('student_xp', String(nextXp));
+        return nextXp;
+      });
+      return nextCompleted;
+    });
+  }, []);
 
-      const nextXp = xp + 25;
-      setXp(nextXp);
-      localStorage.setItem('student_xp', String(nextXp));
-    }
-  };
+  const handleCopyTrigger = useCallback(() => {
+    setCopyCount((prev) => {
+      const nextCount = prev + 1;
+      localStorage.setItem('student_copy_count', String(nextCount));
+      return nextCount;
+    });
+  }, []);
 
-  const handleCopyTrigger = () => {
-    const nextCount = copyCount + 1;
-    setCopyCount(nextCount);
-    localStorage.setItem('student_copy_count', String(nextCount));
-  };
-
-  const scrollToLibrary = () => {
+  const scrollToLibrary = useCallback(() => {
     if (activeView !== 'library') {
       navigateToView('library');
     }
@@ -501,9 +538,9 @@ function AppContent() {
       const el = document.getElementById('solutions-library');
       if (el) el.scrollIntoView({ behavior: 'smooth' });
     }, 60);
-  };
+  }, [activeView, navigateToView]);
 
-  const scrollToHelp = () => {
+  const scrollToHelp = useCallback(() => {
     if (activeView !== 'library') {
       navigateToView('library');
     }
@@ -511,13 +548,17 @@ function AppContent() {
       const el = document.getElementById('help-center');
       if (el) el.scrollIntoView({ behavior: 'smooth' });
     }, 80);
-  };
+  }, [activeView, navigateToView]);
 
-  const openToolDetails = () => navigateToView('toolDetails');
-  const openReviewsPage = () => navigateToView('reviews');
-  const openAdminView = () => navigateToView('admin');
-  const exitAdminView = () => navigateToView('library');
-  const openSubscriptionModal = () => setIsSubModalOpen(true);
+  const openToolDetails = useCallback(() => navigateToView('toolDetails'), [navigateToView]);
+  const openReviewsPage = useCallback(() => navigateToView('reviews'), [navigateToView]);
+  const openAdminView = useCallback(() => navigateToView('admin'), [navigateToView]);
+  const exitAdminView = useCallback(() => navigateToView('library'), [navigateToView]);
+  const openSubscriptionModal = useCallback(() => setIsSubModalOpen(true), []);
+  const closeSubModal = useCallback(() => setIsSubModalOpen(false), []);
+  const openQuranModal = useCallback(() => setIsQuranModalOpen(true), []);
+  const closeQuranModal = useCallback(() => setIsQuranModalOpen(false), []);
+  const handleSelectSection = useCallback((sec: SectionType) => setActiveSection(sec), []);
 
   const handleAdminConfigUpdated = useCallback(() => {
     libraryCacheRef.current.clear();
@@ -525,6 +566,11 @@ function AppContent() {
     loadSiteConfig();
     loadLibrarySection(academicGrade, effectiveSection, undefined, true);
   }, [loadSiteConfig, loadLibrarySection, academicGrade, effectiveSection]);
+
+  const adminWhatsappDisplay = useMemo(
+    () => effectiveConfig?.adminWhatsappDisplay || '201550324450',
+    [effectiveConfig?.adminWhatsappDisplay]
+  );
 
   return (
     <div className="min-h-screen bg-[#EEF2F7] text-slate-800 font-['iOS15Arabic',_'Cairo',_sans-serif] flex flex-col relative selection:bg-indigo-500 selection:text-white">
@@ -593,7 +639,7 @@ function AppContent() {
                   academicGrade={academicGrade}
                   onSelectGrade={handleSelectGrade}
                   activeSection={activeSection}
-                  onSelectSection={(sec) => setActiveSection(sec)}
+                  onSelectSection={handleSelectSection}
                   completedQuestions={completedQuestions}
                   onCompleteQuestion={handleCompleteQuestion}
                   onCopyTrigger={handleCopyTrigger}
@@ -608,7 +654,7 @@ function AppContent() {
             <CommentsSection onOpenAllReviews={openReviewsPage} />
 
             <HelpCenterSection
-              adminWhatsappDisplay={effectiveConfig?.adminWhatsappDisplay || '201550324450'}
+              adminWhatsappDisplay={adminWhatsappDisplay}
               onOpenToolDetails={openToolDetails}
               onOpenSubscription={openSubscriptionModal}
             />
@@ -619,7 +665,7 @@ function AppContent() {
       </main>
 
       <ContactFooter
-        onOpenQuran={() => setIsQuranModalOpen(true)}
+        onOpenQuran={openQuranModal}
         onOpenDemo={openToolDetails}
         onOpenReviews={openReviewsPage}
         onOpenHelp={scrollToHelp}
@@ -644,12 +690,33 @@ function AppContent() {
       <FirstVisitWelcomeModal />
       <TelegramInviteModal />
 
+      {returnReviewState && activeView !== 'admin' && !isSubModalOpen && !isQuranModalOpen && (
+        <LazyErrorBoundary>
+          <Suspense fallback={null}>
+            <ReturnReviewPrompt
+              reviewState={returnReviewState}
+              onClose={() => setReturnReviewState(null)}
+              onSubmitted={() => {
+                setReturnReviewState((prev) =>
+                  prev
+                    ? {
+                        ...prev,
+                        submittedOrderCodes: [...prev.submittedOrderCodes, prev.lastOrderCode],
+                      }
+                    : null
+                );
+              }}
+            />
+          </Suspense>
+        </LazyErrorBoundary>
+      )}
+
       {isSubModalOpen && (
         <LazyErrorBoundary>
           <Suspense fallback={null}>
             <SubscriptionModal
               isOpen={isSubModalOpen}
-              onClose={() => setIsSubModalOpen(false)}
+              onClose={closeSubModal}
               config={effectiveConfig}
               serverOffsetMs={serverOffsetMs}
             />
@@ -662,7 +729,7 @@ function AppContent() {
           <Suspense fallback={null}>
             <QuranPlayer
               isOpen={isQuranModalOpen}
-              onClose={() => setIsQuranModalOpen(false)}
+              onClose={closeQuranModal}
             />
           </Suspense>
         </LazyErrorBoundary>

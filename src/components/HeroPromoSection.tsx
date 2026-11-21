@@ -46,7 +46,7 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
   const bundlePrice = offerActive ? config?.bundleOfferPrice ?? 100 : config?.bundleOldPrice ?? 200;
 
   const title =
-    config?.heroPromo.title || 'أداة CROVO الذكية — خلّص كل الفصول في 4 دقايق بمحاكاة بشرية';
+    config?.heroPromo.title || 'أداة CROVO الذكية — حل سريع ومنظّم لفصول المنصة بمحاكاة بشرية';
   const subtitle =
     config?.heroPromo.subtitle ||
     'بدل ما تقضي ساعات في النسخ والحل سؤال بسؤال، أداتي بتشتغل بهدوء وتحل لك منصة QUREO أو الثقافة المالية بأمان وتشفير لبياناتك.';

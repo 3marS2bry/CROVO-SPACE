@@ -377,8 +377,126 @@ export async function unsubscribeBrowserFromPush(): Promise<{ ok: boolean; messa
   };
 }
 
-export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = () => {
-  return null;
+export const NotificationPrompt: React.FC<{ notificationsEnabled?: boolean }> = ({
+  notificationsEnabled = true,
+}) => {
+  const [visible, setVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!notificationsEnabled || !isPushBrowserSupported()) return;
+    if (Notification.permission !== 'default') return;
+    if (getStorageFlag(OPTED_OUT_KEY) === '1') return;
+    if (getStorageFlag(ACTIVATED_ONCE_KEY) === '1') return;
+
+    const dismissedUntil = Number(getStorageFlag(DISMISS_KEY) || 0);
+    if (Number.isFinite(dismissedUntil) && Date.now() < dismissedUntil) return;
+
+    const timer = window.setTimeout(() => {
+      if (Notification.permission === 'default' && getStorageFlag(OPTED_OUT_KEY) !== '1') {
+        setVisible(true);
+      }
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [notificationsEnabled]);
+
+  if (!visible) return null;
+
+  const handleLater = () => {
+    setStorageFlag(DISMISS_KEY, String(Date.now() + 24 * 60 * 60 * 1000));
+    setVisible(false);
+  };
+
+  const handleNever = () => {
+    setStorageFlag(OPTED_OUT_KEY, '1');
+    setVisible(false);
+  };
+
+  const handleEnable = async () => {
+    if (busy) return;
+    setBusy(true);
+    setFeedback(null);
+    try {
+      const res = await subscribeBrowserToPush();
+      setFeedback({ ok: res.ok, text: res.message });
+      if (res.ok) {
+        window.setTimeout(() => setVisible(false), 1800);
+      }
+    } catch {
+      setFeedback({ ok: false, text: 'تعذر تفعيل الإشعارات حالياً.' });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      data-testid="notification-prompt-banner"
+      dir="rtl"
+      className="fixed bottom-4 right-4 left-4 sm:left-auto sm:max-w-sm z-40 clay-card bg-[#EEF2F7] p-4 rounded-2xl border border-white/95 shadow-2xl text-right space-y-2.5"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 rounded-xl clay-apple-blue text-white flex items-center justify-center shrink-0">
+            <Bell className="w-4 h-4" />
+          </div>
+          <div>
+            <div className="text-xs font-black font-ios text-slate-900">
+              تنبيهات العروض والحلول الجديدة
+            </div>
+            <p className="text-[11px] text-slate-600 font-ios leading-snug">
+              فعّل الإشعارات عشان يوصلك كل جديد وخصومات CROVO SPACE أول بأول.
+            </p>
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleLater}
+          aria-label="إغلاق تنبيه الإشعارات"
+          className="p-1 text-slate-400 hover:text-slate-700 shrink-0"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      {feedback && (
+        <div
+          className={`p-2 rounded-xl text-[11px] font-bold font-ios ${
+            feedback.ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-600'
+          }`}
+        >
+          {feedback.text}
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={handleEnable}
+          className="clay-apple-blue flex-1 py-2 px-3 rounded-xl text-xs font-bold text-white font-ios disabled:opacity-60"
+        >
+          {busy ? 'جاري التفعيل...' : 'تفعيل الإشعارات'}
+        </button>
+        <button
+          type="button"
+          onClick={handleLater}
+          className="clay-btn px-3 py-2 rounded-xl text-xs font-bold text-slate-600 font-ios"
+        >
+          لاحقًا
+        </button>
+        <button
+          type="button"
+          onClick={handleNever}
+          className="px-2 py-2 text-[10px] font-bold text-slate-400 hover:text-slate-600 font-ios"
+        >
+          لا تذكّرني
+        </button>
+      </div>
+    </div>
+  );
 };
 
 export const PushPreferenceWidget: React.FC = () => {

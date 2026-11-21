@@ -23,6 +23,22 @@ export interface ToolServiceConfig {
   isVisible: boolean;
 }
 
+export type AdWorkflowStatus = 'draft' | 'preview' | 'approved' | 'published' | 'archived';
+
+export interface LibraryAdDraftConfig {
+  title: string;
+  subtitle: string;
+  priceText: string;
+  ctaText: string;
+  ctaLink?: string;
+  imageUrl?: string;
+  delaySeconds?: number;
+  cooldownHours?: number;
+  templateMode?: 'classic' | 'rich_crovo';
+  workflowStatus: AdWorkflowStatus;
+  updatedAt?: string;
+}
+
 export interface PublicSiteConfig {
   id: 'public';
   qureoOldPrice: number;
@@ -61,6 +77,8 @@ export interface PublicSiteConfig {
     delaySeconds?: number;
     cooldownHours?: number;
     templateMode?: 'classic' | 'rich_crovo';
+    workflowStatus?: AdWorkflowStatus;
+    draft?: LibraryAdDraftConfig | null;
   };
   toolServices: ToolServiceConfig[];
   toolVideos: ToolVideoConfig[];
@@ -70,30 +88,30 @@ export interface PublicSiteConfig {
 export const DEFAULT_TOOL_SERVICES: ToolServiceConfig[] = [
   {
     key: 'bac1_qureo',
-    name: 'حل منصة QUREO بالكامل (أولى بكالوريا)',
+    name: 'دعم وتنفيذ منصة QUREO (أولى بكالوريا)',
     grade: 'أولى بكالوريا',
-    description: 'إنهاء جميع مستويات الترمين بدقة 100% ومحاكاة بشرية كاملة.',
+    description: 'تغطية منظمة لمستويات الجافا في الترمين مع مراجعة الحلول خطوة بخطوة.',
     isVisible: true,
   },
   {
     key: 'bac2_qureo_java',
-    name: 'حل منصة QUREO قسم Java (تانية بكالوريا)',
+    name: 'دعم وتنفيذ QUREO قسم Java (تانية بكالوريا)',
     grade: 'تانية بكالوريا',
-    description: 'حل جميع فصول ومستويات الجافا المتقدمة في دقائق.',
+    description: 'مساعدة شاملة في فصول الجافا المتقدمة وتطبيقات المنصة المقررة.',
     isVisible: true,
   },
   {
     key: 'bac2_financial',
-    name: 'حل منصة الثقافة المالية (تانية بكالوريا)',
+    name: 'إجابات ودعم الثقافة المالية (تانية بكالوريا)',
     grade: 'تانية بكالوريا',
-    description: 'حل الأسئلة والاختبارات النظرية بدقة كاملة.',
+    description: 'تنظيم ومراجعة الأسئلة والتدريبات النظرية الخاصة بالمنهج.',
     isVisible: true,
   },
   {
     key: 'bac2_bundle',
     name: 'باقة المنصتين (QUREO Java + الثقافة المالية)',
     grade: 'تانية بكالوريا',
-    description: 'الباقة الشاملة بتوفير إضافي لتانية بكالوريا.',
+    description: 'باقة الاشتراك الشاملة لطلاب تانية بكالوريا مع توفير مقارنة بالاشتراك الفردي.',
     isVisible: true,
   },
 ];
@@ -102,17 +120,17 @@ export const DEFAULT_TOOL_VIDEOS: ToolVideoConfig[] = [
   {
     id: 'vid_1',
     tag: 'أولى وتانية بكالوريا',
-    title: 'أداء الأداة السريع والمحاكي للبشر',
-    description: 'شاهد تنفيذ الحلول داخل المنصة بسرعة وخطوات طبيعية تماماً.',
-    src: '/media/videos/crovo-demo-1.mp4',
+    title: 'استعراض آلية عمل أداة CROVO',
+    description: 'عرض عملي لخطوات إدخال الحلول ومتابعة التقدم داخل واجهة المنصة.',
+    src: '/media/videos/VID-20261031-WA0034.mp4',
     visible: true,
   },
   {
     id: 'vid_2',
-    tag: 'النتائج النهائية',
-    title: 'إتمام المستويات بنسبة 100%',
-    description: 'مراجعة نهائية تؤكد إكمال الأسئلة والاختبارات بدون أخطاء.',
-    src: '/media/videos/crovo-demo-2.mp4',
+    tag: 'تجربة عملية',
+    title: 'خطوات استخدام المنصة والمكتبة',
+    description: 'فيديو توضيحي يبيّن طريقة تنظيم الدروس والنسخ السريع للإجابات.',
+    src: '/media/videos/VID-20261021-WA0025(1).mp4',
     visible: true,
   },
 ];
@@ -134,28 +152,30 @@ export function buildDefaultSiteConfig(whatsappFallback = '201550324450'): Publi
     pollClosed: false,
     whatsappNumber: cleanPhone,
     adminWhatsappDisplay: cleanPhone,
-    offerText: 'خصم 50% لفترة محدودة على باقات حل المنصات!',
+    offerText: 'خصم لفترة محدودة على باقات المساعدة والاشتراك في CROVO SPACE!',
     notificationsEnabled: true,
     notificationsIntervalDays: 3,
     heroPromo: {
       enabled: true,
-      title: 'أداة CROVO لحل منصات البكالوريا تلقائياً',
-      subtitle: 'وفر وقتك ومجهودك — محاكاة بشرية 100% وبسرعة فائقة.',
+      title: 'أداة CROVO ومكتبة الحلول الموثوقة لطلاب البكالوريا',
+      subtitle: 'إجابات منظمة ومحدثة + خدمة اشتراك ميسّرة عبر واتساب.',
     },
     promoBanner: {
       enabled: true,
-      text: 'عرض الـ50% متاح الآن لفترة محدودة — اشترك قبل انتهاء العداد!',
+      text: 'العرض متاح الآن لفترة محدودة — اشترك قبل انتهاء العداد!',
     },
     libraryAd: {
       enabled: true,
-      title: 'زهقت من الحل اليدوي؟ خلّص المنصة في 4 دقايق!',
-      subtitle: 'أداة CROVO هتحل لك منصة QUREO والثقافة المالية بالكامل بمحاكاة بشرية آمنة 100%.',
-      priceText: 'ابتداءً من 50 ج بدلاً من 100 ج (خصم 50%)',
+      title: 'تحتاج مساعدة منظمة لإنهاء دروس المنصة بسرعة؟',
+      subtitle: 'أداة CROVO متوفرة للاشتراك الميسّر مع متابعة مباشرة وتأكيد يدوي عبر واتساب.',
+      priceText: 'ابتداءً من 50 ج بدلاً من 100 ج',
       ctaText: 'اشترك الآن في الأداة',
       ctaLink: '/#order-section',
       delaySeconds: 18,
       cooldownHours: 24,
       templateMode: 'rich_crovo',
+      workflowStatus: 'published',
+      draft: null,
     },
     toolServices: DEFAULT_TOOL_SERVICES,
     toolVideos: DEFAULT_TOOL_VIDEOS,

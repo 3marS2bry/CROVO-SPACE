@@ -90,7 +90,7 @@ export const CommunitySection: React.FC = () => {
                 </h3>
 
                 <p className="text-xs text-slate-600 font-ios leading-relaxed">
-                  نعرض فيها إثباتات حل الامتحانات، النتائج الحقيقية 100%، آراء العملاء، وتوثيق التجارب والتعاملات اليومية.
+                  نعرض فيها إثباتات حل الامتحانات، النتائج الفعلية الموثّقة، آراء العملاء، وتوثيق التجارب والتعاملات اليومية.
                 </p>
 
                 <div className="flex items-center gap-1.5 text-[10.5px] font-semibold text-sky-800/85 font-ios pt-0.5">

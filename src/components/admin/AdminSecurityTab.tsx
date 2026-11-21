@@ -29,6 +29,7 @@ interface AdminSecurityTabProps {
   }>;
   dbStatus?: DbStatusState;
   dbError?: string | null;
+  staleSnapshot?: boolean;
   storageNotice: string;
   onNotice: (msg: string) => void;
   onRefreshOverview: () => void;
@@ -40,6 +41,7 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
   migrations = [],
   dbStatus,
   dbError,
+  staleSnapshot = false,
   storageNotice,
   onNotice,
   onRefreshOverview,
@@ -443,19 +445,64 @@ export const AdminSecurityTab: React.FC<AdminSecurityTabProps> = ({
           </div>
         </div>
 
-        <div className="p-3 rounded-xl clay-inset flex flex-wrap items-center justify-between gap-2">
-          <span className="font-bold">فحص اتصال وسلامة Cloud Firestore:</span>
-          <span className={`font-black font-mono ${dbIntegrity.ok ? 'text-indigo-700' : 'text-rose-600'}`}>
-            {dbIntegrity.ok ? dbIntegrity.detail || 'متصل وسليم ✓ (Firestore OK)' : dbIntegrity.detail}
-          </span>
-        </div>
+        {(() => {
+          const isAuthRequired = dbStatus === 'auth_required';
+          const isErrorOrQuota =
+            dbStatus === 'quota_exceeded' || dbStatus === 'error' || !dbIntegrity.ok;
+          const isUnverifiedOrStale = staleSnapshot || !dbStatus;
+          const isTrulyHealthy =
+            dbStatus === 'ok' && dbIntegrity.ok && !staleSnapshot;
 
-        {(dbStatus === 'quota_exceeded' || dbError) && (
-          <div className="p-3 rounded-xl clay-inset border border-rose-200 text-rose-800 space-y-1">
+          const badgeClass = isErrorOrQuota
+            ? 'bg-rose-100 text-rose-800 border border-rose-200'
+            : isAuthRequired || isUnverifiedOrStale
+              ? 'bg-amber-100 text-amber-800 border border-amber-200'
+              : 'bg-emerald-100 text-emerald-800 border border-emerald-200';
+
+          const statusText = isErrorOrQuota
+            ? dbStatus === 'quota_exceeded'
+              ? 'حصة Firestore ممتلئة مؤقتاً (429)'
+              : dbIntegrity.detail || 'خطأ في فحص الاتصال بقاعدة البيانات'
+            : isAuthRequired
+              ? 'بانتظار ربط جلسة Google/Firebase للتحقق الكامل'
+              : staleSnapshot
+                ? 'لقطة محفوظة مؤقتاً (غير محدثة لحظياً)'
+                : isTrulyHealthy
+                  ? dbIntegrity.detail || 'متصل وسليم ✓ (Firestore OK)'
+                  : 'حالة الفحص غير مؤكدة — اضغط تحديث للتحقق';
+
+          return (
+            <div
+              data-testid="security-db-health-row"
+              className="p-3 rounded-xl clay-inset flex flex-wrap items-center justify-between gap-2"
+            >
+              <span className="font-bold">فحص اتصال وسلامة Cloud Firestore:</span>
+              <span
+                data-testid="security-db-health-badge"
+                className={`px-2.5 py-1 rounded-lg font-black font-mono text-[11px] ${badgeClass}`}
+              >
+                {statusText}
+              </span>
+            </div>
+          );
+        })()}
+
+        {(dbStatus === 'quota_exceeded' || dbStatus === 'error' || dbStatus === 'auth_required' || staleSnapshot || dbError) && (
+          <div
+            className={`p-3 rounded-xl clay-inset border space-y-1 ${
+              dbStatus === 'auth_required' || staleSnapshot
+                ? 'border-amber-200 text-amber-900'
+                : 'border-rose-200 text-rose-800'
+            }`}
+          >
             <div className="font-black">
               {dbStatus === 'quota_exceeded'
                 ? 'تم بلوغ الحد اليومي المجاني للقراءة في Firestore (Spark Plan Quota).'
-                : 'تنبيه حالة قاعدة البيانات:'}
+                : dbStatus === 'auth_required'
+                  ? 'الفحص الكامل يتطلب ربط جلسة Google/Firebase السحابية.'
+                  : staleSnapshot
+                    ? 'يتم عرض آخر نسخة محفوظة محلياً لحماية البيانات أثناء تعذر القراءة.'
+                    : 'تنبيه حالة قاعدة البيانات:'}
             </div>
             {dbError && <div className="text-[11px] font-semibold">{dbError}</div>}
           </div>

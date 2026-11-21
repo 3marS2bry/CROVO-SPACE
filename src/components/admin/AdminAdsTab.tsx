@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Eye, ImagePlus, Megaphone, Save, Sparkles } from 'lucide-react';
-import { api, PublicConfig } from '../../utils/api';
+import { Archive, CheckCircle2, Eye, FileEdit, ImagePlus, Megaphone, Rocket, Save, Sparkles } from 'lucide-react';
+import { AdWorkflowStatus, api, PublicConfig } from '../../utils/api';
 import { CopyAdBanner } from '../CopyAdBanner';
 
 interface AdminAdsTabProps {
@@ -9,11 +9,21 @@ interface AdminAdsTabProps {
   onConfigUpdated: () => void;
 }
 
+const WORKFLOW_LABELS: Record<AdWorkflowStatus, { label: string; badgeClass: string }> = {
+  draft: { label: 'مسودة (غير منشورة)', badgeClass: 'bg-slate-200 text-slate-800' },
+  preview: { label: 'قيد المعاينة', badgeClass: 'bg-amber-100 text-amber-800' },
+  approved: { label: 'معتمدة للنشر', badgeClass: 'bg-sky-100 text-sky-800' },
+  published: { label: 'منشورة للزوار ✓', badgeClass: 'bg-emerald-100 text-emerald-800' },
+  archived: { label: 'مؤرشفة / متوقفة', badgeClass: 'bg-rose-100 text-rose-800' },
+};
+
 export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
   config,
   onNotice,
   onConfigUpdated,
 }) => {
+  const initialDraft = config.libraryAd.draft || config.libraryAd;
+
   const [promoEnabled, setPromoEnabled] = useState(config.promoBanner?.enabled ?? true);
   const [promoText, setPromoText] = useState(
     config.promoBanner?.text ||
@@ -25,20 +35,30 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
   const [heroSubtitle, setHeroSubtitle] = useState(config.heroPromo.subtitle);
 
   const [adEnabled, setAdEnabled] = useState(config.libraryAd.enabled);
-  const [adTitle, setAdTitle] = useState(config.libraryAd.title);
-  const [adSubtitle, setAdSubtitle] = useState(config.libraryAd.subtitle);
-  const [adPriceText, setAdPriceText] = useState(config.libraryAd.priceText);
-  const [adCtaText, setAdCtaText] = useState(config.libraryAd.ctaText);
-  const [adCtaLink, setAdCtaLink] = useState(config.libraryAd.ctaLink || '#tool');
-  const [adImageUrl, setAdImageUrl] = useState(config.libraryAd.imageUrl || '/media/crovo-promo-ad.jpg');
-  const [adDelaySeconds, setAdDelaySeconds] = useState(config.libraryAd.delaySeconds || 60);
-  const [adCooldownHours, setAdCooldownHours] = useState(config.libraryAd.cooldownHours || 24);
+  const [adTitle, setAdTitle] = useState(initialDraft.title || config.libraryAd.title);
+  const [adSubtitle, setAdSubtitle] = useState(initialDraft.subtitle || config.libraryAd.subtitle);
+  const [adPriceText, setAdPriceText] = useState(initialDraft.priceText || config.libraryAd.priceText);
+  const [adCtaText, setAdCtaText] = useState(initialDraft.ctaText || config.libraryAd.ctaText);
+  const [adCtaLink, setAdCtaLink] = useState(initialDraft.ctaLink || config.libraryAd.ctaLink || '#tool');
+  const [adImageUrl, setAdImageUrl] = useState(
+    initialDraft.imageUrl || config.libraryAd.imageUrl || '/media/crovo-promo-ad.jpg'
+  );
+  const [adDelaySeconds, setAdDelaySeconds] = useState(
+    initialDraft.delaySeconds ?? config.libraryAd.delaySeconds ?? 60
+  );
+  const [adCooldownHours, setAdCooldownHours] = useState(
+    initialDraft.cooldownHours ?? config.libraryAd.cooldownHours ?? 24
+  );
   const [adTemplateMode, setAdTemplateMode] = useState<'classic' | 'rich_crovo'>(
-    config.libraryAd.templateMode || 'classic'
+    initialDraft.templateMode || config.libraryAd.templateMode || 'classic'
+  );
+  const [workflowStatus, setWorkflowStatus] = useState<AdWorkflowStatus>(
+    config.libraryAd.draft?.workflowStatus || config.libraryAd.workflowStatus || 'published'
   );
 
   const [uploadingImg, setUploadingImg] = useState(false);
-  const [saving, setSaving] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [savingBanners, setSavingBanners] = useState(false);
   const [showLivePreview, setShowLivePreview] = useState(false);
   const [previewTemplate, setPreviewTemplate] = useState<'classic' | 'rich_crovo'>('rich_crovo');
 
@@ -87,7 +107,7 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
       const compressed = await compressAdImageForFirestore(rawDataUrl);
       const res = await api.adminUploadAdImage(compressed);
       setAdImageUrl(res.imageUrl);
-      onNotice('تم تجهيز صورة الإعلان بنجاح. اضغط حفظ لتطبيقها.');
+      onNotice('تم تجهيز صورة المسودة بنجاح. احفظ المسودة أو انشرها لتطبيقها.');
     } catch (err) {
       onNotice(err instanceof Error ? err.message : 'تعذر رفع الصورة.');
     } finally {
@@ -96,32 +116,78 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleWorkflowAction = async (
+    action: 'save_draft' | 'preview' | 'approve' | 'publish' | 'archive'
+  ) => {
+    if (savingWorkflow) return;
+    setSavingWorkflow(true);
+    try {
+      const draftPayload = {
+        title: adTitle,
+        subtitle: adSubtitle,
+        priceText: adPriceText,
+        ctaText: adCtaText,
+        ctaLink: adCtaLink,
+        imageUrl: adImageUrl,
+        delaySeconds: adDelaySeconds,
+        cooldownHours: adCooldownHours,
+        templateMode: adTemplateMode,
+      };
+      const res = await api.adminUpdateSettings({
+        libraryAdWorkflowAction: action,
+        libraryAdDraft: draftPayload,
+        ...(action === 'publish' ? { libraryAd: { enabled: adEnabled } } : {}),
+      });
+      const nextStatus =
+        res.config.libraryAd.draft?.workflowStatus ||
+        res.config.libraryAd.workflowStatus ||
+        (action === 'save_draft'
+          ? 'draft'
+          : action === 'preview'
+            ? 'preview'
+            : action === 'approve'
+              ? 'approved'
+              : action === 'archive'
+                ? 'archived'
+                : 'published');
+      setWorkflowStatus(nextStatus);
+      if (action === 'archive') {
+        setAdEnabled(false);
+      } else if (action === 'publish') {
+        setAdEnabled(res.config.libraryAd.enabled);
+      }
+
+      const actionNoticeMap: Record<typeof action, string> = {
+        save_draft: 'تم حفظ المسودة في Firestore دون التأثير على الإعلان المنشور حالياً.',
+        preview: 'تم تحويل الإعلان إلى حالة «قيد المعاينة» — يمكنك معاينته الآن.',
+        approve: 'تم اعتماد المسودة — جاهزة الآن للنشر المباشر.',
+        publish: 'تم نشر الإعلان وتحديثه للزوار في Firestore بنجاح.',
+        archive: 'تمت أرشفة الإعلان وإيقاف ظهوره التلقائي للزوار.',
+      };
+      onNotice(actionNoticeMap[action]);
+      onConfigUpdated();
+    } catch (err) {
+      onNotice(err instanceof Error ? err.message : 'تعذر تنفيذ خطوة سير العمل.');
+    } finally {
+      setSavingWorkflow(false);
+    }
+  };
+
+  const handleSaveBanners = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
+    if (savingBanners) return;
+    setSavingBanners(true);
     try {
       await api.adminUpdateSettings({
         promoBanner: { enabled: promoEnabled, text: promoText },
         heroPromo: { enabled: heroEnabled, title: heroTitle, subtitle: heroSubtitle },
-        libraryAd: {
-          enabled: adEnabled,
-          title: adTitle,
-          subtitle: adSubtitle,
-          priceText: adPriceText,
-          ctaText: adCtaText,
-          ctaLink: adCtaLink,
-          imageUrl: adImageUrl,
-          delaySeconds: adDelaySeconds,
-          cooldownHours: adCooldownHours,
-          templateMode: adTemplateMode,
-        },
       });
-      onNotice('تم حفظ إعدادات الإعلانات والظهور في Firestore بنجاح.');
+      onNotice('تم حفظ إعدادات الشريط العلوي وبطاقة البطل في Firestore.');
       onConfigUpdated();
     } catch (err) {
-      onNotice(err instanceof Error ? err.message : 'تعذر الحفظ.');
+      onNotice(err instanceof Error ? err.message : 'تعذر حفظ إعدادات الشريط العلوي.');
     } finally {
-      setSaving(false);
+      setSavingBanners(false);
     }
   };
 
@@ -142,16 +208,24 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
     templateMode: previewTemplate,
   };
 
+  const wfMeta = WORKFLOW_LABELS[workflowStatus] || WORKFLOW_LABELS.published;
+
   return (
-    <form onSubmit={handleSave} className="space-y-5 text-xs font-ios" data-testid="admin-ads-tab">
-      {/* 1. Library Popup Ad Control + Interactive Preview */}
+    <div className="space-y-5 text-xs font-ios" data-testid="admin-ads-tab">
+      {/* 1. Library Popup Ad Workflow + Interactive Preview */}
       <div className="clay-card p-4 sm:p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Megaphone className="w-4 h-4 text-indigo-600" />
             <h2 className="text-base font-black font-decorative">
-              إدارة النافذة المنبثقة للإعلان (Popup Ad)
+              إدارة النافذة المنبثقة للإعلان (سير العمل الآمن)
             </h2>
+            <span
+              data-testid="ad-workflow-status-badge"
+              className={`px-2.5 py-0.5 rounded-full text-[11px] font-black ${wfMeta.badgeClass}`}
+            >
+              {wfMeta.label}
+            </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -159,13 +233,13 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
               type="button"
               data-testid="admin-preview-rich-ad-btn"
               onClick={() => {
-                setPreviewTemplate('rich_crovo');
+                setPreviewTemplate(adTemplateMode);
                 setShowLivePreview(true);
               }}
               className="clay-purple-soft px-3.5 py-2 rounded-xl font-bold flex items-center gap-1.5"
             >
               <Eye className="w-3.5 h-3.5" />
-              <span>معاينة الإعلان الجديد (Preview)</span>
+              <span>معاينة المسودة في النافذة</span>
             </button>
 
             <label className="flex items-center gap-1.5 font-bold cursor-pointer px-3 py-2 rounded-xl clay-inset">
@@ -174,9 +248,27 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
                 checked={adEnabled}
                 onChange={(e) => setAdEnabled(e.target.checked)}
               />
-              <span>تفعيل الإعلان التلقائي</span>
+              <span>تفعيل الإعلان عند النشر</span>
             </label>
           </div>
+        </div>
+
+        {/* Workflow Pipeline Strip */}
+        <div className="p-3 rounded-2xl clay-inset flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <div className="flex flex-wrap items-center gap-1.5 font-bold text-slate-700">
+            <span className={workflowStatus === 'draft' ? 'text-indigo-700 font-black' : ''}>1. مسودة</span>
+            <span>←</span>
+            <span className={workflowStatus === 'preview' ? 'text-indigo-700 font-black' : ''}>2. معاينة</span>
+            <span>←</span>
+            <span className={workflowStatus === 'approved' ? 'text-indigo-700 font-black' : ''}>3. اعتماد</span>
+            <span>←</span>
+            <span className={workflowStatus === 'published' ? 'text-emerald-700 font-black' : ''}>4. نشر للزوار</span>
+            <span>←</span>
+            <span className={workflowStatus === 'archived' ? 'text-rose-700 font-black' : ''}>5. أرشفة</span>
+          </div>
+          <span className="text-[10px] text-slate-500">
+            التعديلات تُحفظ كمسودة أولاً ولا تظهر للزوار إلا بعد الضغط على «نشر للزوار».
+          </span>
         </div>
 
         {/* Mode Notice & Switcher */}
@@ -184,10 +276,10 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
           <div className="space-y-0.5">
             <div className="font-bold text-indigo-900 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-indigo-600" />
-              <span>قالب العرض الحالي للزوار:</span>
+              <span>قالب العرض في المسودة:</span>
             </div>
             <p className="text-[11px] text-slate-600">
-              يظل القالب الكلاسيكي مفعّلاً لحين اختيار القالب التسويقي المتطور (CROVO Promo Modal) وحفظه.
+              يظل القالب الكلاسيكي مفعّلاً لحين اختيار القالب التسويقي المتطور (CROVO Promo Modal) ونشره.
             </p>
           </div>
 
@@ -196,8 +288,8 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
             onChange={(e) => setAdTemplateMode(e.target.value as 'classic' | 'rich_crovo')}
             className="px-3 py-2 rounded-xl clay-card border-none outline-none font-bold text-indigo-700"
           >
-            <option value="classic">القالب الكلاسيكي الحالي</option>
-            <option value="rich_crovo">القالب التسويقي الجديد (CROVO Promo)</option>
+            <option value="classic">القالب الكلاسيكي</option>
+            <option value="rich_crovo">القالب التسويقي المتطور (CROVO Promo)</option>
           </select>
         </div>
 
@@ -305,10 +397,86 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Inline Draft Preview Card */}
+        <div
+          data-testid="ad-inline-draft-preview"
+          className="p-3.5 rounded-2xl border border-indigo-200/80 bg-white/75 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
+        >
+          <div className="space-y-1">
+            <div className="text-[10px] font-black text-indigo-600">
+              معاينة مصغّرة للمسودة الحالية ({wfMeta.label}):
+            </div>
+            <div className="text-sm font-black text-slate-900">{adTitle || 'بدون عنوان'}</div>
+            <div className="text-xs text-slate-600">{adSubtitle}</div>
+            <div className="text-[11px] font-bold text-indigo-700">{adPriceText}</div>
+          </div>
+          <span className="px-3 py-1.5 rounded-xl clay-apple-blue text-white font-bold text-[11px] shrink-0">
+            {adCtaText || 'زر الإجراء'}
+          </span>
+        </div>
+
+        {/* Explicit Workflow Buttons */}
+        <div className="flex flex-wrap items-center gap-2 pt-1">
+          <button
+            type="button"
+            data-testid="ad-wf-save-draft"
+            disabled={savingWorkflow}
+            onClick={() => handleWorkflowAction('save_draft')}
+            className="clay-btn px-3.5 py-2.5 rounded-xl font-bold text-slate-800 flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <FileEdit className="w-3.5 h-3.5" />
+            <span>حفظ كمسودة</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="ad-wf-preview"
+            disabled={savingWorkflow}
+            onClick={() => handleWorkflowAction('preview')}
+            className="clay-btn px-3.5 py-2.5 rounded-xl font-bold text-amber-700 flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>تعيين للمعاينة</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="ad-wf-approve"
+            disabled={savingWorkflow}
+            onClick={() => handleWorkflowAction('approve')}
+            className="clay-btn px-3.5 py-2.5 rounded-xl font-bold text-sky-700 flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <CheckCircle2 className="w-3.5 h-3.5" />
+            <span>اعتماد المسودة</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="ad-wf-publish"
+            disabled={savingWorkflow}
+            onClick={() => handleWorkflowAction('publish')}
+            className="clay-apple-blue px-4 py-2.5 rounded-xl font-black text-white flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+          >
+            <Rocket className="w-3.5 h-3.5" />
+            <span>{savingWorkflow ? 'جاري التنفيذ...' : 'نشر الإعلان للزوار'}</span>
+          </button>
+
+          <button
+            type="button"
+            data-testid="ad-wf-archive"
+            disabled={savingWorkflow}
+            onClick={() => handleWorkflowAction('archive')}
+            className="clay-btn px-3.5 py-2.5 rounded-xl font-bold text-rose-600 flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <Archive className="w-3.5 h-3.5" />
+            <span>أرشفة وإيقاف</span>
+          </button>
+        </div>
       </div>
 
       {/* 2. Top Promo Bar & Inline Hero Card */}
-      <div className="clay-card p-4 sm:p-6 space-y-3">
+      <form onSubmit={handleSaveBanners} className="clay-card p-4 sm:p-6 space-y-3">
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-black font-decorative">شريط الإعلان العلوي والبطاقة المدمجة</h3>
           <label className="flex items-center gap-1.5 font-bold cursor-pointer">
@@ -354,16 +522,16 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
             className="px-3 py-2 rounded-xl clay-inset border-none outline-none"
           />
         </div>
-      </div>
 
-      <button
-        type="submit"
-        disabled={saving}
-        className="w-full clay-apple-blue py-3 rounded-2xl text-sm font-black text-white shadow-md flex items-center justify-center gap-2"
-      >
-        <Save className="w-4 h-4" />
-        <span>{saving ? 'جاري الحفظ...' : 'حفظ إعدادات الإعلانات'}</span>
-      </button>
+        <button
+          type="submit"
+          disabled={savingBanners}
+          className="clay-apple-blue px-5 py-2.5 rounded-xl text-xs font-black text-white shadow-sm flex items-center gap-2 disabled:opacity-50"
+        >
+          <Save className="w-4 h-4" />
+          <span>{savingBanners ? 'جاري الحفظ...' : 'حفظ الشريط العلوي وبطاقة البطل'}</span>
+        </button>
+      </form>
 
       {/* Interactive Modal Preview */}
       <CopyAdBanner
@@ -374,6 +542,7 @@ export const AdminAdsTab: React.FC<AdminAdsTabProps> = ({
         onLearnMore={() => onNotice('زر المعاينة يعمل (فتح صفحة الأداة).')}
         onOpenSubscription={() => onNotice('زر المعاينة يعمل (فتح الاشتراك).')}
       />
-    </form>
+    </div>
   );
 };
+

@@ -336,6 +336,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       const fbUid = getFirebaseUid();
       let savedComment: CommentItem | null = null;
 
+      let wasModerationPending = false;
       try {
         const res = await api.createComment({
           authorName,
@@ -348,12 +349,15 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           attachmentBeforeDataUrl,
           attachmentAfterDataUrl,
         });
-        savedComment = { ...res.comment, source: 'api' };
-        setApiComments((prev) => {
-          const next = [savedComment!, ...prev];
-          setFastComments(next);
-          return next;
-        });
+        wasModerationPending = Boolean(res.moderationPending);
+        if (!wasModerationPending) {
+          savedComment = { ...res.comment, source: 'api' };
+          setApiComments((prev) => {
+            const next = [savedComment!, ...prev];
+            setFastComments(next);
+            return next;
+          });
+        }
       } catch (apiErr) {
         if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 400 || apiErr.status === 429)) {
           throw apiErr;
@@ -388,7 +392,12 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       setAttachmentBeforeDataUrl(null);
       setAttachmentAfterDataUrl(null);
       setContactPhone('');
-      setFormMsg({ type: 'ok', text: 'تسلم يا مدير! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.' });
+      setFormMsg({
+        type: 'ok',
+        text: wasModerationPending
+          ? 'تسلم يا مدير! تم استلام تقييمك وهو قيد مراجعة الإدارة وسيتم نشره بعد الموافقة.'
+          : 'تسلم يا مدير! تم نشر تعليقك بنجاح وهيفضل ظاهر للجميع.',
+      });
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         openAuthModal('سجّل دخولك الأول عشان تقدر تنشر تعليقك.');
@@ -660,263 +669,14 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           </div>
         )}
 
-        {/* Add Comment Form */}
-        {isFormOpen && (
-          <form
-            onSubmit={handleSubmit}
-            className="mb-6 p-3.5 sm:p-5 rounded-2xl clay-inset space-y-3 border border-indigo-200/50"
-          >
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <h3 className="text-sm font-black font-ios text-slate-900">
-                شارك تجربتك مع الكل (مع صور قبل الحل وبعد الحل لو حابب):
-              </h3>
-
-              {!user ? (
-                <button
-                  type="button"
-                  onClick={() =>
-                    openAuthModal('سجّل دخولك بحسابك لربط تعليقاتك وتعديلاتك باسمك مباشرة.')
-                  }
-                  className="clay-btn px-3 py-1.5 rounded-xl text-[11px] font-bold text-indigo-700 flex items-center gap-1.5 font-ios self-start sm:self-auto"
-                >
-                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                  <span>تسجيل الدخول لربط التعليق بحسابك</span>
-                </button>
-              ) : (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-700 text-[11px] font-bold font-ios self-start sm:self-auto">
-                  <BadgeCheck className="w-3.5 h-3.5" />
-                  <span>
-                    مرتبط بحسابك ({user.name}
-                    {user.serialNumber ? ` · ${user.serialNumber}` : ''})
-                  </span>
-                </span>
-              )}
-            </div>
-
-            {formMsg && (
-              <div
-                className={`p-2.5 rounded-xl clay-card text-xs font-bold font-ios ${
-                  formMsg.type === 'ok'
-                    ? 'text-emerald-700'
-                    : 'text-rose-600'
-                }`}
-              >
-                {formMsg.text}
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
-                  اسمك:
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={authorName}
-                  onChange={(e) => setAuthorName(e.target.value)}
-                  placeholder="عمر صبري"
-                  className="w-full px-3 py-2 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
-                  السنة / القسم:
-                </label>
-                <select
-                  value={grade}
-                  onChange={(e) => setGrade(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900"
-                >
-                  <option value="أولى بكالوريا">أولى بكالوريا</option>
-                  <option value="تانية بكالوريا">تانية بكالوريا</option>
-                  <option value="تانية بكالوريا - الثقافة المالية">تانية بكالوريا - الثقافة المالية</option>
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
-                تقييمك:
-              </label>
-              <div className="flex items-center gap-1.5">
-                {[1, 2, 3, 4, 5].map((star) => (
-                  <button
-                    key={star}
-                    type="button"
-                    aria-label={`تقييم ${star} نجوم`}
-                    onClick={() => setRating(star)}
-                    className="p-1.5 rounded-xl clay-btn"
-                  >
-                    <Star
-                      className={`w-4 h-4 ${
-                        star <= rating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
-                      }`}
-                    />
-                  </button>
-                ))}
-                <span className="text-xs font-bold text-slate-500 font-ios mr-2">{rating} من 5</span>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
-                تعليقك وتجربتك:
-              </label>
-              <textarea
-                required
-                rows={3}
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                placeholder="احكي تجربتك بصراحة..."
-                className="w-full p-3 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900 resize-none"
-              />
-            </div>
-
-            {/* Optional Avatar + Before & After Solution Images */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              {/* Avatar */}
-              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2">
-                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
-                  <UserCircle2 className="w-4 h-4 text-indigo-500 shrink-0" />
-                  <span className="truncate">
-                    {avatarDataUrl ? 'صورة شخصية ✓' : 'صورة شخصية (اختياري)'}
-                  </span>
-                  <input
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp"
-                    onChange={handleAvatarChange}
-                    className="hidden"
-                  />
-                </label>
-                {avatarDataUrl && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <img
-                      src={avatarDataUrl}
-                      alt="معاينة الصورة الشخصية"
-                      className="w-7 h-7 rounded-full object-cover"
-                    />
-                    <button
-                      type="button"
-                      aria-label="إزالة الصورة الشخصية"
-                      onClick={() => setAvatarDataUrl(null)}
-                      className="p-1 text-rose-500"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Before Solution Image */}
-              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-amber-200/70">
-                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
-                  <ImagePlus className="w-4 h-4 text-amber-500 shrink-0" />
-                  <span className="truncate">
-                    {attachmentBeforeDataUrl ? 'صورة قبل الحل ✓' : 'صورة قبل الحل (اختياري)'}
-                  </span>
-                  <input
-                    type="file"
-                    data-testid="comment-before-image-input"
-                    accept="image/png,image/jpeg,image/webp"
-                    onChange={handleBeforeImageChange}
-                    className="hidden"
-                  />
-                </label>
-                {attachmentBeforeDataUrl && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <img
-                      src={attachmentBeforeDataUrl}
-                      alt="معاينة صورة قبل الحل"
-                      className="w-8 h-7 rounded-lg object-cover border border-amber-300"
-                    />
-                    <button
-                      type="button"
-                      aria-label="إزالة صورة قبل الحل"
-                      onClick={() => setAttachmentBeforeDataUrl(null)}
-                      className="p-1 text-rose-500"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* After Solution Image */}
-              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-emerald-200/70">
-                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
-                  <ImagePlus className="w-4 h-4 text-emerald-500 shrink-0" />
-                  <span className="truncate">
-                    {attachmentAfterDataUrl ? 'صورة بعد الحل ✓' : 'صورة بعد الحل (اختياري)'}
-                  </span>
-                  <input
-                    type="file"
-                    data-testid="comment-after-image-input"
-                    accept="image/png,image/jpeg,image/webp"
-                    onChange={handleAfterImageChange}
-                    className="hidden"
-                  />
-                </label>
-                {attachmentAfterDataUrl && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <img
-                      src={attachmentAfterDataUrl}
-                      alt="معاينة صورة بعد الحل"
-                      className="w-8 h-7 rounded-lg object-cover border border-emerald-300"
-                    />
-                    <button
-                      type="button"
-                      aria-label="إزالة صورة بعد الحل"
-                      onClick={() => setAttachmentAfterDataUrl(null)}
-                      className="p-1 text-rose-500"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Optional Private Phone Verification Field (Never Shown Publicly) */}
-            <div className="p-3 rounded-xl clay-card space-y-2 border border-indigo-100/80">
-              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 font-ios">
-                <Phone className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-                <span>رقم الهاتف للتوثيق (اختياري تمامًا)</span>
-              </div>
-              <p className="text-[11px] font-medium text-slate-600 font-ios leading-relaxed">
-                رقم الهاتف اختياري تمامًا، ومش مطلوب منك تكتبه. بنوفره فقط لو حابب تساعدنا في التأكد من إنك تعاملت مع عمر صبري، وتشارك تجربتك الحقيقية مع الخدمة.
-              </p>
-              <input
-                type="tel"
-                dir="ltr"
-                data-testid="comment-phone-input"
-                value={contactPhone}
-                onChange={(e) => setContactPhone(e.target.value)}
-                placeholder="01XXXXXXXXX (اختياري)"
-                className="w-full sm:w-64 px-3 py-1.5 rounded-xl text-xs font-mono clay-inset border-none outline-none text-slate-900 text-left"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={submitting}
-              className="clay-apple-blue py-2.5 px-6 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 text-white font-ios shadow-md disabled:opacity-60"
-            >
-              <SendHorizonal className="w-4 h-4" />
-              <span>{submitting ? 'جاري النشر...' : 'نشر التعليق للجميع'}</span>
-            </button>
-          </form>
-        )}
-
-        {/* Comments List — Balanced Two-Column RTL Grid (2 cards/row on desktop, 1 on mobile) */}
+        {/* Comments List — Shown FIRST Above Add-Review Form (Natural card heights) */}
         {loading ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="h-40 rounded-2xl clay-inset animate-pulse" />
             <div className="h-40 rounded-2xl clay-inset animate-pulse" />
           </div>
         ) : visibleComments.length === 0 ? (
-          <div className="p-6 rounded-2xl clay-inset text-center space-y-2">
+          <div className="p-6 rounded-2xl clay-inset text-center space-y-2 mb-5">
             <p className="text-sm font-bold font-ios text-slate-700">
               {comments.length === 0
                 ? 'لسه مفيش تعليقات منشورة دلوقتي.'
@@ -932,7 +692,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
           <div
             data-testid="comments-grid"
             dir="rtl"
-            className="grid grid-cols-1 md:grid-cols-2 gap-4 items-stretch"
+            className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start"
           >
             {visibleComments.map((cmt) => {
               const beforeImg = cmt.attachmentBeforeUrl || cmt.attachmentUrl || null;
@@ -944,7 +704,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
                 <article
                   key={cmt.id}
                   data-testid={`comment-card-${cmt.id}`}
-                  className="min-w-0 overflow-hidden clay-inset p-4 rounded-2xl text-right flex flex-col justify-between gap-3 h-full border border-white/60"
+                  className="min-w-0 overflow-hidden clay-inset p-4 rounded-2xl text-right flex flex-col gap-3 border border-white/60"
                 >
                   <div className="space-y-2.5 min-w-0">
                     {/* Compact Card Header */}
@@ -1242,6 +1002,255 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
               <ExternalLink className="w-3.5 h-3.5" />
             </button>
           </div>
+        )}
+
+        {/* Add Comment Form — Positioned BELOW Reviews List */}
+        {isFormOpen && (
+          <form
+            onSubmit={handleSubmit}
+            className="mt-6 p-3.5 sm:p-5 rounded-2xl clay-inset space-y-3 border border-indigo-200/50"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <h3 className="text-sm font-black font-ios text-slate-900">
+                شارك تجربتك مع الكل (مع صور قبل الحل وبعد الحل لو حابب):
+              </h3>
+
+              {!user ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    openAuthModal('سجّل دخولك بحسابك لربط تعليقاتك وتعديلاتك باسمك مباشرة.')
+                  }
+                  className="clay-btn px-3 py-1.5 rounded-xl text-[11px] font-bold text-indigo-700 flex items-center gap-1.5 font-ios self-start sm:self-auto"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  <span>تسجيل الدخول لربط التعليق بحسابك</span>
+                </button>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-emerald-500/15 text-emerald-700 text-[11px] font-bold font-ios self-start sm:self-auto">
+                  <BadgeCheck className="w-3.5 h-3.5" />
+                  <span>
+                    مرتبط بحسابك ({user.name}
+                    {user.serialNumber ? ` · ${user.serialNumber}` : ''})
+                  </span>
+                </span>
+              )}
+            </div>
+
+            {formMsg && (
+              <div
+                className={`p-2.5 rounded-xl clay-card text-xs font-bold font-ios ${
+                  formMsg.type === 'ok'
+                    ? 'text-emerald-700'
+                    : 'text-rose-600'
+                }`}
+              >
+                {formMsg.text}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
+                  اسمك:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={authorName}
+                  onChange={(e) => setAuthorName(e.target.value)}
+                  placeholder="عمر صبري"
+                  className="w-full px-3 py-2 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
+                  السنة / القسم:
+                </label>
+                <select
+                  value={grade}
+                  onChange={(e) => setGrade(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900"
+                >
+                  <option value="أولى بكالوريا">أولى بكالوريا</option>
+                  <option value="تانية بكالوريا">تانية بكالوريا</option>
+                  <option value="تانية بكالوريا - الثقافة المالية">تانية بكالوريا - الثقافة المالية</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
+                تقييمك:
+              </label>
+              <div className="flex items-center gap-1.5">
+                {[1, 2, 3, 4, 5].map((star) => (
+                  <button
+                    key={star}
+                    type="button"
+                    aria-label={`تقييم ${star} نجوم`}
+                    onClick={() => setRating(star)}
+                    className="p-1.5 rounded-xl clay-btn"
+                  >
+                    <Star
+                      className={`w-4 h-4 ${
+                        star <= rating ? 'fill-amber-400 text-amber-400' : 'text-slate-300'
+                      }`}
+                    />
+                  </button>
+                ))}
+                <span className="text-xs font-bold text-slate-500 font-ios mr-2">{rating} من 5</span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-700 mb-1 font-ios">
+                تعليقك وتجربتك:
+              </label>
+              <textarea
+                required
+                rows={3}
+                value={content}
+                onChange={(e) => setContent(e.target.value)}
+                placeholder="احكي تجربتك بصراحة..."
+                className="w-full p-3 rounded-xl text-xs sm:text-sm font-ios clay-card border-none outline-none text-slate-900 resize-none"
+              />
+            </div>
+
+            {/* Optional Avatar + Before & After Solution Images */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+              {/* Avatar */}
+              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
+                  <UserCircle2 className="w-4 h-4 text-indigo-500 shrink-0" />
+                  <span className="truncate">
+                    {avatarDataUrl ? 'صورة شخصية ✓' : 'صورة شخصية (اختياري)'}
+                  </span>
+                  <input
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleAvatarChange}
+                    className="hidden"
+                  />
+                </label>
+                {avatarDataUrl && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={avatarDataUrl}
+                      alt="معاينة الصورة الشخصية"
+                      className="w-7 h-7 rounded-full object-cover"
+                    />
+                    <button
+                      type="button"
+                      aria-label="إزالة الصورة الشخصية"
+                      onClick={() => setAvatarDataUrl(null)}
+                      className="p-1 text-rose-500"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Before Solution Image */}
+              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-amber-200/70">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
+                  <ImagePlus className="w-4 h-4 text-amber-500 shrink-0" />
+                  <span className="truncate">
+                    {attachmentBeforeDataUrl ? 'صورة قبل الحل ✓' : 'صورة قبل الحل (اختياري)'}
+                  </span>
+                  <input
+                    type="file"
+                    data-testid="comment-before-image-input"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleBeforeImageChange}
+                    className="hidden"
+                  />
+                </label>
+                {attachmentBeforeDataUrl && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={attachmentBeforeDataUrl}
+                      alt="معاينة صورة قبل الحل"
+                      className="w-8 h-7 rounded-lg object-cover border border-amber-300"
+                    />
+                    <button
+                      type="button"
+                      aria-label="إزالة صورة قبل الحل"
+                      onClick={() => setAttachmentBeforeDataUrl(null)}
+                      className="p-1 text-rose-500"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* After Solution Image */}
+              <div className="p-2.5 rounded-xl clay-card flex items-center justify-between gap-2 border border-emerald-200/70">
+                <label className="cursor-pointer flex items-center gap-2 text-xs font-bold text-slate-700 font-ios flex-1 min-w-0">
+                  <ImagePlus className="w-4 h-4 text-emerald-500 shrink-0" />
+                  <span className="truncate">
+                    {attachmentAfterDataUrl ? 'صورة بعد الحل ✓' : 'صورة بعد الحل (اختياري)'}
+                  </span>
+                  <input
+                    type="file"
+                    data-testid="comment-after-image-input"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={handleAfterImageChange}
+                    className="hidden"
+                  />
+                </label>
+                {attachmentAfterDataUrl && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <img
+                      src={attachmentAfterDataUrl}
+                      alt="معاينة صورة بعد الحل"
+                      className="w-8 h-7 rounded-lg object-cover border border-emerald-300"
+                    />
+                    <button
+                      type="button"
+                      aria-label="إزالة صورة بعد الحل"
+                      onClick={() => setAttachmentAfterDataUrl(null)}
+                      className="p-1 text-rose-500"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Optional Private Phone Verification Field (Never Shown Publicly) */}
+            <div className="p-3 rounded-xl clay-card space-y-2 border border-indigo-100/80">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 font-ios">
+                <Phone className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                <span>رقم الهاتف للتوثيق (اختياري تمامًا)</span>
+              </div>
+              <p className="text-[11px] font-medium text-slate-600 font-ios leading-relaxed">
+                رقم الهاتف اختياري تمامًا، ومش مطلوب منك تكتبه. بنوفره فقط لو حابب تساعدنا في التأكد من إنك تعاملت مع عمر صبري، وتشارك تجربتك الحقيقية مع الخدمة.
+              </p>
+              <input
+                type="tel"
+                dir="ltr"
+                data-testid="comment-phone-input"
+                value={contactPhone}
+                onChange={(e) => setContactPhone(e.target.value)}
+                placeholder="01XXXXXXXXX (اختياري)"
+                className="w-full sm:w-64 px-3 py-1.5 rounded-xl text-xs font-mono clay-inset border-none outline-none text-slate-900 text-left"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={submitting}
+              className="clay-apple-blue py-2.5 px-6 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 text-white font-ios shadow-md disabled:opacity-60"
+            >
+              <SendHorizonal className="w-4 h-4" />
+              <span>{submitting ? 'جاري النشر...' : 'نشر التعليق للجميع'}</span>
+            </button>
+          </form>
         )}
       </div>
 

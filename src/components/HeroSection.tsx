@@ -173,10 +173,10 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                 <span>𝕯𝖊𝖛 : عُـمـر صَـبـري</span>
               </div>
 
-              {/* Tag: حلول معتمدة */}
+              {/* Tag: حلول منظمة ومعتمدة */}
               <div className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1 rounded-2xl clay-inset text-xs font-bold text-indigo-700 font-decorative">
                 <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-                <span>حلول معتمدة 100%</span>
+                <span>حلول منظمة ومراجعة</span>
               </div>
             </div>
 
@@ -184,13 +184,13 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             <h1 className="text-2xl sm:text-4xl lg:text-5xl font-black font-decorative text-slate-900 leading-[1.3] sm:leading-[1.35] tracking-tight">
               بص يا مدير.. إحنا عارفين الحوار وما فيه،
               <span className="block mt-1">
-                عملتلك أداة بتخلّص الليلة كلها في 4 دقايق بس! ✨
+                عملتلك أداة بتوفّر وقتك وتنجز المنصة بسلاسة! ✨
               </span>
             </h1>
 
             {/* Expressive Display Paragraph */}
             <p className="text-xs sm:text-sm md:text-base text-slate-700 font-medium leading-relaxed max-w-2xl font-ios">
-              قدامك 87 فصل وأكتر من 600 سؤال وكود مطلوبين منك في أولى وتانية بكالوريا؛ يا إما تقعد تسحل نفسك ليل نهار نسخ ولصق وتدعك عينك وتضيع يومك كله.. يا إما تشغل دماغك! جهزتلك مكتبة حلول نموذجية مجانية بالكامل، وعملتلك أداة ذكية بتدخل وتحل الامتحان بمحاكاة بشرية تامة والمنصة تحلف إنك الطالب المجتهد اللي مفيش زيه.
+              قدامك 87 فصل وأكتر من 600 سؤال وكود مطلوبين منك في أولى وتانية بكالوريا؛ بدل ما تقضي ساعات في النسخ والبحث، جهزتلك مكتبة حلول نموذجية مجانية بالكامل، وأداة ذكية مصممة بمحاكاة بشرية هادئة لتسهيل إنجاز المهام بسرعة وأمان.
             </p>
 
             {/* Tactile Highlights Badges with decorative font */}
@@ -201,11 +201,11 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               </div>
               <div className="px-3 py-1.5 rounded-xl clay-inset flex items-center gap-1.5">
                 <CheckCircle2 className="w-3.5 h-3.5 text-purple-500 shrink-0" />
-                <span>تانية بكالوريا: 54 جافا + بايثون + المالية</span>
+                <span>تانية بكالوريا: جافا + مالية (بايثون قريباً للأداة)</span>
               </div>
               <div className="px-3 py-1.5 rounded-xl clay-inset flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-                <span>محاكاة بشرية لا تكشفها المنصة</span>
+                <span>محاكاة بشرية هادئة لحسابك</span>
               </div>
             </div>
           </div>
@@ -218,7 +218,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               className="clay-apple-blue py-3 sm:py-3.5 px-4 sm:px-5 rounded-2xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 shadow-lg text-white font-ios"
             >
               <Zap className="w-4 h-4 fill-amber-300 text-amber-300" />
-              <span>إزاي الأداة بتحل في 4 دقايق؟</span>
+              <span>إزاي الأداة بتشتغل؟</span>
             </button>
 
             <button

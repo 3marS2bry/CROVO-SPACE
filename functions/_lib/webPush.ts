@@ -34,8 +34,8 @@ export const NOTIFICATION_TEMPLATES: NotificationTemplate[] = [
   {
     id: 'offer-time-saver',
     category: 'offer',
-    title: 'خلّص 600+ سؤال في 4 دقايق بدل السهر! ⏱️',
-    body: 'أداة CROVO بتدخل تكتب وتجاوب بهدوء وبنفس أسلوب الطالب العادي بنسبة نجاح 100%.',
+    title: 'وفر وقتك في حل 600+ سؤال بدل السهر! ⏱️',
+    body: 'أداة CROVO مصممة لتنفيذ الحلول بهدوء وبأسلوب طبيعي يختصر عليك ساعات من المجهود.',
     url: '/',
   },
   {
@@ -56,7 +56,7 @@ export const NOTIFICATION_TEMPLATES: NotificationTemplate[] = [
     id: 'offer-poll',
     category: 'offer',
     title: 'شاركنا رأيك: تحب نمد عرض الـ50%؟ 🗳️',
-    body: 'صوّت في الاستفتاء المباشر على الموقع وتابع النسبة الحقيقية بين الطلاب.',
+    body: 'صوّت في الاستفتاء المباشر على الموقع وتابع نتائج التصويت مع باقي الطلاب.',
     url: '/#poll-section',
   },
   {

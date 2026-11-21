@@ -13,11 +13,13 @@ import {
   verifyToken,
 } from './crypto.ts';
 import {
+  type AdWorkflowStatus,
   buildDefaultSiteConfig,
   DEFAULT_TOOL_SERVICES,
   DEFAULT_TOOL_VIDEOS,
   getBundledChapters,
   getChapterSectionDefaultTitle,
+  type LibraryAdDraftConfig,
   type PublicSiteConfig,
   type ToolServiceConfig,
   type ToolVideoConfig,
@@ -89,25 +91,29 @@ const ALLOWED_ANALYTICS_EVENTS = new Set([
   'push_error',
 ]);
 
-let devSessionSecretCache = '';
-let devEncryptionKeyCache = '';
+let devBaseSecretCache = '';
+const derivedSecretCache = new Map<string, { sessionSecret: string; encryptionKey: string }>();
 
-function resolveRuntimeSecrets(env: Env): { sessionSecret: string; encryptionKey: string } {
+async function resolveRuntimeSecrets(env: Env): Promise<{ sessionSecret: string; encryptionKey: string }> {
   const envSession = (env.SESSION_SECRET || '').trim();
   const envEnc = (env.CREDENTIAL_ENCRYPTION_KEY || '').trim();
-
-  if (!devSessionSecretCache) {
-    devSessionSecretCache = envSession || randomHex(32);
+  if (!envSession && !devBaseSecretCache) {
+    devBaseSecretCache = randomHex(32);
   }
-  if (!devEncryptionKeyCache) {
-    devEncryptionKeyCache =
-      envEnc && envEnc !== devSessionSecretCache ? envEnc : randomHex(32);
-  }
+  const cacheKey = `${envSession || devBaseSecretCache}::${envEnc}`;
+  const cached = derivedSecretCache.get(cacheKey);
+  if (cached) return cached;
 
-  return {
-    sessionSecret: envSession || devSessionSecretCache,
-    encryptionKey: envEnc || devEncryptionKeyCache,
-  };
+  const baseSession = envSession || devBaseSecretCache;
+  const sessionSecret = await sha256Hex(`sign:${baseSession}`);
+  const encryptionKey =
+    envEnc && envEnc !== envSession
+      ? envEnc
+      : await sha256Hex(`enc:${envEnc || baseSession}`);
+
+  const resolved = { sessionSecret, encryptionKey };
+  derivedSecretCache.set(cacheKey, resolved);
+  return resolved;
 }
 
 function parseCookies(cookieHeader: string | null): Record<string, string> {
@@ -1489,6 +1495,26 @@ function buildPollStateFromDoc(
   };
 }
 
+function toCairoDayKey(tsMs: number): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(tsMs));
+  } catch {
+    return new Date(tsMs).toISOString().slice(0, 10);
+  }
+}
+
+function getCairoMidnightUtcMs(tsMs: number): number {
+  const dayKey = toCairoDayKey(tsMs);
+  // Cairo is UTC+2 (or UTC+3 during DST); anchor day bucket safely around Cairo midnight
+  const probe = Date.parse(`${dayKey}T00:00:00+02:00`);
+  return Number.isFinite(probe) ? probe : new Date(tsMs).setUTCHours(0, 0, 0, 0);
+}
+
 function computeDashboardAnalytics(params: {
   range: string;
   fromParam?: string | null;
@@ -1510,13 +1536,14 @@ function computeDashboardAnalytics(params: {
 
   switch (params.range) {
     case 'today': {
-      const start = new Date(now);
-      start.setUTCHours(0, 0, 0, 0);
-      fromMs = start.getTime();
+      fromMs = getCairoMidnightUtcMs(toMs);
       break;
     }
     case '30d':
       fromMs = toMs - 30 * 24 * 3600_000;
+      break;
+    case 'year':
+      fromMs = toMs - 365 * 24 * 3600_000;
       break;
     case 'all':
       fromMs = Date.parse(params.trackingStartedAt) || Date.parse('2026-01-01T00:00:00.000Z');
@@ -1566,7 +1593,7 @@ function computeDashboardAnalytics(params: {
     if (vid) uniqueSet.add(vid);
     if (uid) activeUserSet.add(uid);
 
-    const dayKey = new Date(ts).toISOString().slice(0, 10);
+    const dayKey = toCairoDayKey(ts);
     const dayEntry = dayMap.get(dayKey) || {
       day: dayKey,
       visitors: new Set<string>(),
@@ -1750,7 +1777,7 @@ function computeDashboardAnalytics(params: {
 
 export async function handleApiRequest(request: Request, env: Env): Promise<Response> {
   const cfg = resolveFirestoreConfig(env);
-  const { sessionSecret, encryptionKey } = resolveRuntimeSecrets(env);
+  const { sessionSecret, encryptionKey } = await resolveRuntimeSecrets(env);
 
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, '') || '/';
@@ -2296,22 +2323,25 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const id = `qrep_${reportHash.slice(0, 28)}`;
 
       try {
+        const reportDocData: Record<string, unknown> = {
+          id,
+          reporterUid: currentUser ? currentUser.id : 'guest_report',
+          questionKey: input.questionKey,
+          grade: input.grade,
+          section: input.section,
+          chapterNum: input.chapterNum,
+          qIndex: input.qIndex,
+          questionTitle: input.questionTitle,
+          description: input.description,
+          status: 'pending',
+        };
+        if (input.reason) reportDocData.reason = input.reason;
+        if (input.suggestedSolution) reportDocData.suggestedSolution = input.suggestedSolution;
         await createDoc(
           cfg,
           'question_reports',
           id,
-          {
-            id,
-            reporterUid: currentUser ? currentUser.id : 'guest_report',
-            questionKey: input.questionKey,
-            grade: input.grade,
-            section: input.section,
-            chapterNum: input.chapterNum,
-            qIndex: input.qIndex,
-            questionTitle: input.questionTitle,
-            description: input.description,
-            status: 'pending',
-          },
+          reportDocData,
           ['createdAt', 'updatedAt'],
           idToken ? { idToken } : { apiKey: cfg.apiKey }
         );
@@ -2596,7 +2626,27 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         return jsonResponse(ctx, { error: 'حجم صورة المرفق كبير جداً. الحد الأقصى 240KB للصورة.' }, 400);
       }
 
+      if (validated.orderCode) {
+        const existingForOrder = await runQuery<Record<string, unknown>>(
+          cfg,
+          'comments',
+          {
+            filters: [{ fieldPath: 'orderCode', op: 'EQUAL', value: validated.orderCode }],
+            limit: 1,
+          },
+          { idToken }
+        ).catch(() => []);
+        if (existingForOrder.length > 0) {
+          return jsonResponse(
+            ctx,
+            { error: `تم إرسال تقييم للطلب رقم #${validated.orderCode} من قبل بالفعل.` },
+            409
+          );
+        }
+      }
+
       const id = generateId('cmt');
+      const commentStatus = validated.moderationPending ? 'pending' : 'approved';
       const commentDoc: Record<string, unknown> = {
         id,
         authorUid: currentUser.id,
@@ -2605,10 +2655,12 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         rating: validated.rating,
         content: validated.content,
         isVerified: false,
-        status: 'approved',
+        status: commentStatus,
         likesCount: 0,
         reportsCount: 0,
       };
+      if (validated.orderCode) commentDoc.orderCode = validated.orderCode;
+      if (validated.source) commentDoc.source = validated.source;
       if (avatarDataUrl) commentDoc.avatarDataUrl = avatarDataUrl;
       if (beforeDataUrl) commentDoc.attachmentBeforeDataUrl = beforeDataUrl;
       if (afterDataUrl) commentDoc.attachmentAfterDataUrl = afterDataUrl;
@@ -2640,12 +2692,19 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       return jsonResponse(
         ctx,
         {
+          moderationPending: commentStatus === 'pending',
+          message:
+            commentStatus === 'pending'
+              ? 'تم استلام تقييمك وهو الآن قيد المراجعة وسيظهر فور موافقة الإدارة.'
+              : undefined,
           comment: {
             id,
             authorName: validated.authorName,
             grade: validated.grade,
             rating: validated.rating,
             content: validated.content,
+            status: commentStatus,
+            orderCode: validated.orderCode || null,
             avatarUrl: avatarDataUrl,
             attachmentUrl: beforeDataUrl,
             attachmentBeforeUrl: beforeDataUrl,
@@ -3080,8 +3139,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       const rlResp = await applyRateLimitOr429(ctx, 'order_create', `${ipHash}:${visitorId}`, 8, 15 * 60);
       if (rlResp) return rlResp;
 
-      const cfgDoc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', { apiKey: cfg.apiKey });
-      const siteCfg = mergeSiteConfig(cfgDoc?.data || null, env);
+      const siteCfgRes = await safePublicWithFallback(mergeSiteConfig(null, env), () => getSiteConfigCached(cfg, env));
+      const siteCfg = siteCfgRes.value;
 
       if (!siteCfg.ordersEnabled) {
         return jsonResponse(ctx, { error: 'استقبال الطلبات متوقف مؤقتاً من الإدارة. حاول تاني بعد شوية.' }, 403);
@@ -3116,13 +3175,24 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           () => null
         );
         if (cached) {
-          return jsonResponse(ctx, { deduplicated: true, order: cached }, 200);
+          return jsonResponse(
+            ctx,
+            {
+              deduplicated: true,
+              savedToServer: true,
+              pendingManualConfirmation: true,
+              dbSaveStatus: 'saved',
+              order: cached,
+            },
+            200
+          );
         }
       }
 
       const encrypted = await encryptSecret(validated.platformPassword, encryptionKey);
-      const orderCode = formatOrderCode();
+      const orderCode = formatOrderCode(sanitizedReqId || undefined);
       const authorUid = currentUser ? currentUser.id : 'guest_order';
+      const nowIso = new Date().toISOString();
 
       const orderDocData: Record<string, unknown> = {
         id: orderId,
@@ -3143,6 +3213,20 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         offerApplied: pricing.offerApplied,
         paymentMethod: validated.paymentMethod,
         status: 'new',
+        paymentStatus: 'pending_verification',
+        subscriptionStatus: 'pending_confirmation',
+        source: 'client_checkout',
+        changeLog: [
+          {
+            at: nowIso,
+            by: currentUser?.email || 'client',
+            fromStatus: null,
+            toStatus: 'new',
+            paymentStatus: 'pending_verification',
+            subscriptionStatus: 'pending_confirmation',
+            note: 'طلب اشتراك جديد من نموذج الموقع',
+          },
+        ],
       };
       if (sanitizedReqId) orderDocData.clientRequestId = sanitizedReqId;
       if (currentUser?.serialNumber) orderDocData.userSerialNumber = currentUser.serialNumber;
@@ -3160,7 +3244,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         offerApplied: pricing.offerApplied,
         paymentMethod: validated.paymentMethod,
         status: 'new' as const,
-        createdAt: new Date().toISOString(),
+        paymentStatus: 'pending_verification' as const,
+        subscriptionStatus: 'pending_confirmation' as const,
+        serverRecorded: true,
+        createdAt: nowIso,
       };
 
       try {
@@ -3184,6 +3271,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
                 ctx,
                 {
                   deduplicated: true,
+                  savedToServer: true,
+                  pendingManualConfirmation: true,
+                  dbSaveStatus: 'saved',
                   order: {
                     id: existingOrder.id,
                     orderCode: String(d.orderCode || orderCode),
@@ -3196,6 +3286,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
                     offerApplied: Boolean(d.offerApplied),
                     paymentMethod: String(d.paymentMethod || receipt.paymentMethod),
                     status: (d.status as 'new' | 'reviewing' | 'completed' | 'cancelled') || 'new',
+                    paymentStatus: String(d.paymentStatus || 'pending_verification'),
+                    subscriptionStatus: String(d.subscriptionStatus || 'pending_confirmation'),
+                    serverRecorded: true,
                     createdAt: normalizeIsoTimestamp(d.createdAt),
                   },
                 },
@@ -3203,16 +3296,45 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               );
             }
           }
-          return jsonResponse(ctx, { deduplicated: true, order: receipt }, 200);
+          return jsonResponse(
+            ctx,
+            {
+              deduplicated: true,
+              savedToServer: true,
+              pendingManualConfirmation: true,
+              dbSaveStatus: 'saved',
+              order: receipt,
+            },
+            200
+          );
         }
-        throw err;
+
+        const isQuota = isExplicitQuotaError(err);
+        if (isQuota) {
+          markQuotaExceeded(cfg);
+        }
+        // Decouple WhatsApp checkout conversion from Firestore availability/quota
+        return jsonResponse(
+          ctx,
+          {
+            deduplicated: false,
+            savedToServer: false,
+            pendingManualConfirmation: true,
+            dbSaveStatus: isQuota ? 'quota_exceeded' : 'db_error',
+            order: {
+              ...receipt,
+              serverRecorded: false,
+            },
+          },
+          200
+        );
       }
 
       if (kvIdemKey && env.RATE_LIMIT_KV) {
         await env.RATE_LIMIT_KV.put(kvIdemKey, JSON.stringify(receipt), { expirationTtl: 86_400 }).catch(() => {});
       }
 
-      await recordAnalyticsEvent(cfg, {
+      void recordAnalyticsEvent(cfg, {
         eventType: 'order_create',
         visitorId,
         userId: currentUser?.id || null,
@@ -3220,7 +3342,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         grade: validated.grade,
       }).catch(() => {});
 
-      return jsonResponse(ctx, { deduplicated: false, order: receipt }, 201);
+      return jsonResponse(
+        ctx,
+        {
+          deduplicated: false,
+          savedToServer: true,
+          pendingManualConfirmation: true,
+          dbSaveStatus: 'saved',
+          order: receipt,
+        },
+        201
+      );
     }
 
     // ==================== ADMIN AUTH & ENDPOINTS ====================
@@ -3494,7 +3626,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           safeListIfAdmin<Record<string, unknown>>('users', { pageSize: 300, maxDocs: 2500 }),
           safeListIfAdmin<Record<string, unknown>>('analytics_events', { pageSize: 300, maxDocs: 800 }),
           safeListIfAdmin<Record<string, unknown>>('analytics_daily', { pageSize: 300, maxDocs: 500 }),
-          safeListIfAdmin<Record<string, unknown>>('tool_runs', { pageSize: 200, maxDocs: 400 }),
+          Promise.resolve([] as Array<{ id: string; data: Record<string, unknown> }>),
           safeOp('counters', () => getDoc<{ count?: number }>(cfg, 'counters/tool', publicOrAdminAuth), null),
           safeListIfAdmin<Record<string, unknown>>('system_backups', { pageSize: 40, maxDocs: 40 }),
           safeListIfAdmin<Record<string, unknown>>('system_migrations', { pageSize: 20, maxDocs: 20 }),
@@ -3576,6 +3708,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               offerApplied: Boolean(o.offerApplied),
               paymentMethod: String(o.paymentMethod || ''),
               status: (o.status as 'new' | 'reviewing' | 'completed' | 'cancelled') || 'new',
+              paymentStatus: (o.paymentStatus as string) || (o.status === 'completed' ? 'paid' : 'pending_verification'),
+              subscriptionStatus: (o.subscriptionStatus as string) || (o.status === 'completed' ? 'active' : 'pending_confirmation'),
+              source: typeof o.source === 'string' ? o.source : 'client_checkout',
+              adminNote: typeof o.adminNote === 'string' ? o.adminNote : null,
+              changeLog: Array.isArray(o.changeLog) ? o.changeLog : [],
               createdAt: normalizeIsoTimestamp(o.createdAt),
               updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : null,
             };
@@ -3601,7 +3738,9 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               contactPhone: null,
               showContactPublicly: false,
               isVerified: Boolean(c.isVerified),
-              status: (c.status as 'approved' | 'hidden' | 'flagged') || 'approved',
+              status: (c.status as 'approved' | 'pending' | 'hidden' | 'flagged') || 'approved',
+              orderCode: typeof c.orderCode === 'string' ? c.orderCode : null,
+              source: typeof c.source === 'string' ? c.source : 'standard',
               likesCount: Math.max(0, Number(c.likesCount || 0)),
               reportsCount: Math.max(0, Number(c.reportsCount || 0)),
               reports: [] as Array<{ reason: string; createdAt: string }>,
@@ -3622,6 +3761,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
               qIndex: Number(r.qIndex || 0),
               questionTitle: String(r.questionTitle || ''),
               description: String(r.description || ''),
+              reason: typeof r.reason === 'string' ? r.reason : null,
+              suggestedSolution: typeof r.suggestedSolution === 'string' ? r.suggestedSolution : null,
               status: (r.status as 'pending' | 'reviewed' | 'resolved' | 'dismissed') || 'pending',
               adminNote: typeof r.adminNote === 'string' ? r.adminNote : null,
               createdAt: normalizeIsoTimestamp(r.createdAt),
@@ -3866,7 +4007,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             safeOp('users', () => listCollection<Record<string, unknown>>(cfg, 'users', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
             safeOp('orders', () => listCollection<Record<string, unknown>>(cfg, 'orders', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
             safeOp('question_stats', () => listCollection<Record<string, unknown>>(cfg, 'question_stats', authObj, { pageSize: 300, maxDocs: 800 }), []),
-            safeOp('tool_runs', () => listCollection<Record<string, unknown>>(cfg, 'tool_runs', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 400 }), []),
+            Promise.resolve([] as Array<{ id: string; data: Record<string, unknown> }>),
             safeOp('comments', () => listCollection<Record<string, unknown>>(cfg, 'comments', { idToken: admin.idToken! }, { pageSize: 300, maxDocs: 2500 }), []),
             safeOp('polls', () => listCollection<Record<string, unknown>>(cfg, 'polls', authObj, { pageSize: 50, maxDocs: 50 }), []),
             safeOp('counters', () => getDoc<{ count?: number }>(cfg, 'counters/tool', authObj), null),
@@ -3954,7 +4095,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         const statusFilter = (url.searchParams.get('status') || '').trim();
         const gradeFilter = (url.searchParams.get('grade') || '').trim();
         const sortOrder = url.searchParams.get('sort') === 'oldest' ? 'oldest' : 'newest';
-        const usersCacheKey = `${scopeKey}:users:${q}:${roleFilter}:${statusFilter}:${gradeFilter}:${sortOrder}`;
+        const includeAll = url.searchParams.get('all') === '1';
+        const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize')) || 25));
+        const requestedPage = Math.max(1, Number(url.searchParams.get('page')) || 1);
+        const usersCacheKey = `${scopeKey}:users:${q}:${roleFilter}:${statusFilter}:${gradeFilter}:${sortOrder}:${includeAll ? 'all' : `${requestedPage}:${pageSize}`}`;
 
         if (!isMockedFetchActive() && url.searchParams.get('refresh') !== '1') {
           const hit = adminReadCache.get(usersCacheKey);
@@ -4010,7 +4154,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             unclassified: allMapped.filter((u) => u.grade === 'unclassified').length,
           };
 
-          const users = allMapped
+          const filteredUsers = allMapped
             .filter((u) => {
               if (roleFilter && u.role !== roleFilter) return false;
               if (statusFilter && u.status !== statusFilter) return false;
@@ -4030,9 +4174,20 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
                 : Date.parse(b.createdAt) - Date.parse(a.createdAt)
             );
 
+          const totalMatching = filteredUsers.length;
+          const totalPages = includeAll ? 1 : Math.max(1, Math.ceil(totalMatching / pageSize));
+          const safePage = includeAll ? 1 : Math.min(requestedPage, totalPages);
+          const users = includeAll
+            ? filteredUsers
+            : filteredUsers.slice((safePage - 1) * pageSize, safePage * pageSize);
+
           const fullUnfiltered = !q && !roleFilter && !statusFilter && !gradeFilter;
           const resultPayload = {
             users,
+            page: safePage,
+            pageSize: includeAll ? totalMatching : pageSize,
+            totalMatching,
+            totalPages,
             counts,
             dbStatus: 'ok' as DbStatusState,
             dbError: null,
@@ -4067,6 +4222,10 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           }
           return jsonResponse(ctx, {
             users: [],
+            page: 1,
+            pageSize,
+            totalMatching: 0,
+            totalPages: 1,
             counts: { total: 0, bac1: 0, bac2: 0, unclassified: 0 },
             dbStatus: classified.status,
             dbError,
@@ -4102,6 +4261,17 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           updateMask.push('suspendReason');
         }
 
+        // Prevent self-escalation / self-demotion / self-suspension
+        if (targetUid === ctx.fbUser?.uid && (updates.role !== undefined || updates.status !== undefined)) {
+          return jsonResponse(ctx, { error: 'لا يمكنك تعديل صلاحياتك أو حالة حسابك بنفسك.' }, 403);
+        }
+
+        // Protect primary owner admin account from demotion or suspension
+        const targetEmailLower = String(targetDoc.data.email || '').trim().toLowerCase();
+        if (targetEmailLower === OWNER_ADMIN_EMAIL && (updates.role === 'user' || updates.status === 'suspended')) {
+          return jsonResponse(ctx, { error: 'لا يمكن تخفيض صلاحيات أو إيقاف حساب المالك الرئيسي للنظام.' }, 403);
+        }
+
         await patchDoc(cfg, `users/${targetUid}`, updates, updateMask, ['updatedAt'], authObj, true);
 
         if (updates.role === 'admin') {
@@ -4117,8 +4287,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           ).catch(() => {});
         } else if (updates.role === 'user' && targetUid !== ctx.fbUser?.uid) {
           await deleteDoc(cfg, `admins/${targetUid}`, authObj).catch(() => {});
+          verifiedAdminRoleCache.delete(targetUid);
         }
 
+        clearAuthUserCache(cfg, targetUid);
+        adminReadCache.clear();
         await logAdminAudit(cfg, admin.idToken, admin.username, 'update_user', 'user', targetUid, body);
         return jsonResponse(ctx, { ok: true, user: { id: targetUid, ...updates } });
       }
@@ -4760,6 +4933,171 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       }
 
       // ---------- ADMIN ORDERS ----------
+      if (method === 'POST' && path === '/api/admin/orders/manual') {
+        const body = await readJsonBody(request);
+        const fullName = typeof body.fullName === 'string' ? body.fullName.trim() : '';
+        if (fullName.length < 2 || fullName.length > 100) {
+          return jsonResponse(ctx, { error: 'اسم العميل غير صالح (حرفين على الأقل).' }, 400);
+        }
+        const grade = body.grade === 'bac2' ? 'bac2' : 'bac1';
+        const platforms = Array.isArray(body.platforms)
+          ? (body.platforms.filter((p) => p === 'qureo' || p === 'financial') as ('qureo' | 'financial')[])
+          : grade === 'bac1'
+            ? (['qureo'] as const)
+            : (['qureo'] as const);
+        if (platforms.length === 0) {
+          return jsonResponse(ctx, { error: 'اختر منصة واحدة على الأقل.' }, 400);
+        }
+        const cfgDoc = await getDoc<Record<string, unknown>>(cfg, 'site_config/public', authObj).catch(() => null);
+        const siteCfg = mergeSiteConfig(cfgDoc?.data || null, env);
+        let pricing;
+        try {
+          pricing = calculateOrderPricing(
+            {
+              grade,
+              platforms: [...platforms],
+              qureoSection: platforms.includes('qureo') && grade === 'bac2' ? 'java' : undefined,
+            },
+            siteCfg
+          );
+        } catch (err) {
+          return jsonResponse(ctx, { error: err instanceof Error ? err.message : 'بيانات الباقة غير صالحة.' }, 400);
+        }
+
+        const customCode =
+          typeof body.orderCode === 'string' && body.orderCode.trim()
+            ? body.orderCode.trim().toUpperCase().replace(/^#/, '').slice(0, 32)
+            : formatOrderCode();
+        if (!/^[A-Z0-9_-]{3,32}$/.test(customCode)) {
+          return jsonResponse(ctx, { error: 'صيغة رقم الطلب غير صالحة.' }, 400);
+        }
+
+        // Duplicate orderCode guard
+        const dupOrders = await runQuery<Record<string, unknown>>(
+          cfg,
+          'orders',
+          { filters: [{ fieldPath: 'orderCode', op: 'EQUAL', value: customCode }], limit: 1 },
+          authObj
+        ).catch(() => []);
+        if (dupOrders.length > 0) {
+          return jsonResponse(
+            ctx,
+            { error: `يوجد طلب مسجل بالفعل بنفس الرقم (#${customCode}).`, conflict: true, existingId: dupOrders[0].id },
+            409
+          );
+        }
+
+        const platformUsername =
+          typeof body.platformUsername === 'string' ? body.platformUsername.trim().slice(0, 120) : '';
+        if (platformUsername.length < 2) {
+          return jsonResponse(ctx, { error: 'اسم مستخدم المنصة مطلوب (حرفين على الأقل).' }, 400);
+        }
+        const paymentMethod =
+          typeof body.paymentMethod === 'string' && body.paymentMethod.trim()
+            ? body.paymentMethod.trim().slice(0, 80)
+            : 'محفظة إلكترونية (كاش)';
+        const status =
+          body.status === 'reviewing' || body.status === 'completed' || body.status === 'cancelled'
+            ? body.status
+            : 'new';
+        const paymentStatus =
+          body.paymentStatus === 'paid' || body.paymentStatus === 'unpaid' || body.paymentStatus === 'refunded'
+            ? body.paymentStatus
+            : 'pending_verification';
+        const subscriptionStatus =
+          body.subscriptionStatus === 'active' ||
+          body.subscriptionStatus === 'expired' ||
+          body.subscriptionStatus === 'cancelled'
+            ? body.subscriptionStatus
+            : status === 'completed'
+              ? 'active'
+              : 'pending_confirmation';
+        const finalPrice =
+          typeof body.finalPrice === 'number' && body.finalPrice >= 0
+            ? Math.round(body.finalPrice)
+            : Math.round(pricing.finalPrice);
+        const adminNote = typeof body.adminNote === 'string' ? body.adminNote.trim().slice(0, 500) : '';
+        const orderId = generateId('ord_man');
+        const nowIso = new Date().toISOString();
+
+        const orderDocData: Record<string, unknown> = {
+          id: orderId,
+          orderCode: customCode,
+          authorUid: 'admin_manual',
+          fullName,
+          grade,
+          platformLabel: pricing.platformLabel,
+          sectionDetails: pricing.sectionDetails,
+          platformsJson: JSON.stringify({ platforms, qureoSection: platforms.includes('qureo') && grade === 'bac2' ? 'java' : null }),
+          platformUsername,
+          encryptedPassword: '',
+          passwordIv: '',
+          passwordAuthTag: '',
+          credentialsPurged: true,
+          oldPrice: Math.round(pricing.oldPrice),
+          finalPrice,
+          offerApplied: finalPrice < pricing.oldPrice,
+          paymentMethod,
+          status,
+          paymentStatus,
+          subscriptionStatus,
+          source: 'admin_manual',
+          ...(adminNote ? { adminNote } : {}),
+          changeLog: [
+            {
+              at: nowIso,
+              by: admin.username,
+              fromStatus: null,
+              toStatus: status,
+              paymentStatus,
+              subscriptionStatus,
+              note: adminNote || 'تسجيل ومطابقة طلب يدوي من واتساب',
+            },
+          ],
+        };
+
+        await createDoc(cfg, 'orders', orderId, orderDocData, ['createdAt', 'updatedAt'], authObj);
+        adminReadCache.clear();
+        await logAdminAudit(cfg, admin.idToken, admin.username, 'create_manual_order', 'order', orderId, {
+          orderCode: customCode,
+          fullName,
+          finalPrice,
+          paymentStatus,
+          subscriptionStatus,
+        });
+
+        return jsonResponse(
+          ctx,
+          {
+            ok: true,
+            order: {
+              id: orderId,
+              orderCode: customCode,
+              fullName,
+              grade,
+              platformLabel: pricing.platformLabel,
+              sectionDetails: pricing.sectionDetails,
+              platformUsername,
+              platformPassword: null,
+              credentialsPurged: true,
+              oldPrice: Math.round(pricing.oldPrice),
+              finalPrice,
+              offerApplied: finalPrice < pricing.oldPrice,
+              paymentMethod,
+              status,
+              paymentStatus,
+              subscriptionStatus,
+              source: 'admin_manual',
+              adminNote: adminNote || null,
+              changeLog: orderDocData.changeLog,
+              createdAt: nowIso,
+              updatedAt: nowIso,
+            },
+          },
+          201
+        );
+      }
+
       const orderAdminMatch = path.match(/^\/api\/admin\/orders\/([a-zA-Z0-9_-]+)$/);
       if (orderAdminMatch && method === 'PATCH') {
         const id = orderAdminMatch[1];
@@ -4767,6 +5105,23 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         if (!orderDoc) return jsonResponse(ctx, { error: 'الطلب غير موجود.' }, 404);
 
         const body = await readJsonBody(request);
+        const currentStatus = String(orderDoc.data.status || 'new');
+
+        if (
+          typeof body.expectedCurrentStatus === 'string' &&
+          body.expectedCurrentStatus !== currentStatus
+        ) {
+          return jsonResponse(
+            ctx,
+            {
+              error: `تم تغيير حالة الطلب مسبقاً إلى (${currentStatus}). حدّث البيانات قبل التعديل.`,
+              conflict: true,
+              currentStatus,
+            },
+            409
+          );
+        }
+
         const updates: Record<string, unknown> = {};
         const updateMask: string[] = ['updatedAt'];
 
@@ -4774,6 +5129,29 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           updates.status = body.status;
           updateMask.push('status');
         }
+        if (
+          body.paymentStatus === 'pending_verification' ||
+          body.paymentStatus === 'paid' ||
+          body.paymentStatus === 'unpaid' ||
+          body.paymentStatus === 'refunded'
+        ) {
+          updates.paymentStatus = body.paymentStatus;
+          updateMask.push('paymentStatus');
+        }
+        if (
+          body.subscriptionStatus === 'pending_confirmation' ||
+          body.subscriptionStatus === 'active' ||
+          body.subscriptionStatus === 'expired' ||
+          body.subscriptionStatus === 'cancelled'
+        ) {
+          updates.subscriptionStatus = body.subscriptionStatus;
+          updateMask.push('subscriptionStatus');
+        }
+        if (typeof body.adminNote === 'string') {
+          updates.adminNote = body.adminNote.trim().slice(0, 500);
+          updateMask.push('adminNote');
+        }
+
         const shouldPurge = body.purgeCredentials === true || updates.status === 'completed' || updates.status === 'cancelled';
         if (shouldPurge) {
           updates.credentialsPurged = true;
@@ -4783,12 +5161,40 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           updateMask.push('credentialsPurged', 'encryptedPassword', 'passwordIv', 'passwordAuthTag');
         }
 
+        const existingLog = Array.isArray(orderDoc.data.changeLog)
+          ? (orderDoc.data.changeLog as Array<Record<string, unknown>>)
+          : [];
+        const nextStatus = String(updates.status || currentStatus);
+        const nextPaymentStatus = String(updates.paymentStatus || orderDoc.data.paymentStatus || 'pending_verification');
+        const nextSubscriptionStatus = String(
+          updates.subscriptionStatus || orderDoc.data.subscriptionStatus || 'pending_confirmation'
+        );
+        const nextLog = [
+          ...existingLog.slice(-19),
+          {
+            at: new Date().toISOString(),
+            by: admin.username,
+            fromStatus: currentStatus,
+            toStatus: nextStatus,
+            paymentStatus: nextPaymentStatus,
+            subscriptionStatus: nextSubscriptionStatus,
+            ...(typeof updates.adminNote === 'string' && updates.adminNote ? { note: updates.adminNote } : {}),
+          },
+        ];
+        updates.changeLog = nextLog;
+        updateMask.push('changeLog');
+
         await patchDoc(cfg, `orders/${id}`, updates, updateMask, ['updatedAt'], authObj, true);
+        adminReadCache.clear();
         await logAdminAudit(cfg, admin.idToken, admin.username, 'update_order', 'order', id, updates);
 
         return jsonResponse(ctx, {
           ok: true,
-          status: String(updates.status || orderDoc.data.status || 'new'),
+          status: nextStatus,
+          paymentStatus: nextPaymentStatus,
+          subscriptionStatus: nextSubscriptionStatus,
+          adminNote: typeof updates.adminNote === 'string' ? updates.adminNote : (orderDoc.data.adminNote as string | null) ?? null,
+          changeLog: nextLog,
           credentialsPurged: Boolean(updates.credentialsPurged || orderDoc.data.credentialsPurged),
         });
       }
@@ -4796,6 +5202,7 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
       if (orderAdminMatch && method === 'DELETE') {
         const id = orderAdminMatch[1];
         await deleteDoc(cfg, `orders/${id}`, authObj);
+        adminReadCache.clear();
         await logAdminAudit(cfg, admin.idToken, admin.username, 'delete_order', 'order', id);
         return jsonResponse(ctx, { ok: true });
       }
@@ -4812,7 +5219,12 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           updates.isVerified = body.isVerified;
           updateMask.push('isVerified');
         }
-        if (body.status === 'approved' || body.status === 'hidden' || body.status === 'flagged') {
+        if (
+          body.status === 'approved' ||
+          body.status === 'pending' ||
+          body.status === 'hidden' ||
+          body.status === 'flagged'
+        ) {
           updates.status = body.status;
           updateMask.push('status');
         }
@@ -4822,6 +5234,8 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
         }
 
         await patchDoc(cfg, `comments/${id}`, updates, updateMask, ['updatedAt'], authObj, true);
+        clearPublicReadCache('comments_approved');
+        adminReadCache.clear();
         await logAdminAudit(cfg, admin.idToken, admin.username, 'update_comment', 'comment', id, updates);
         return jsonResponse(ctx, { ok: true });
       }
@@ -4968,14 +5382,114 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
             body.promoBanner && typeof body.promoBanner === 'object'
               ? { ...current.promoBanner, ...(body.promoBanner as Partial<PublicSiteConfig['promoBanner']>) }
               : current.promoBanner,
-          libraryAd: resetToRegular
-            ? {
+          libraryAd: (() => {
+            if (resetToRegular) {
+              return {
                 ...current.libraryAd,
                 priceText: `حل المنصة بالكامل بـ ${nextQureoOld} جنيه · المنصتين معاً بـ ${nextBundleOld} جنيه`,
-              }
-            : body.libraryAd && typeof body.libraryAd === 'object'
-              ? { ...current.libraryAd, ...(body.libraryAd as Partial<PublicSiteConfig['libraryAd']>) }
-              : current.libraryAd,
+              };
+            }
+            const wfAction =
+              typeof body.libraryAdWorkflowAction === 'string' ? body.libraryAdWorkflowAction : null;
+            const rawDraft =
+              body.libraryAdDraft && typeof body.libraryAdDraft === 'object'
+                ? (body.libraryAdDraft as Partial<LibraryAdDraftConfig>)
+                : null;
+            const rawLivePatch =
+              body.libraryAd && typeof body.libraryAd === 'object'
+                ? (body.libraryAd as Partial<PublicSiteConfig['libraryAd']>)
+                : null;
+
+            const existingDraft: LibraryAdDraftConfig = current.libraryAd.draft || {
+              title: current.libraryAd.title,
+              subtitle: current.libraryAd.subtitle,
+              priceText: current.libraryAd.priceText,
+              ctaText: current.libraryAd.ctaText,
+              ctaLink: current.libraryAd.ctaLink,
+              imageUrl: current.libraryAd.imageUrl,
+              delaySeconds: current.libraryAd.delaySeconds,
+              cooldownHours: current.libraryAd.cooldownHours,
+              templateMode: current.libraryAd.templateMode,
+              workflowStatus: (current.libraryAd.workflowStatus as AdWorkflowStatus) || 'published',
+              updatedAt: new Date().toISOString(),
+            };
+
+            if (wfAction === 'save_draft' || wfAction === 'preview' || wfAction === 'approve') {
+              const nextStatus: AdWorkflowStatus =
+                wfAction === 'approve' ? 'approved' : wfAction === 'preview' ? 'preview' : 'draft';
+              const nextDraft: LibraryAdDraftConfig = {
+                ...existingDraft,
+                ...(rawDraft || {}),
+                ...(rawLivePatch
+                  ? {
+                      title: rawLivePatch.title ?? existingDraft.title,
+                      subtitle: rawLivePatch.subtitle ?? existingDraft.subtitle,
+                      priceText: rawLivePatch.priceText ?? existingDraft.priceText,
+                      ctaText: rawLivePatch.ctaText ?? existingDraft.ctaText,
+                      ctaLink: rawLivePatch.ctaLink ?? existingDraft.ctaLink,
+                      imageUrl: rawLivePatch.imageUrl ?? existingDraft.imageUrl,
+                      delaySeconds: rawLivePatch.delaySeconds ?? existingDraft.delaySeconds,
+                      cooldownHours: rawLivePatch.cooldownHours ?? existingDraft.cooldownHours,
+                      templateMode: rawLivePatch.templateMode ?? existingDraft.templateMode,
+                    }
+                  : {}),
+                workflowStatus: nextStatus,
+                updatedAt: new Date().toISOString(),
+              };
+              // Strict Draft/Preview/Approved workflow: do NOT overwrite live ad fields until published
+              return {
+                ...current.libraryAd,
+                workflowStatus: nextStatus,
+                draft: nextDraft,
+              };
+            }
+
+            if (wfAction === 'archive') {
+              return {
+                ...current.libraryAd,
+                enabled: false,
+                workflowStatus: 'archived' as AdWorkflowStatus,
+                draft: {
+                  ...existingDraft,
+                  workflowStatus: 'archived' as AdWorkflowStatus,
+                  updatedAt: new Date().toISOString(),
+                },
+              };
+            }
+
+            if (wfAction === 'publish') {
+              const source = rawDraft || rawLivePatch || existingDraft;
+              const nextDraft: LibraryAdDraftConfig = {
+                ...existingDraft,
+                ...source,
+                workflowStatus: 'published',
+                updatedAt: new Date().toISOString(),
+              };
+              return {
+                ...current.libraryAd,
+                enabled: rawLivePatch?.enabled !== undefined ? Boolean(rawLivePatch.enabled) : true,
+                title: nextDraft.title,
+                subtitle: nextDraft.subtitle,
+                priceText: nextDraft.priceText,
+                ctaText: nextDraft.ctaText,
+                ctaLink: nextDraft.ctaLink,
+                imageUrl: nextDraft.imageUrl,
+                delaySeconds: nextDraft.delaySeconds,
+                cooldownHours: nextDraft.cooldownHours,
+                templateMode: nextDraft.templateMode,
+                workflowStatus: 'published' as AdWorkflowStatus,
+                draft: nextDraft,
+              };
+            }
+
+            if (rawLivePatch) {
+              return {
+                ...current.libraryAd,
+                ...rawLivePatch,
+              };
+            }
+            return current.libraryAd;
+          })(),
         };
 
         await setDoc(cfg, 'site_config/public', buildSiteConfigDocPayload(nextConfig), ['updatedAt'], authObj);

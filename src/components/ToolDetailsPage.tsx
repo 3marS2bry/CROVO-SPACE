@@ -215,7 +215,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
             </p>
             <div className="pt-1">
               <span className="font-bold text-xs sm:text-lg font-decorative">
-                عملتلك أداة بتخلّص الليلة كلها في 4 دقايق بس! ✨
+                عملتلك أداة بتوفّر وقتك وتنجز المهام بهدوء ودقة! ✨
               </span>
             </div>
           </div>
@@ -305,10 +305,10 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         <div className="text-right max-w-3xl mb-3">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full clay-inset text-indigo-700 text-[11px] font-bold mb-1 font-decorative">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
-            <span>الأمان التام وحماية الحساب ومحاكاة السلوك البشري 100%</span>
+            <span>حماية الحساب ومحاكاة السلوك البشري الطبيعي</span>
           </div>
           <h2 className="text-base sm:text-xl font-black font-decorative text-slate-900">
-            الميكانيزم شغال إزاي؟ (ليه المنصة تحلف إنه أنت؟)
+            الميكانيزم شغال إزاي؟
           </h2>
           <p className="text-[11px] sm:text-xs text-slate-600 font-ios mt-0.5 leading-relaxed">
             مش مجرد سكربت أعمى بيرمي حلول؛ بيانات دخولك بتتحول لجلسة دخول آمنة مع محاكاة دقيقة لحركة وتفكير الطالب البشري.
@@ -351,11 +351,11 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
                 3
               </div>
               <h3 className="text-xs sm:text-sm font-bold font-ios text-slate-900">
-                إنهاء الليلة في 4 دقائق
+                توفير الوقت وإنجاز أسرع
               </h3>
             </div>
             <p className="text-[11px] text-slate-600 font-ios leading-normal">
-              الامتحان كله بيتحل بـ {config ? (config.offerActive ? config.qureoOfferPrice : config.qureoOldPrice) : 50}ج فقط في أقل من 4 دقايق، وبتاخد درجاتك كاملة 100% ورادار المهارات متقفل وأنت مروّق جمجمتك.
+              الأداة بتنفذ المهام بـ {config ? (config.offerActive ? config.qureoOfferPrice : config.qureoOldPrice) : 50}ج فقط بعد تأكيد الطلب، وبتساعدك تنهي الفصول بسرعة وانتظام (مع توفر Python قريباً للأداة).
             </p>
           </div>
         </div>
@@ -432,13 +432,13 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
           <div className="text-right max-w-2xl">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-indigo-600 text-xs font-bold mb-1 font-decorative">
               <Eye className="w-3.5 h-3.5" />
-              <span>معرض الإثباتات والدرجات النهائية 100%</span>
+              <span>معرض إثباتات ونتائج الطلاب</span>
             </div>
             <h2 className="text-xl sm:text-3xl font-black font-decorative text-slate-900">
-              معرض إثباتات وتجارب الطلاب — تقفيل 100% بالهاتف
+              معرض إثباتات وتجارب الطلاب الفعلية بالهاتف
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 font-ios mt-1">
-              تدفق استعراضي مستمر لنتائج تقفيل المستويات والامتحانات. اضغط على أي صورة لمعاينتها بأريحية!
+              لقطات حقيقية لنتائج حل المستويات والامتحانات. اضغط على أي صورة لمعاينتها بأريحية!
             </p>
           </div>
 

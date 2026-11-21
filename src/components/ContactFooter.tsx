@@ -44,7 +44,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
             </div>
           </div>
           <p className="text-xs text-slate-600 max-w-sm font-ios leading-relaxed">
-            المنصة مصممة خصيصاً عشان تشيل عنك سحل المذاكرة وضغط الامتحانات.. شغّل دماغك وخلّص الليلة كلها في 4 دقايق!
+            المنصة مصممة خصيصاً عشان تشيل عنك سحل المذاكرة وضغط الامتحانات.. حلول منظمة وأداة ذكية توفرلك وقتك!
           </p>
         </div>
 

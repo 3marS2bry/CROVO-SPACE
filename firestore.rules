@@ -85,7 +85,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'authorUid', 'authorName', 'grade', 'rating', 'content',
           'avatarDataUrl', 'attachmentBeforeDataUrl', 'attachmentAfterDataUrl',
-          'isVerified', 'status', 'likesCount', 'reportsCount', 'createdAt', 'updatedAt'
+          'isVerified', 'status', 'orderCode', 'source', 'likesCount', 'reportsCount', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.id) && data.id.size() >= 4 && data.id.size() <= 80
         && isValidId(data.authorUid) && data.authorUid.size() >= 4 && data.authorUid.size() <= 128
@@ -97,7 +97,9 @@ service cloud.firestore {
         && (!('attachmentBeforeDataUrl' in data) || (data.attachmentBeforeDataUrl is string && data.attachmentBeforeDataUrl.size() <= 320000))
         && (!('attachmentAfterDataUrl' in data) || (data.attachmentAfterDataUrl is string && data.attachmentAfterDataUrl.size() <= 320000))
         && data.isVerified is bool
-        && data.status in ['approved', 'hidden', 'flagged']
+        && data.status in ['approved', 'pending', 'hidden', 'flagged']
+        && (!('orderCode' in data) || (data.orderCode is string && data.orderCode.size() <= 40))
+        && (!('source' in data) || data.source in ['standard', 'post_whatsapp'])
         && data.likesCount is int && data.likesCount >= 0
         && data.reportsCount is int && data.reportsCount >= 0
         && data.createdAt is timestamp
@@ -221,7 +223,8 @@ service cloud.firestore {
           'fullName', 'grade', 'platformLabel', 'sectionDetails', 'platformsJson',
           'platformUsername', 'encryptedPassword', 'passwordIv', 'passwordAuthTag',
           'credentialsPurged', 'oldPrice', 'finalPrice', 'offerApplied',
-          'paymentMethod', 'status', 'createdAt', 'updatedAt'
+          'paymentMethod', 'status', 'paymentStatus', 'subscriptionStatus',
+          'adminNote', 'source', 'changeLog', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.id) && data.id.size() >= 4 && data.id.size() <= 80
         && data.orderCode is string && data.orderCode.size() >= 3 && data.orderCode.size() <= 40
@@ -244,6 +247,11 @@ service cloud.firestore {
         && data.offerApplied is bool
         && data.paymentMethod is string && data.paymentMethod.size() >= 1 && data.paymentMethod.size() <= 80
         && data.status in ['new', 'reviewing', 'completed', 'cancelled']
+        && (!('paymentStatus' in data) || data.paymentStatus in ['unpaid', 'pending_verification', 'paid', 'refunded'])
+        && (!('subscriptionStatus' in data) || data.subscriptionStatus in ['pending_confirmation', 'active', 'expired', 'cancelled'])
+        && (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 500))
+        && (!('source' in data) || data.source in ['client_checkout', 'admin_manual'])
+        && (!('changeLog' in data) || (data.changeLog is list && data.changeLog.size() <= 40))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -268,7 +276,8 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'reporterUid', 'questionKey', 'grade', 'section', 'chapterNum',
-          'qIndex', 'questionTitle', 'description', 'status', 'adminNote', 'createdAt', 'updatedAt'
+          'qIndex', 'questionTitle', 'description', 'reason', 'suggestedSolution',
+          'status', 'adminNote', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.id) && data.id.size() <= 80
         && isValidId(data.reporterUid) && data.reporterUid.size() <= 128
@@ -279,6 +288,8 @@ service cloud.firestore {
         && data.qIndex is int && data.qIndex >= 0 && data.qIndex <= 1000
         && data.questionTitle is string && data.questionTitle.size() <= 300
         && data.description is string && data.description.size() >= 4 && data.description.size() <= 600
+        && (!('reason' in data) || (data.reason is string && data.reason.size() <= 120))
+        && (!('suggestedSolution' in data) || (data.suggestedSolution is string && data.suggestedSolution.size() <= 800))
         && data.status in ['pending', 'reviewed', 'resolved', 'dismissed']
         && (!('adminNote' in data) || (data.adminNote is string && data.adminNote.size() <= 500))
         && data.createdAt is timestamp
@@ -497,7 +508,7 @@ service cloud.firestore {
           (
             incoming().authorUid == request.auth.uid
             && incoming().isVerified == false
-            && incoming().status == 'approved'
+            && incoming().status in ['approved', 'pending']
             && incoming().likesCount == 0
             && incoming().reportsCount == 0
           )

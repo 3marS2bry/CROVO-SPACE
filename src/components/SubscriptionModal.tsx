@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -14,16 +14,24 @@ import {
   X,
 } from 'lucide-react';
 import { WhatsAppIcon } from './SocialIcons';
-import { api, OrderReceipt, PublicConfig } from '../utils/api';
+import { api, ApiError, OrderReceipt, PublicConfig } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { getFirebaseUid, logCloudActivity } from '../utils/cloudStore';
 import {
-  buildClientWhatsappUrl,
   calculateClientPricing,
   calculateDiscountPercent,
   OrderGrade,
   PlatformChoice,
 } from '../utils/rules';
+import {
+  buildSubscriptionWhatsappUrl,
+  clearSubscriptionDraft,
+  deriveOrderCodeFromRequestId,
+  generateStableClientRequestId,
+  loadSubscriptionDraft,
+  recordWhatsAppHandoffForReview,
+  saveSubscriptionDraft,
+} from '../utils/orderDraft';
 
 interface SubscriptionModalProps {
   isOpen: boolean;
@@ -35,10 +43,7 @@ interface SubscriptionModalProps {
 type WizardStep = 'grade' | 'platform' | 'pricing' | 'details' | 'confirm' | 'receipt';
 
 function makeRequestId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `req_${crypto.randomUUID()}`;
-  }
-  return `req_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return generateStableClientRequestId();
 }
 
 const FALLBACK_CONFIG: PublicConfig = {
@@ -63,9 +68,9 @@ const FALLBACK_CONFIG: PublicConfig = {
   },
   heroPromo: {
     enabled: true,
-    title: 'أداة CROVO الذكية — خلّص المنصة كلها في 4 دقايق',
+    title: 'أداة CROVO الذكية — حل سريع ومنظّم لمنصتك',
     subtitle:
-      'بتسجل دخولك بمحاكاة بشرية كاملة وتكتب وتجاوب بدقة 100% من غير ما المنصة تشك في أي حاجة.',
+      'بتسجل دخولك بمحاكاة بشرية وتكتب وتجاوب بدقة عالية بدون تعقيد.',
   },
   promoBanner: {
     enabled: true,
@@ -105,23 +110,72 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('محفظة إلكترونية (كاش)');
 
-  const [clientRequestId, setClientRequestId] = useState<string>(() => makeRequestId());
+  const [clientRequestId, setClientRequestId] = useState<string>(() => {
+    const saved = loadSubscriptionDraft();
+    return saved?.clientRequestId || makeRequestId();
+  });
+  const submittingRef = useRef(false);
+  const draftHydratedRef = useRef(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<OrderReceipt | null>(null);
+  const [receiptSavedToServer, setReceiptSavedToServer] = useState(true);
   const [receiptWhatsappUrl, setReceiptWhatsappUrl] = useState<string>('');
 
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
+    if (!draftHydratedRef.current) {
+      draftHydratedRef.current = true;
+      const saved = loadSubscriptionDraft();
+      if (saved) {
+        if (saved.grade && !grade) setGrade(saved.grade);
+        if (saved.selectedPlatforms.length > 0 && selectedPlatforms.length === 0) {
+          setSelectedPlatforms(saved.selectedPlatforms);
+        }
+        setQureoJavaSelected(saved.qureoJavaSelected);
+        if (saved.fullName && !fullName.trim()) setFullName(saved.fullName);
+        if (saved.platformUsername && !platformUsername.trim()) setPlatformUsername(saved.platformUsername);
+        if (saved.paymentMethod) setPaymentMethod(saved.paymentMethod);
+        if (saved.clientRequestId) setClientRequestId(saved.clientRequestId);
+      }
+    }
     if (user?.name && !fullName.trim()) {
       setFullName(user.name);
     }
   }, [isOpen, user?.name]);
 
+  // Persist non-sensitive draft fields across reloads (STRICTLY NEVER platformPassword)
+  useEffect(() => {
+    if (!isOpen || receipt) return;
+    saveSubscriptionDraft({
+      clientRequestId,
+      orderCode: deriveOrderCodeFromRequestId(clientRequestId),
+      grade,
+      selectedPlatforms,
+      qureoJavaSelected,
+      fullName,
+      platformUsername,
+      paymentMethod,
+      updatedAt: Date.now(),
+    });
+  }, [
+    isOpen,
+    receipt,
+    clientRequestId,
+    grade,
+    selectedPlatforms,
+    qureoJavaSelected,
+    fullName,
+    platformUsername,
+    paymentMethod,
+  ]);
+
   if (!isOpen) return null;
 
   const resetWizard = () => {
+    clearSubscriptionDraft();
+    draftHydratedRef.current = false;
     setStep('grade');
     setGrade(null);
     setSelectedPlatforms([]);
@@ -134,6 +188,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
     setClientRequestId(makeRequestId());
     setError(null);
     setReceipt(null);
+    setReceiptSavedToServer(true);
     setReceiptWhatsappUrl('');
   };
 
@@ -203,73 +258,136 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   };
 
   const handleConfirmOrder = async () => {
-    if (!grade || !canProceedPlatform || submitting) return;
+    if (!grade || !canProceedPlatform || submitting || submittingRef.current) return;
 
     if (!activeConfig.ordersEnabled) {
       setError('استقبال الطلبات متوقف مؤقتاً من الإدارة حالياً.');
       return;
     }
 
+    if (fullName.trim().length < 2 || platformUsername.trim().length < 2 || platformPassword.length < 1) {
+      setError('من فضلك راجع الاسم ويوزر المنصة وكلمة السر قبل التأكيد.');
+      return;
+    }
+
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
 
     const passwordSnapshot = platformPassword;
-
-    try {
-      const res = await api.createOrder({
-        fullName: fullName.trim(),
+    const trimmedName = fullName.trim();
+    const trimmedUsername = platformUsername.trim();
+    const localPricing = calculateClientPricing(
+      {
         grade,
         platforms: selectedPlatforms,
         qureoSection: selectedPlatforms.includes('qureo') ? 'java' : undefined,
-        platformUsername: platformUsername.trim(),
+      },
+      activeConfig,
+      Date.now() + serverOffsetMs
+    );
+    const deterministicOrderCode = deriveOrderCodeFromRequestId(clientRequestId);
+
+    let resolvedOrder: OrderReceipt = {
+      id: `local_${deterministicOrderCode}`,
+      orderCode: deterministicOrderCode,
+      fullName: trimmedName,
+      grade,
+      platformLabel: localPricing.platformLabel,
+      sectionDetails: localPricing.sectionDetails,
+      oldPrice: localPricing.oldPrice,
+      finalPrice: localPricing.finalPrice,
+      offerApplied: localPricing.offerApplied,
+      paymentMethod,
+      status: 'new',
+      paymentStatus: 'pending_verification',
+      subscriptionStatus: 'pending_confirmation',
+      serverRecorded: false,
+      createdAt: new Date().toISOString(),
+    };
+    let savedToServer = false;
+
+    try {
+      const res = await api.createOrder({
+        fullName: trimmedName,
+        grade,
+        platforms: selectedPlatforms,
+        qureoSection: selectedPlatforms.includes('qureo') ? 'java' : undefined,
+        platformUsername: trimmedUsername,
         platformPassword: passwordSnapshot,
         paymentMethod,
         clientRequestId,
       });
-
-      const waUrl = buildClientWhatsappUrl(activeConfig.adminWhatsappDisplay, {
-        fullName: res.order.fullName,
-        grade: res.order.grade,
-        platformLabel: res.order.platformLabel,
-        sectionDetails: res.order.sectionDetails,
-        platformUsername: platformUsername.trim(),
-        platformPassword: passwordSnapshot,
-        oldPrice: res.order.oldPrice,
-        finalPrice: res.order.finalPrice,
-        paymentMethod: res.order.paymentMethod,
-        orderCode: res.order.orderCode,
-      });
-
-      setReceipt(res.order);
-      setReceiptWhatsappUrl(waUrl);
-      // Clear raw password input field immediately
-      setPlatformPassword('');
-      setStep('receipt');
-
-      const fbUid = getFirebaseUid();
-      if (fbUid) {
-        void logCloudActivity(fbUid, {
-          eventType: 'order_create',
-          label: `طلب اشتراك جديد #${res.order.orderCode}`,
-          path: '/subscribe',
-          detail: `${res.order.platformLabel} (${res.order.finalPrice} ج)`,
-        });
+      if (res && res.order) {
+        resolvedOrder = res.order;
+        savedToServer = res.savedToServer !== false && res.order.serverRecorded !== false;
       }
-
-      // Launch WhatsApp Click-to-Chat link directly without window.open popup abuse
-      const anchor = document.createElement('a');
-      anchor.href = waUrl;
-      anchor.target = '_blank';
-      anchor.rel = 'noopener noreferrer';
-      anchor.style.display = 'none';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'حصل خطأ أثناء إرسال الطلب، حاول تاني.');
-    } finally {
-      setSubmitting(false);
+      // Only halt for explicit 400 validation errors on user input.
+      // Any Firestore 429 quota exceeded, rate limit, 403, 5xx, timeout, or offline error NEVER blocks WhatsApp handoff.
+      if (err instanceof ApiError && err.status === 400) {
+        setError(err.message || 'تأكد من صحة البيانات المدخلة وحاول مرة أخرى.');
+        submittingRef.current = false;
+        setSubmitting(false);
+        return;
+      }
+      savedToServer = false;
     }
+
+    const waUrl = buildSubscriptionWhatsappUrl({
+      whatsappNumber: activeConfig.adminWhatsappDisplay,
+      orderCode: resolvedOrder.orderCode,
+      fullName: resolvedOrder.fullName,
+      grade: resolvedOrder.grade,
+      platformLabel: resolvedOrder.platformLabel,
+      sectionDetails: resolvedOrder.sectionDetails,
+      platformUsername: trimmedUsername,
+      platformPassword: passwordSnapshot,
+      oldPrice: resolvedOrder.oldPrice,
+      finalPrice: resolvedOrder.finalPrice,
+      offerApplied: resolvedOrder.offerApplied,
+      paymentMethod: resolvedOrder.paymentMethod,
+      manualConfirmationNeeded: !savedToServer,
+    });
+
+    setReceipt(resolvedOrder);
+    setReceiptSavedToServer(savedToServer);
+    setReceiptWhatsappUrl(waUrl);
+    // Clear raw password input field & non-sensitive draft immediately
+    setPlatformPassword('');
+    clearSubscriptionDraft();
+    recordWhatsAppHandoffForReview({
+      orderCode: resolvedOrder.orderCode,
+      orderId: resolvedOrder.id,
+      grade: resolvedOrder.grade,
+      platformLabel: resolvedOrder.platformLabel,
+      fullName: resolvedOrder.fullName,
+      savedToServer,
+    });
+    setStep('receipt');
+    submittingRef.current = false;
+    setSubmitting(false);
+
+    // Non-blocking best-effort activity log when saved
+    const fbUid = getFirebaseUid();
+    if (fbUid && savedToServer) {
+      void logCloudActivity(fbUid, {
+        eventType: 'order_create',
+        label: `طلب اشتراك جديد #${resolvedOrder.orderCode}`,
+        path: '/subscribe',
+        detail: `${resolvedOrder.platformLabel} (${resolvedOrder.finalPrice} ج)`,
+      });
+    }
+
+    // Launch WhatsApp Click-to-Chat link directly without window.open popup abuse
+    const anchor = document.createElement('a');
+    anchor.href = waUrl;
+    anchor.target = '_blank';
+    anchor.rel = 'noopener noreferrer';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
   };
 
   const qureoDiscount = calculateDiscountPercent(
@@ -607,101 +725,89 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 </div>
               ) : (
                 <>
-                  <div
-                    className={`p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ${
-                      selectedPlatforms.length === 1 && selectedPlatforms.includes('qureo')
-                        ? 'ring-2 ring-indigo-500'
-                        : ''
-                    }`}
-                  >
-                    <div>
-                      <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
-                        منصة واحدة (QUREO Java)
-                      </div>
-                      {activeConfig.offerActive && qureoDiscount > 0 && (
-                        <span className="text-[10px] font-bold text-emerald-600 font-ios">
-                          وفر {qureoDiscount}% عن السعر العادي
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-left font-mono">
-                      {activeConfig.offerActive && (
-                        <div className="text-xs line-through text-slate-400">
-                          {activeConfig.qureoOldPrice} ج
+                  {selectedPlatforms.includes('qureo') && selectedPlatforms.length === 1 && (
+                    <div className="p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ring-2 ring-indigo-500">
+                      <div>
+                        <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
+                          منصة واحدة (QUREO Java)
                         </div>
-                      )}
-                      <div className="text-base font-black text-indigo-600">
-                        {activeConfig.offerActive
-                          ? activeConfig.qureoOfferPrice
-                          : activeConfig.qureoOldPrice}{' '}
-                        جنيه
+                        {activeConfig.offerActive && qureoDiscount > 0 && (
+                          <span className="text-[10px] font-bold text-emerald-600 font-ios">
+                            وفر {qureoDiscount}% عن السعر العادي
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-left font-mono">
+                        {activeConfig.offerActive && (
+                          <div className="text-xs line-through text-slate-400">
+                            {activeConfig.qureoOldPrice} ج
+                          </div>
+                        )}
+                        <div className="text-base font-black text-indigo-600">
+                          {activeConfig.offerActive
+                            ? activeConfig.qureoOfferPrice
+                            : activeConfig.qureoOldPrice}{' '}
+                          جنيه
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
 
-                  <div
-                    className={`p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ${
-                      selectedPlatforms.length === 1 && selectedPlatforms.includes('financial')
-                        ? 'ring-2 ring-indigo-500'
-                        : ''
-                    }`}
-                  >
-                    <div>
-                      <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
-                        منصة واحدة (ثقافة مالية)
-                      </div>
-                      {activeConfig.offerActive && finDiscount > 0 && (
-                        <span className="text-[10px] font-bold text-emerald-600 font-ios">
-                          وفر {finDiscount}% عن السعر العادي
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-left font-mono">
-                      {activeConfig.offerActive && (
-                        <div className="text-xs line-through text-slate-400">
-                          {activeConfig.finOldPrice} ج
+                  {selectedPlatforms.includes('financial') && selectedPlatforms.length === 1 && (
+                    <div className="p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ring-2 ring-indigo-500">
+                      <div>
+                        <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
+                          منصة واحدة (ثقافة مالية)
                         </div>
-                      )}
-                      <div className="text-base font-black text-indigo-600">
-                        {activeConfig.offerActive
-                          ? activeConfig.finOfferPrice
-                          : activeConfig.finOldPrice}{' '}
-                        جنيه
+                        {activeConfig.offerActive && finDiscount > 0 && (
+                          <span className="text-[10px] font-bold text-emerald-600 font-ios">
+                            وفر {finDiscount}% عن السعر العادي
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-left font-mono">
+                        {activeConfig.offerActive && (
+                          <div className="text-xs line-through text-slate-400">
+                            {activeConfig.finOldPrice} ج
+                          </div>
+                        )}
+                        <div className="text-base font-black text-indigo-600">
+                          {activeConfig.offerActive
+                            ? activeConfig.finOfferPrice
+                            : activeConfig.finOldPrice}{' '}
+                          جنيه
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
 
-                  <div
-                    className={`p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ${
-                      selectedPlatforms.length === 2
-                        ? 'ring-2 ring-emerald-500'
-                        : ''
-                    }`}
-                  >
-                    <div>
-                      <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
-                        المنصتين معًا (QUREO + ثقافة مالية)
-                      </div>
-                      {activeConfig.offerActive && bundleDiscount > 0 && (
-                        <span className="text-[10px] font-bold text-emerald-600 font-ios">
-                          باقة كاملة · خصم {bundleDiscount}%
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-left font-mono">
-                      {activeConfig.offerActive && (
-                        <div className="text-xs line-through text-slate-400">
-                          {activeConfig.bundleOldPrice} ج
+                  {selectedPlatforms.length === 2 && (
+                    <div className="p-3.5 rounded-2xl clay-inset flex items-center justify-between gap-2 ring-2 ring-emerald-500">
+                      <div>
+                        <div className="text-xs sm:text-sm font-black text-slate-900 font-ios">
+                          المنصتين معًا (QUREO + ثقافة مالية)
                         </div>
-                      )}
-                      <div className="text-base font-black text-emerald-600">
-                        {activeConfig.offerActive
-                          ? activeConfig.bundleOfferPrice
-                          : activeConfig.bundleOldPrice}{' '}
-                        جنيه
+                        {activeConfig.offerActive && bundleDiscount > 0 && (
+                          <span className="text-[10px] font-bold text-emerald-600 font-ios">
+                            باقة كاملة · خصم {bundleDiscount}%
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-left font-mono">
+                        {activeConfig.offerActive && (
+                          <div className="text-xs line-through text-slate-400">
+                            {activeConfig.bundleOldPrice} ج
+                          </div>
+                        )}
+                        <div className="text-base font-black text-emerald-600">
+                          {activeConfig.offerActive
+                            ? activeConfig.bundleOfferPrice
+                            : activeConfig.bundleOldPrice}{' '}
+                          جنيه
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  )}
                 </>
               )}
             </div>
@@ -1033,11 +1139,19 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
             <div
               data-testid="whatsapp-click-to-chat-status"
-              className="p-3 rounded-2xl clay-inset text-xs font-bold text-emerald-700 font-ios flex items-start gap-2"
+              className={`p-3 rounded-2xl clay-inset text-xs font-bold font-ios flex items-start gap-2 ${
+                receiptSavedToServer ? 'text-emerald-700' : 'text-amber-700'
+              }`}
             >
-              <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-500" />
+              {receiptSavedToServer ? (
+                <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-500" />
+              ) : (
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
+              )}
               <span>
-                طلبك اتسجل بأمان برقم (#{receipt.orderCode}). لو واتساب مفتحش لوحده، دوس على الزر تحت واضغط إرسال جوه الشات لتأكيد الاشتراك مع الإدارة.
+                {receiptSavedToServer
+                  ? `طلبك تسجّل برقم (#${receipt.orderCode}) وهو الآن بانتظار مراجعة الإدارة وتأكيد الدفع بعد إرسال رسالة واتساب.`
+                  : `تم فتح واتساب بنجاح! نظراً لضغط مؤقت في السيرفر، طلبك بانتظار التسجيل والتأكيد اليدوي من الإدارة فور وصول رسالتك برقم (#${receipt.orderCode}).`}
               </span>
             </div>
 

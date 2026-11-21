@@ -25,9 +25,13 @@ interface AdminUsersTabProps {
 interface UsersSnapshotPayload {
   users: AdminUserItem[];
   counts: { total: number; bac1: number; bac2: number; unclassified: number };
+  page?: number;
+  pageSize?: number;
+  totalMatching?: number;
+  totalPages?: number;
 }
 
-const PAGE_SIZE = 8;
+const DEFAULT_SERVER_PAGE_SIZE = 25;
 
 function formatRegDate(iso: string): string {
   try {
@@ -47,6 +51,10 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     bac2: 0,
     unclassified: 0,
   });
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_SERVER_PAGE_SIZE);
+  const [totalMatching, setTotalMatching] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
   const [dbStatus, setDbStatus] = useState<DbStatusState>('ok');
   const [dbError, setDbError] = useState<string | null>(null);
   const [staleSnapshot, setStaleSnapshot] = useState(false);
@@ -57,9 +65,6 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'suspended'>('all');
   const [stageFocus, setStageFocus] = useState<'all' | 'bac1' | 'bac2' | 'unclassified'>('all');
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
-
-  const [bac1Page, setBac1Page] = useState(1);
-  const [bac2Page, setBac2Page] = useState(1);
 
   const [suspendingUser, setSuspendingUser] = useState<AdminUserItem | null>(null);
   const [suspendReason, setSuspendReason] = useState('');
@@ -75,7 +80,15 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
   const loadUsers = useCallback(async () => {
     setLoading(true);
     try {
-      const apiRes = await api.adminUsers();
+      const apiRes = await api.adminUsers({
+        q: q.trim() || undefined,
+        role: roleFilter !== 'all' ? roleFilter : undefined,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+        grade: stageFocus !== 'all' ? stageFocus : undefined,
+        sort: sortOrder,
+        page,
+        pageSize,
+      });
       const status = apiRes.dbStatus || (apiRes.requiresFirebaseLink ? 'auth_required' : 'ok');
 
       if (status === 'quota_exceeded' || status === 'error') {
@@ -83,6 +96,8 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
         if (!apiRes.staleSnapshot && apiRes.users.length === 0 && localSnap) {
           setAllUsers(localSnap.data.users);
           setServerCounts(localSnap.data.counts);
+          setTotalMatching(localSnap.data.totalMatching ?? localSnap.data.users.length);
+          setTotalPages(localSnap.data.totalPages ?? 1);
           setDbStatus(status);
           setDbError(
             apiRes.dbError ||
@@ -99,6 +114,8 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
               unclassified: apiRes.users.filter((u) => u.grade === 'unclassified').length,
             }
           );
+          setTotalMatching(apiRes.totalMatching ?? apiRes.users.length);
+          setTotalPages(apiRes.totalPages ?? 1);
           setDbStatus(status);
           setDbError(apiRes.dbError || null);
           setStaleSnapshot(Boolean(apiRes.staleSnapshot));
@@ -114,14 +131,31 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
       };
       setAllUsers(apiRes.users);
       setServerCounts(computedCounts);
+      setTotalMatching(apiRes.totalMatching ?? apiRes.users.length);
+      setTotalPages(Math.max(1, apiRes.totalPages ?? 1));
+      if (typeof apiRes.page === 'number' && apiRes.page !== page) {
+        setPage(apiRes.page);
+      }
       setDbStatus(status);
       setDbError(apiRes.dbError || null);
       setStaleSnapshot(Boolean(apiRes.staleSnapshot));
 
-      if (status === 'ok' && !apiRes.staleSnapshot) {
+      if (
+        status === 'ok' &&
+        !apiRes.staleSnapshot &&
+        !q.trim() &&
+        roleFilter === 'all' &&
+        statusFilter === 'all' &&
+        stageFocus === 'all' &&
+        page === 1
+      ) {
         writeAdminSnapshot<UsersSnapshotPayload>('users', {
           users: apiRes.users,
           counts: computedCounts,
+          page: apiRes.page ?? 1,
+          pageSize: apiRes.pageSize ?? pageSize,
+          totalMatching: apiRes.totalMatching ?? apiRes.users.length,
+          totalPages: apiRes.totalPages ?? 1,
         });
       }
     } catch (err) {
@@ -130,6 +164,8 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
       if (localSnap) {
         setAllUsers(localSnap.data.users);
         setServerCounts(localSnap.data.counts);
+        setTotalMatching(localSnap.data.totalMatching ?? localSnap.data.users.length);
+        setTotalPages(localSnap.data.totalPages ?? 1);
         setDbStatus('error');
         setDbError(`${msg} — يتم عرض آخر نسخة محفوظة محلياً لحماية البيانات من الاختفاء.`);
         setStaleSnapshot(true);
@@ -141,64 +177,28 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
     } finally {
       setLoading(false);
     }
-  }, [onNotice]);
+  }, [onNotice, q, roleFilter, statusFilter, stageFocus, sortOrder, page, pageSize]);
 
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
 
-  // Reset pagination whenever filters/search/sort change
+  // Reset server page to 1 whenever filters/search/sort/pageSize change
   useEffect(() => {
-    setBac1Page(1);
-    setBac2Page(1);
-  }, [q, roleFilter, statusFilter, sortOrder]);
-
-  const filteredSorted = useMemo(() => {
-    const query = q.trim().toLowerCase();
-    return allUsers
-      .filter((u) => {
-        if (roleFilter !== 'all' && u.role !== roleFilter) return false;
-        if (statusFilter !== 'all' && u.status !== statusFilter) return false;
-        if (query) {
-          const matches =
-            u.name.toLowerCase().includes(query) ||
-            u.email.toLowerCase().includes(query) ||
-            (u.serialNumber || '').toLowerCase().includes(query);
-          if (!matches) return false;
-        }
-        return true;
-      })
-      .sort((a, b) => {
-        const diff = Date.parse(a.createdAt) - Date.parse(b.createdAt);
-        return sortOrder === 'oldest' ? diff : -diff;
-      });
-  }, [allUsers, q, roleFilter, statusFilter, sortOrder]);
+    setPage(1);
+  }, [q, roleFilter, statusFilter, stageFocus, sortOrder, pageSize]);
 
   const bac1Users = useMemo(
-    () => filteredSorted.filter((u) => u.grade === 'bac1'),
-    [filteredSorted]
+    () => allUsers.filter((u) => u.grade === 'bac1'),
+    [allUsers]
   );
   const bac2Users = useMemo(
-    () => filteredSorted.filter((u) => u.grade === 'bac2'),
-    [filteredSorted]
+    () => allUsers.filter((u) => u.grade === 'bac2'),
+    [allUsers]
   );
   const unclassifiedUsers = useMemo(
-    () => filteredSorted.filter((u) => u.grade === 'unclassified'),
-    [filteredSorted]
-  );
-
-  const bac1TotalPages = Math.max(1, Math.ceil(bac1Users.length / PAGE_SIZE));
-  const bac2TotalPages = Math.max(1, Math.ceil(bac2Users.length / PAGE_SIZE));
-  const safeBac1Page = Math.min(bac1Page, bac1TotalPages);
-  const safeBac2Page = Math.min(bac2Page, bac2TotalPages);
-
-  const bac1PageItems = useMemo(
-    () => bac1Users.slice((safeBac1Page - 1) * PAGE_SIZE, safeBac1Page * PAGE_SIZE),
-    [bac1Users, safeBac1Page]
-  );
-  const bac2PageItems = useMemo(
-    () => bac2Users.slice((safeBac2Page - 1) * PAGE_SIZE, safeBac2Page * PAGE_SIZE),
-    [bac2Users, safeBac2Page]
+    () => allUsers.filter((u) => u.grade === 'unclassified'),
+    [allUsers]
   );
 
   const handleToggleSuspend = async (user: AdminUserItem) => {
@@ -636,42 +636,16 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
                       data-testid="bac1-users-count"
                       className="px-2.5 py-1 rounded-full bg-indigo-100 text-indigo-800 font-mono font-black text-[11px]"
                     >
-                      {bac1Users.length} طالب
+                      {bac1Users.length} في الصفحة (إجمالي {serverCounts.bac1})
                     </span>
                   </div>
 
-                  {bac1PageItems.length === 0 ? (
+                  {bac1Users.length === 0 ? (
                     <div className="p-6 rounded-2xl clay-inset text-center text-slate-500 font-bold">
-                      لا يوجد طلاب في أولى بكالوريا مطابقون للتصفية الحالية.
+                      لا يوجد طلاب في أولى بكالوريا في هذه الصفحة.
                     </div>
                   ) : (
-                    <div className="space-y-2.5">{bac1PageItems.map(renderUserCard)}</div>
-                  )}
-
-                  {bac1TotalPages > 1 && (
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-200/60 text-[11px]">
-                      <button
-                        type="button"
-                        disabled={safeBac1Page <= 1}
-                        onClick={() => setBac1Page((p) => Math.max(1, p - 1))}
-                        className="clay-btn px-2.5 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
-                      >
-                        <ChevronRight className="w-3.5 h-3.5" />
-                        <span>السابق</span>
-                      </button>
-                      <span className="font-mono font-bold text-slate-600">
-                        صفحة {safeBac1Page} من {bac1TotalPages}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={safeBac1Page >= bac1TotalPages}
-                        onClick={() => setBac1Page((p) => Math.min(bac1TotalPages, p + 1))}
-                        className="clay-btn px-2.5 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
-                      >
-                        <span>التالي</span>
-                        <ChevronLeft className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    <div className="space-y-2.5">{bac1Users.map(renderUserCard)}</div>
                   )}
                 </section>
               )}
@@ -700,47 +674,68 @@ export const AdminUsersTab: React.FC<AdminUsersTabProps> = ({ onNotice }) => {
                       data-testid="bac2-users-count"
                       className="px-2.5 py-1 rounded-full bg-purple-100 text-purple-800 font-mono font-black text-[11px]"
                     >
-                      {bac2Users.length} طالب
+                      {bac2Users.length} في الصفحة (إجمالي {serverCounts.bac2})
                     </span>
                   </div>
 
-                  {bac2PageItems.length === 0 ? (
+                  {bac2Users.length === 0 ? (
                     <div className="p-6 rounded-2xl clay-inset text-center text-slate-500 font-bold">
-                      لا يوجد طلاب في تانية بكالوريا مطابقون للتصفية الحالية.
+                      لا يوجد طلاب في تانية بكالوريا في هذه الصفحة.
                     </div>
                   ) : (
-                    <div className="space-y-2.5">{bac2PageItems.map(renderUserCard)}</div>
-                  )}
-
-                  {bac2TotalPages > 1 && (
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-200/60 text-[11px]">
-                      <button
-                        type="button"
-                        disabled={safeBac2Page <= 1}
-                        onClick={() => setBac2Page((p) => Math.max(1, p - 1))}
-                        className="clay-btn px-2.5 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
-                      >
-                        <ChevronRight className="w-3.5 h-3.5" />
-                        <span>السابق</span>
-                      </button>
-                      <span className="font-mono font-bold text-slate-600">
-                        صفحة {safeBac2Page} من {bac2TotalPages}
-                      </span>
-                      <button
-                        type="button"
-                        disabled={safeBac2Page >= bac2TotalPages}
-                        onClick={() => setBac2Page((p) => Math.min(bac2TotalPages, p + 1))}
-                        className="clay-btn px-2.5 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
-                      >
-                        <span>التالي</span>
-                        <ChevronLeft className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    <div className="space-y-2.5">{bac2Users.map(renderUserCard)}</div>
                   )}
                 </section>
               )}
             </div>
           )}
+
+          {/* Server-Side Pagination Controls */}
+          <div
+            data-testid="admin-users-pagination"
+            className="p-3 rounded-2xl clay-inset flex flex-wrap items-center justify-between gap-2 text-[11px]"
+          >
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                data-testid="users-prev-page"
+                disabled={loading || page <= 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                className="clay-btn px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+                <span>السابق</span>
+              </button>
+              <span className="font-mono font-bold text-slate-700">
+                صفحة {page} من {totalPages} · مطابق: {totalMatching}
+              </span>
+              <button
+                type="button"
+                data-testid="users-next-page"
+                disabled={loading || page >= totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                className="clay-btn px-3 py-1.5 rounded-xl font-bold flex items-center gap-1 disabled:opacity-40"
+              >
+                <span>التالي</span>
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <label className="flex items-center gap-1.5 font-bold text-slate-600">
+              <span>حجم الصفحة:</span>
+              <select
+                aria-label="عدد الحسابات في الصفحة"
+                value={pageSize}
+                onChange={(e) => setPageSize(Number(e.target.value) || DEFAULT_SERVER_PAGE_SIZE)}
+                className="px-2.5 py-1 rounded-xl clay-card border-none outline-none font-mono"
+              >
+                <option value={12}>12</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+            </label>
+          </div>
         </div>
       )}
 

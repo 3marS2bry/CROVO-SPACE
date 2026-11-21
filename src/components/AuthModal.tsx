@@ -119,11 +119,11 @@ export const AuthModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       onClick={closeAuthModal}
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/55 animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/55 transition-opacity duration-150"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md clay-card bg-[#EEF2F7] p-5 sm:p-7 rounded-3xl border border-white/95 shadow-2xl relative text-right animate-modal-pop max-h-[92vh] overflow-y-auto"
+        className="w-full max-w-md clay-card bg-[#EEF2F7] p-5 sm:p-7 rounded-t-3xl sm:rounded-3xl border border-white/95 shadow-2xl relative text-right transition-transform duration-150 max-h-[92vh] overflow-y-auto"
       >
         <button
           type="button"

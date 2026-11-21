@@ -663,10 +663,10 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
                         <div className="pt-2 border-t border-indigo-200/50 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 text-right">
                           <div>
                             <div className="text-xs sm:text-sm font-bold font-ios text-slate-900">
-                              عايز تخلص كل الفصول دي في 4 دقايق بمحاكاة بشرية تامة؟
+                              عايز توفر وقتك وتنجز الفصول دي بمحاكاة بشرية هادئة؟
                             </div>
                             <p className="text-[11px] sm:text-xs text-slate-600 font-ios mt-0.5 leading-relaxed">
-                              أداتي بتسجل كأنك أنت بالظبط وتكتب وتجاوب بنعومة تامة بدون كشفك في المنصة.
+                              أداتي بتسجل وتجاوب بسلاسة وبأسلوب طبيعي يختصر عليك مجهود الحل اليدوي.
                             </p>
                           </div>
                           <div className="flex flex-row items-center gap-2 shrink-0 w-full sm:w-auto">

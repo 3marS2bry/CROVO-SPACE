@@ -50,7 +50,9 @@ const QuestionCardComponent: React.FC<QuestionCardProps> = ({
 
   // Report wrong answer state
   const [reportOpen, setReportOpen] = useState(false);
+  const [reportReason, setReportReason] = useState('إجابة غير دقيقة');
   const [reportText, setReportText] = useState('');
+  const [suggestedSolution, setSuggestedSolution] = useState('');
   const [reportSubmitting, setReportSubmitting] = useState(false);
   const [reportMsg, setReportMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -125,9 +127,12 @@ const QuestionCardComponent: React.FC<QuestionCardProps> = ({
         qIndex: index,
         questionTitle: question.q,
         description: reportText,
+        reason: reportReason,
+        suggestedSolution: suggestedSolution.trim() || undefined,
       });
       setReportMsg({ type: 'ok', text: res.message });
       setReportText('');
+      setSuggestedSolution('');
       window.setTimeout(() => {
         setReportOpen(false);
       }, 2200);
@@ -325,6 +330,24 @@ const QuestionCardComponent: React.FC<QuestionCardProps> = ({
                 <span>لاحظت حاجة غلط في الإجابة؟ اكتب وصف بسيط وهنراجعها فوراً:</span>
               </div>
 
+              <div className="space-y-1">
+                <label className="block text-[11px] font-bold text-slate-700 font-ios">
+                  سبب البلاغ:
+                </label>
+                <select
+                  value={reportReason}
+                  onChange={(e) => setReportReason(e.target.value)}
+                  data-testid={`report-reason-${questionKey}`}
+                  className="w-full px-2.5 py-1.5 rounded-xl clay-card text-xs font-ios border-none outline-none text-slate-900"
+                >
+                  <option value="إجابة غير دقيقة">إجابة غير دقيقة</option>
+                  <option value="صياغة السؤال غير واضحة">صياغة السؤال غير واضحة</option>
+                  <option value="السؤال ناقص">السؤال ناقص</option>
+                  <option value="مشكلة في الكود">مشكلة في الكود</option>
+                  <option value="أخرى">أخرى</option>
+                </select>
+              </div>
+
               <textarea
                 rows={2}
                 required
@@ -333,6 +356,16 @@ const QuestionCardComponent: React.FC<QuestionCardProps> = ({
                 value={reportText}
                 onChange={(e) => setReportText(e.target.value)}
                 placeholder="مثال: الإجابة الصح فيها semicolon زيادة أو السطر التاني ناقص..."
+                className="w-full p-2.5 rounded-xl clay-card text-xs font-ios border-none outline-none text-slate-900 resize-none"
+              />
+
+              <textarea
+                rows={2}
+                maxLength={800}
+                value={suggestedSolution}
+                onChange={(e) => setSuggestedSolution(e.target.value)}
+                placeholder="الحل المقترح الصحيح (اختياري)..."
+                data-testid={`report-suggested-${questionKey}`}
                 className="w-full p-2.5 rounded-xl clay-card text-xs font-ios border-none outline-none text-slate-900 resize-none"
               />
 

@@ -286,6 +286,9 @@ export interface ValidatedCommentInput {
   content: string;
   contactPhone: string | null;
   showContactPublicly: boolean;
+  moderationPending?: boolean;
+  orderCode?: string;
+  source?: 'standard' | 'post_whatsapp';
   avatarImage: ValidatedImageData | null;
   attachmentImage: ValidatedImageData | null;
   attachmentBeforeImage: ValidatedImageData | null;
@@ -343,6 +346,13 @@ export function validateCommentPayload(raw: Record<string, unknown>): ValidatedC
     ? validateBase64Image(raw.attachmentAfterDataUrl, 1_500_000)
     : null;
 
+  const orderCodeRaw = typeof raw.orderCode === 'string' ? raw.orderCode.trim().toUpperCase() : '';
+  const orderCode =
+    orderCodeRaw && /^[A-Z0-9_-]{3,40}$/.test(orderCodeRaw) ? orderCodeRaw : undefined;
+  const source: 'standard' | 'post_whatsapp' =
+    raw.source === 'post_whatsapp' ? 'post_whatsapp' : 'standard';
+  const moderationPending = Boolean(raw.moderationPending);
+
   return {
     authorName,
     grade,
@@ -350,6 +360,9 @@ export function validateCommentPayload(raw: Record<string, unknown>): ValidatedC
     content,
     contactPhone,
     showContactPublicly: false,
+    moderationPending,
+    ...(orderCode ? { orderCode } : {}),
+    source,
     avatarImage,
     attachmentImage: attachmentBeforeImage,
     attachmentBeforeImage,
@@ -365,6 +378,8 @@ export interface ValidatedQuestionReport {
   qIndex: number;
   questionTitle: string;
   description: string;
+  reason?: string;
+  suggestedSolution?: string;
 }
 
 export function validateQuestionReportPayload(raw: Record<string, unknown>): ValidatedQuestionReport {
@@ -410,6 +425,19 @@ export function validateQuestionReportPayload(raw: Record<string, unknown>): Val
     throw new Error(modCheck.reason || 'الوصف يحتوي على محتوى غير مسموح.');
   }
 
+  const reason =
+    typeof raw.reason === 'string' && raw.reason.trim() ? raw.reason.trim().slice(0, 120) : undefined;
+  const suggestedSolutionRaw =
+    typeof raw.suggestedSolution === 'string' && raw.suggestedSolution.trim()
+      ? raw.suggestedSolution.trim().slice(0, 800)
+      : undefined;
+  if (suggestedSolutionRaw) {
+    const solMod = checkCommentModeration(suggestedSolutionRaw);
+    if (!solMod.ok) {
+      throw new Error(solMod.reason || 'الإجابة المقترحة تحتوي على محتوى غير مسموح.');
+    }
+  }
+
   return {
     questionKey,
     grade,
@@ -418,10 +446,22 @@ export function validateQuestionReportPayload(raw: Record<string, unknown>): Val
     qIndex,
     questionTitle,
     description,
+    ...(reason ? { reason } : {}),
+    ...(suggestedSolutionRaw ? { suggestedSolution: suggestedSolutionRaw } : {}),
   };
 }
 
-export function formatOrderCode(): string {
+export function formatOrderCode(clientRequestId?: string): string {
+  if (clientRequestId && clientRequestId.trim().length >= 8) {
+    const cleaned = clientRequestId.replace(/[^a-zA-Z0-9]/g, '');
+    let hash = 2166136261;
+    for (let i = 0; i < cleaned.length; i += 1) {
+      hash ^= cleaned.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    const hex = (hash >>> 0).toString(16).toUpperCase().padStart(8, '0');
+    return `CRV-${hex.slice(0, 6)}`;
+  }
   const arr = new Uint32Array(1);
   crypto.getRandomValues(arr);
   const num = 100000 + (arr[0] % 900000);

@@ -4,12 +4,12 @@ import {
   BarChart3,
   BookOpen,
   Calendar,
+  Clock,
   Heart,
   Search,
   ShieldCheck,
   ShoppingBag,
   Users,
-  Zap,
 } from 'lucide-react';
 import { AdminAnalyticsResponse, api } from '../../utils/api';
 import { readAdminSnapshot, writeAdminSnapshot } from '../../utils/adminSnapshotCache';
@@ -108,10 +108,31 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
 
   return (
     <div className="space-y-5 text-xs font-ios" data-testid="admin-analytics-tab">
-      {/* Permanent Persistence Assurance Banner */}
-      <div className="p-3 rounded-2xl clay-inset flex items-center gap-2 text-indigo-900 font-bold">
-        <ShieldCheck className="w-4 h-4 shrink-0 text-indigo-600" />
-        <span>جميع إحصائيات الزيارات والنشاط محفوظة بشكل دائم وتراكمي في Cloud Firestore. أزرار الفترات (اليوم، آخر 7 أيام، الخ) تقتصر على تصفية العرض فقط دون حذف أو مسح أي بيانات تاريخية إطلاقاً.</span>
+      {/* Permanent Persistence & Methodology Assurance Banner */}
+      <div className="p-3.5 rounded-2xl clay-inset space-y-2 text-indigo-900">
+        <div className="flex items-start gap-2 font-bold">
+          <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5 text-indigo-600" />
+          <span>
+            جميع إحصائيات الزيارات والنشاط محفوظة بشكل دائم وتراكمي في Cloud Firestore. أزرار الفترات (اليوم، آخر 7 أيام، 30 يوماً، سنة) تقتصر على تصفية العرض فقط دون حذف أو مسح أي بيانات تاريخية إطلاقاً.
+          </span>
+        </div>
+        <div
+          data-testid="analytics-methodology-note"
+          className="flex items-start gap-2 text-[11px] font-semibold text-slate-600 pt-1 border-t border-slate-200/70"
+        >
+          <Clock className="w-3.5 h-3.5 shrink-0 mt-0.5 text-indigo-500" />
+          <span>
+            <strong>منهجية الاحتساب:</strong> يتم تجميع الأيام والفترات بتوقيت القاهرة (
+            <span className="font-mono" dir="ltr">
+              Africa/Cairo
+            </span>
+            )، ويُحسب <strong>الزائر الفريد (Unique Visitor)</strong> بناءً على معرّف المتصفح الموقع رقمياً (
+            <span className="font-mono" dir="ltr">
+              visitorId
+            </span>
+            ) مرة واحدة لكل يوم، مع إمكانية وجود أكثر من زيارة أو فتح للمكتبة لنفس الزائر.
+          </span>
+        </div>
       </div>
 
       {(analytics?.dbStatus === 'quota_exceeded' || analytics?.dbStatus === 'error') && (
@@ -128,13 +149,14 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
               ['today', 'اليوم'],
               ['7d', 'آخر 7 أيام'],
               ['30d', 'آخر 30 يوم'],
-              ['year', 'السنة'],
+              ['year', 'سنة'],
               ['custom', 'فترة مخصصة'],
             ] as const
           ).map(([key, label]) => (
             <button
               key={key}
               type="button"
+              data-testid={`analytics-range-${key}`}
               onClick={() => {
                 setRange(key);
                 if (key !== 'custom') loadAnalytics(key);
@@ -194,7 +216,7 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
           </div>
           <div className="flex items-center justify-between">
             <span className="text-[10px] text-slate-500 font-mono">
-              زوار فريدون: {analytics?.visitors?.uniqueVisitors ?? 0}
+              زوار فريدون (visitorId): {analytics?.visitors?.uniqueVisitors ?? 0}
             </span>
             {analytics?.visitors && (
               <DeltaBadge
@@ -259,7 +281,7 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
           <div className="flex items-center gap-2">
             <BarChart3 className="w-4 h-4 text-indigo-600" />
             <h2 className="text-sm sm:text-base font-black font-decorative text-slate-900">
-              النشاط اليومي الفعلي (الزيارات vs فتح المكتبة والبحث)
+              النشاط اليومي الفعلي بتوقيت القاهرة (الزيارات vs فتح المكتبة والبحث)
             </h2>
           </div>
           <div className="flex items-center gap-3 text-[10px] font-bold">
@@ -304,8 +326,8 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
         )}
       </div>
 
-      {/* Detailed Panels: Search Terms + Levels + Tool + Engagement */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+      {/* Detailed Panels: Search Terms + Engagement */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Library Search & Levels */}
         <div className="clay-card p-4 space-y-2.5">
           <div className="flex items-center justify-between">
@@ -335,40 +357,6 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
               </div>
             ))
           )}
-        </div>
-
-        {/* Tool Runs Summary */}
-        <div className="clay-card p-4 space-y-2.5">
-          <h3 className="text-sm font-black font-decorative flex items-center gap-1.5">
-            <Zap className="w-4 h-4 text-amber-500" />
-            <span>إحصائيات تشغيل الأداة</span>
-          </h3>
-          <div className="grid grid-cols-2 gap-2 font-mono">
-            <div className="p-2.5 rounded-xl clay-inset">
-              <div className="text-[10px] text-slate-500">إجمالي التشغيل</div>
-              <div className="text-base font-black text-slate-900">
-                {analytics?.tool?.totalRuns ?? 0}
-              </div>
-            </div>
-            <div className="p-2.5 rounded-xl clay-inset">
-              <div className="text-[10px] text-slate-500">متوسط المدة</div>
-              <div className="text-base font-black text-indigo-700">
-                {Math.round((analytics?.tool?.avgDurationMs ?? 0) / 1000)} ث
-              </div>
-            </div>
-            <div className="p-2.5 rounded-xl clay-inset">
-              <div className="text-[10px] text-slate-500">مكتملة بنجاح</div>
-              <div className="text-base font-black text-indigo-600">
-                {analytics?.tool?.succeededRuns ?? 0}
-              </div>
-            </div>
-            <div className="p-2.5 rounded-xl clay-inset">
-              <div className="text-[10px] text-slate-500">فاشلة</div>
-              <div className="text-base font-black text-rose-600">
-                {analytics?.tool?.failedRuns ?? 0}
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Engagement Summary */}
@@ -402,3 +390,4 @@ export const AdminAnalyticsTab: React.FC<AdminAnalyticsTabProps> = ({ initialDat
     </div>
   );
 };
+

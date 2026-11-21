@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  AlertCircle,
   ArrowRight,
   BadgeCheck,
   BarChart3,
@@ -10,11 +11,13 @@ import {
   EyeOff,
   Flag,
   Heart,
+  History,
   KeyRound,
   Lock,
   LogOut,
   Megaphone,
   MessageSquare,
+  PlusCircle,
   RefreshCw,
   RotateCcw,
   Save,
@@ -25,9 +28,15 @@ import {
   Trash2,
   Users,
   Vote,
+  X,
   Zap,
 } from 'lucide-react';
-import { api, ApiError } from '../utils/api';
+import {
+  api,
+  ApiError,
+  OrderPaymentStatus,
+  OrderSubscriptionStatus,
+} from '../utils/api';
 import { readAdminSnapshot, writeAdminSnapshot } from '../utils/adminSnapshotCache';
 import { useAuth } from '../context/AuthContext';
 import {
@@ -86,10 +95,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     snapshotTime?: string;
   } | null>(null);
 
-  // Orders filter & password reveal tracking
+  // Orders filter, manual order, inline confirmations & notes
   const [orderSearch, setOrderSearch] = useState('');
   const [orderStatusFilter, setOrderStatusFilter] = useState<string>('all');
   const [revealedOrderPasswords, setRevealedOrderPasswords] = useState<Record<string, boolean>>({});
+  const [orderNotes, setOrderNotes] = useState<Record<string, string>>({});
+  const [expandedOrderLogId, setExpandedOrderLogId] = useState<string | null>(null);
+  const [pendingOrderStatusConfirm, setPendingOrderStatusConfirm] = useState<{
+    id: string;
+    orderCode: string;
+    expectedCurrentStatus: string;
+    nextStatus: 'completed' | 'cancelled';
+  } | null>(null);
+
+  const [showManualOrderModal, setShowManualOrderModal] = useState(false);
+  const [manualFullName, setManualFullName] = useState('');
+  const [manualOrderCode, setManualOrderCode] = useState('');
+  const [manualGrade, setManualGrade] = useState<'bac1' | 'bac2'>('bac1');
+  const [manualPlatforms, setManualPlatforms] = useState<Array<'qureo' | 'financial'>>(['qureo']);
+  const [manualPlatformUsername, setManualPlatformUsername] = useState('');
+  const [manualPaymentMethod, setManualPaymentMethod] = useState('فودافون كاش');
+  const [manualFinalPrice, setManualFinalPrice] = useState('');
+  const [manualStatus, setManualStatus] = useState<'new' | 'reviewing' | 'completed' | 'cancelled'>('new');
+  const [manualPaymentStatus, setManualPaymentStatus] = useState<OrderPaymentStatus>('pending_verification');
+  const [manualSubscriptionStatus, setManualSubscriptionStatus] = useState<OrderSubscriptionStatus>('pending_confirmation');
+  const [manualAdminNote, setManualAdminNote] = useState('');
+  const [manualOrderSubmitting, setManualOrderSubmitting] = useState(false);
+  const [manualOrderError, setManualOrderError] = useState<string | null>(null);
 
   // Question reports notes & delete confirmations
   const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
@@ -107,6 +139,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [afterOfferMode, setAfterOfferMode] = useState<'regular_price' | 'extended_offer'>('regular_price');
   const [ordersEnabled, setOrdersEnabled] = useState(true);
   const [adminWhatsappDisplay, setAdminWhatsappDisplay] = useState('201550324450');
+  const [showSettingsConfirmPreview, setShowSettingsConfirmPreview] = useState(false);
 
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [notificationsIntervalDays, setNotificationsIntervalDays] = useState(3);
@@ -322,16 +355,105 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setData(null);
   };
 
-  const handleOrderStatusChange = async (
+  const executeOrderUpdate = async (
     id: string,
-    status: 'new' | 'reviewing' | 'completed' | 'cancelled'
+    payload: {
+      expectedCurrentStatus?: string;
+      status?: 'new' | 'reviewing' | 'completed' | 'cancelled';
+      paymentStatus?: OrderPaymentStatus;
+      subscriptionStatus?: OrderSubscriptionStatus;
+      adminNote?: string;
+    }
   ) => {
     try {
-      await api.adminUpdateOrder(id, { status });
-      flashNotice('تم تحديث حالة الطلب بنجاح.');
+      await api.adminUpdateOrder(id, payload);
+      setPendingOrderStatusConfirm(null);
+      flashNotice('تم تحديث الطلب وسجل التغييرات بنجاح.');
       await loadOverview();
     } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setPendingOrderStatusConfirm(null);
+        flashNotice('تعارض: تم تعديل حالة هذا الطلب مسبقاً — تم تحديث القائمة بآخر حالة.');
+        await loadOverview();
+        return;
+      }
       flashNotice(err instanceof Error ? err.message : 'تعذر تحديث الطلب.');
+    }
+  };
+
+  const handleOrderStatusSelect = (
+    ord: OverviewData['orders'][number],
+    nextStatus: 'new' | 'reviewing' | 'completed' | 'cancelled'
+  ) => {
+    if (nextStatus === ord.status) return;
+    if (nextStatus === 'completed' || nextStatus === 'cancelled') {
+      setPendingOrderStatusConfirm({
+        id: ord.id,
+        orderCode: ord.orderCode,
+        expectedCurrentStatus: ord.status,
+        nextStatus,
+      });
+      return;
+    }
+    void executeOrderUpdate(ord.id, {
+      status: nextStatus,
+      expectedCurrentStatus: ord.status,
+    });
+  };
+
+  const handleCreateManualOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (manualOrderSubmitting) return;
+    setManualOrderError(null);
+    if (manualFullName.trim().length < 2) {
+      setManualOrderError('اسم العميل مطلوب (حرفان على الأقل).');
+      return;
+    }
+    if (manualPlatformUsername.trim().length < 2) {
+      setManualOrderError('اسم المستخدم على المنصة مطلوب (حرفان على الأقل).');
+      return;
+    }
+    const platformsToSend: Array<'qureo' | 'financial'> =
+      manualGrade === 'bac1'
+        ? ['qureo']
+        : manualPlatforms.length > 0
+          ? manualPlatforms
+          : ['qureo'];
+    setManualOrderSubmitting(true);
+    try {
+      const parsedPrice = manualFinalPrice.trim() ? Number(manualFinalPrice.trim()) : undefined;
+      const res = await api.adminCreateManualOrder({
+        orderCode: manualOrderCode.trim() || undefined,
+        fullName: manualFullName.trim(),
+        grade: manualGrade,
+        platforms: platformsToSend,
+        platformUsername: manualPlatformUsername.trim(),
+        paymentMethod: manualPaymentMethod,
+        finalPrice: Number.isFinite(parsedPrice) ? parsedPrice : undefined,
+        status: manualStatus,
+        paymentStatus: manualPaymentStatus,
+        subscriptionStatus: manualSubscriptionStatus,
+        adminNote: manualAdminNote.trim() || undefined,
+      });
+      setShowManualOrderModal(false);
+      setManualFullName('');
+      setManualOrderCode('');
+      setManualPlatformUsername('');
+      setManualFinalPrice('');
+      setManualAdminNote('');
+      setManualStatus('new');
+      setManualPaymentStatus('pending_verification');
+      setManualSubscriptionStatus('pending_confirmation');
+      flashNotice(`تم تسجيل الطلب اليدوي #${res.order.orderCode} بنجاح.`);
+      await loadOverview();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        setManualOrderError(err.message || 'يوجد طلب مسجل بنفس الرقم بالفعل — استخدم رقماً آخر أو عدّل الطلب الحالي.');
+      } else {
+        setManualOrderError(err instanceof Error ? err.message : 'تعذر تسجيل الطلب اليدوي.');
+      }
+    } finally {
+      setManualOrderSubmitting(false);
     }
   };
 
@@ -356,8 +478,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  const handleSaveSettings = async (e: React.FormEvent) => {
+  const handleRequestSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
+    setShowSettingsConfirmPreview(true);
+  };
+
+  const handleConfirmSaveSettings = async () => {
     try {
       await api.adminUpdateSettings({
         qureoOfferPrice,
@@ -373,6 +499,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         notificationsEnabled,
         notificationsIntervalDays,
       });
+      setShowSettingsConfirmPreview(false);
       flashNotice('تم حفظ الإعدادات وتحديث الموقع للجميع فوراً.');
       onConfigUpdated();
       await loadOverview();
@@ -802,7 +929,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* ORDERS */}
       {tab === 'orders' && (
         <div className="clay-card p-4 sm:p-6 space-y-4">
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-2.5">
             <input
               type="text"
               data-testid="admin-orders-search"
@@ -811,18 +938,255 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               placeholder="بحث برقم الطلب أو الرقم التسلسلي (CRV-1001) أو الاسم..."
               className="px-3.5 py-2 rounded-xl text-xs font-ios clay-inset border-none outline-none flex-1"
             />
-            <select
-              value={orderStatusFilter}
-              onChange={(e) => setOrderStatusFilter(e.target.value)}
-              className="px-3 py-2 rounded-xl text-xs font-ios clay-inset border-none outline-none"
-            >
-              <option value="all">كل الحالات</option>
-              <option value="new">جديد</option>
-              <option value="reviewing">قيد المراجعة</option>
-              <option value="completed">مكتمل</option>
-              <option value="cancelled">ملغي</option>
-            </select>
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={orderStatusFilter}
+                onChange={(e) => setOrderStatusFilter(e.target.value)}
+                className="px-3 py-2 rounded-xl text-xs font-ios clay-inset border-none outline-none"
+              >
+                <option value="all">كل الحالات</option>
+                <option value="new">جديد</option>
+                <option value="reviewing">قيد المراجعة</option>
+                <option value="completed">مكتمل</option>
+                <option value="cancelled">ملغي</option>
+              </select>
+
+              <button
+                type="button"
+                data-testid="open-manual-order-btn"
+                onClick={() => {
+                  setManualOrderError(null);
+                  setShowManualOrderModal(true);
+                }}
+                className="clay-apple-blue px-3.5 py-2 rounded-xl text-xs font-black text-white flex items-center gap-1.5 shadow-sm"
+              >
+                <PlusCircle className="w-3.5 h-3.5" />
+                <span>+ تسجيل طلب يدوي (واتساب)</span>
+              </button>
+            </div>
           </div>
+
+          {showManualOrderModal && (
+            <form
+              onSubmit={handleCreateManualOrder}
+              data-testid="manual-order-form"
+              className="p-4 rounded-2xl border border-indigo-200 bg-white/85 space-y-3 text-xs font-ios"
+            >
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-black font-decorative text-indigo-900">
+                  تسجيل ومطابقة طلب يدوي قادم من واتساب
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setShowManualOrderModal(false)}
+                  className="clay-btn p-1.5 rounded-full"
+                  aria-label="إغلاق"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+
+              {manualOrderError && (
+                <div
+                  data-testid="manual-order-error"
+                  className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 font-bold flex items-center gap-2"
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{manualOrderError}</span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                <label className="block">
+                  <span className="font-bold text-slate-700">اسم الطالب / العميل *</span>
+                  <input
+                    type="text"
+                    required
+                    value={manualFullName}
+                    onChange={(e) => setManualFullName(e.target.value)}
+                    placeholder="الاسم الكامل"
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">كود الطلب من رسالة واتساب (اختياري)</span>
+                  <input
+                    type="text"
+                    dir="ltr"
+                    value={manualOrderCode}
+                    onChange={(e) => setManualOrderCode(e.target.value)}
+                    placeholder="مثال: CRV-7A9C21"
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-mono"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">اسم المستخدم في المنصة *</span>
+                  <input
+                    type="text"
+                    required
+                    dir="ltr"
+                    value={manualPlatformUsername}
+                    onChange={(e) => setManualPlatformUsername(e.target.value)}
+                    placeholder="username"
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-mono"
+                  />
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">المرحلة الدراسية</span>
+                  <select
+                    value={manualGrade}
+                    onChange={(e) => {
+                      const next = e.target.value === 'bac2' ? 'bac2' : 'bac1';
+                      setManualGrade(next);
+                      if (next === 'bac1') setManualPlatforms(['qureo']);
+                    }}
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-bold"
+                  >
+                    <option value="bac1">أولى بكالوريا (QUREO)</option>
+                    <option value="bac2">تانية بكالوريا</option>
+                  </select>
+                </label>
+
+                <div className="block">
+                  <span className="font-bold text-slate-700 block">المنصات المختارة</span>
+                  <div className="mt-1.5 flex items-center gap-3 px-3 py-1.5 rounded-xl clay-inset">
+                    <label className="flex items-center gap-1.5 font-bold cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={manualPlatforms.includes('qureo')}
+                        disabled={manualGrade === 'bac1'}
+                        onChange={(e) =>
+                          setManualPlatforms((prev) =>
+                            e.target.checked
+                              ? Array.from(new Set([...prev, 'qureo']))
+                              : prev.filter((p) => p !== 'qureo')
+                          )
+                        }
+                      />
+                      <span>QUREO</span>
+                    </label>
+                    {manualGrade === 'bac2' && (
+                      <label className="flex items-center gap-1.5 font-bold cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={manualPlatforms.includes('financial')}
+                          onChange={(e) =>
+                            setManualPlatforms((prev) =>
+                              e.target.checked
+                                ? Array.from(new Set([...prev, 'financial']))
+                                : prev.filter((p) => p !== 'financial')
+                            )
+                          }
+                        />
+                        <span>ثقافة مالية</span>
+                      </label>
+                    )}
+                  </div>
+                </div>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">طريقة الدفع والسعر النهائي</span>
+                  <div className="grid grid-cols-2 gap-1.5 mt-1">
+                    <select
+                      value={manualPaymentMethod}
+                      onChange={(e) => setManualPaymentMethod(e.target.value)}
+                      className="px-2 py-2 rounded-xl clay-inset border-none outline-none font-bold"
+                    >
+                      <option value="فودافون كاش">فودافون كاش</option>
+                      <option value="إنستا باي">إنستا باي</option>
+                      <option value="محفظة إلكترونية (كاش)">محفظة كاش</option>
+                    </select>
+                    <input
+                      type="number"
+                      min={0}
+                      value={manualFinalPrice}
+                      onChange={(e) => setManualFinalPrice(e.target.value)}
+                      placeholder="تلقائي"
+                      className="px-2.5 py-2 rounded-xl clay-inset border-none outline-none font-mono"
+                    />
+                  </div>
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">حالة الطلب</span>
+                  <select
+                    value={manualStatus}
+                    onChange={(e) =>
+                      setManualStatus(e.target.value as 'new' | 'reviewing' | 'completed' | 'cancelled')
+                    }
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-bold"
+                  >
+                    <option value="new">جديد</option>
+                    <option value="reviewing">قيد المراجعة</option>
+                    <option value="completed">مكتمل</option>
+                    <option value="cancelled">ملغي</option>
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">حالة الدفع</span>
+                  <select
+                    value={manualPaymentStatus}
+                    onChange={(e) => setManualPaymentStatus(e.target.value as OrderPaymentStatus)}
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-bold"
+                  >
+                    <option value="pending_verification">بانتظار مراجعة الدفع</option>
+                    <option value="paid">تم الدفع ✓</option>
+                    <option value="unpaid">غير مدفوع</option>
+                    <option value="refunded">مسترد</option>
+                  </select>
+                </label>
+
+                <label className="block">
+                  <span className="font-bold text-slate-700">حالة الاشتراك</span>
+                  <select
+                    value={manualSubscriptionStatus}
+                    onChange={(e) =>
+                      setManualSubscriptionStatus(e.target.value as OrderSubscriptionStatus)
+                    }
+                    className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none font-bold"
+                  >
+                    <option value="pending_confirmation">بانتظار التأكيد اليدوي</option>
+                    <option value="active">مفعّل ✓</option>
+                    <option value="expired">منتهي</option>
+                    <option value="cancelled">ملغي</option>
+                  </select>
+                </label>
+              </div>
+
+              <label className="block">
+                <span className="font-bold text-slate-700">ملاحظة الإدارة (اختياري)</span>
+                <input
+                  type="text"
+                  value={manualAdminNote}
+                  onChange={(e) => setManualAdminNote(e.target.value)}
+                  placeholder="تفاصيل التحويل أو أي ملاحظة..."
+                  className="w-full mt-1 px-3 py-2 rounded-xl clay-inset border-none outline-none"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowManualOrderModal(false)}
+                  className="clay-btn px-4 py-2 rounded-xl font-bold"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  data-testid="submit-manual-order-btn"
+                  disabled={manualOrderSubmitting}
+                  className="clay-apple-blue px-5 py-2 rounded-xl font-black text-white disabled:opacity-50"
+                >
+                  {manualOrderSubmitting ? 'جاري التسجيل...' : 'حفظ الطلب اليدوي'}
+                </button>
+              </div>
+            </form>
+          )}
 
           {filteredOrders.length === 0 ? (
             <div className="p-8 rounded-2xl clay-inset text-center text-xs font-bold text-slate-500 font-ios">
@@ -832,6 +1196,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="space-y-3">
               {filteredOrders.map((ord) => {
                 const isPassVisible = Boolean(revealedOrderPasswords[ord.id]);
+                const pStatus = ord.paymentStatus || 'pending_verification';
+                const sStatus = ord.subscriptionStatus || 'pending_confirmation';
+                const isConfirmingFinal = pendingOrderStatusConfirm?.id === ord.id;
+                const noteDraft = orderNotes[ord.id] ?? ord.adminNote ?? '';
+                const changeLogList = ord.changeLog || [];
+
                 return (
                   <div
                     key={ord.id}
@@ -841,6 +1211,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-black text-indigo-600">{ord.orderCode}</span>
+                        {ord.source === 'admin_manual' && (
+                          <span className="px-2 py-0.5 rounded-lg bg-amber-100 text-amber-800 text-[10px] font-bold">
+                            يدوي (واتساب)
+                          </span>
+                        )}
                         {ord.userSerialNumber && (
                           <span
                             dir="ltr"
@@ -856,7 +1231,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </span>
                       </div>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-black text-indigo-600">
                           {ord.finalPrice} جنيه (بدلاً من {ord.oldPrice})
                         </span>
@@ -864,8 +1239,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           aria-label={`حالة الطلب ${ord.orderCode}`}
                           value={ord.status}
                           onChange={(e) =>
-                            handleOrderStatusChange(
-                              ord.id,
+                            handleOrderStatusSelect(
+                              ord,
                               e.target.value as 'new' | 'reviewing' | 'completed' | 'cancelled'
                             )
                           }
@@ -880,13 +1255,117 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
                     </div>
 
+                    {isConfirmingFinal && pendingOrderStatusConfirm && (
+                      <div
+                        data-testid={`confirm-order-status-${ord.orderCode}`}
+                        className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+                      >
+                        <span className="font-black text-amber-900">
+                          {pendingOrderStatusConfirm.nextStatus === 'completed'
+                            ? `تأكيد تحويل الطلب #${ord.orderCode} إلى «مكتمل»؟ (سيتم مسح كلمة سر المنصة تلقائياً)`
+                            : `تأكيد إلغاء الطلب #${ord.orderCode} نهائياً؟`}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void executeOrderUpdate(ord.id, {
+                                status: pendingOrderStatusConfirm.nextStatus,
+                                expectedCurrentStatus: pendingOrderStatusConfirm.expectedCurrentStatus,
+                              })
+                            }
+                            className="px-3 py-1 rounded-lg bg-amber-600 text-white font-bold"
+                          >
+                            تأكيد التنفيذ
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingOrderStatusConfirm(null)}
+                            className="clay-btn px-3 py-1 rounded-lg font-bold"
+                          >
+                            تراجع
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-slate-700">
                       <div>
                         <span className="font-bold">المنصة والقسم:</span> {ord.platformLabel} — {ord.sectionDetails}
                       </div>
                       <div>
                         <span className="font-bold">طريقة الدفع:</span> {ord.paymentMethod} ·{' '}
-                        <span className="font-bold">تواصل واتساب:</span> رسالة جاهزة من العميل (Click-to-Chat)
+                        <span className="font-bold">واتساب:</span> تأكيد يدوي (Click-to-Chat)
+                      </div>
+                    </div>
+
+                    {/* Payment & Subscription Status Selectors + Admin Note */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 p-2.5 rounded-xl bg-white/60 text-[11px]">
+                      <label className="flex flex-col gap-1">
+                        <span className="font-bold text-slate-600">حالة الدفع:</span>
+                        <select
+                          aria-label={`حالة الدفع ${ord.orderCode}`}
+                          value={pStatus}
+                          onChange={(e) =>
+                            void executeOrderUpdate(ord.id, {
+                              expectedCurrentStatus: ord.status,
+                              paymentStatus: e.target.value as OrderPaymentStatus,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg clay-card font-bold"
+                        >
+                          <option value="pending_verification">بانتظار مراجعة الدفع</option>
+                          <option value="paid">تم الدفع ✓</option>
+                          <option value="unpaid">غير مدفوع</option>
+                          <option value="refunded">مسترد</option>
+                        </select>
+                      </label>
+
+                      <label className="flex flex-col gap-1">
+                        <span className="font-bold text-slate-600">حالة الاشتراك:</span>
+                        <select
+                          aria-label={`حالة الاشتراك ${ord.orderCode}`}
+                          value={sStatus}
+                          onChange={(e) =>
+                            void executeOrderUpdate(ord.id, {
+                              expectedCurrentStatus: ord.status,
+                              subscriptionStatus: e.target.value as OrderSubscriptionStatus,
+                            })
+                          }
+                          className="px-2.5 py-1.5 rounded-lg clay-card font-bold"
+                        >
+                          <option value="pending_confirmation">بانتظار التأكيد اليدوي</option>
+                          <option value="active">مفعّل ✓</option>
+                          <option value="expired">منتهي</option>
+                          <option value="cancelled">ملغي</option>
+                        </select>
+                      </label>
+
+                      <div className="flex flex-col gap-1">
+                        <span className="font-bold text-slate-600">ملاحظة الإدارة:</span>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={noteDraft}
+                            onChange={(e) =>
+                              setOrderNotes((prev) => ({ ...prev, [ord.id]: e.target.value }))
+                            }
+                            placeholder="أضف ملاحظة داخلية..."
+                            className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg clay-card border-none outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void executeOrderUpdate(ord.id, {
+                                expectedCurrentStatus: ord.status,
+                                adminNote: noteDraft,
+                              })
+                            }
+                            className="clay-btn px-2.5 py-1.5 rounded-lg font-bold text-indigo-700 shrink-0"
+                          >
+                            حفظ
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -912,6 +1391,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2">
+                        {changeLogList.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedOrderLogId((prev) => (prev === ord.id ? null : ord.id))
+                            }
+                            className="clay-btn px-2.5 py-1 rounded-lg text-slate-700 flex items-center gap-1 font-bold"
+                          >
+                            <History className="w-3 h-3" />
+                            <span>سجل التغييرات ({changeLogList.length})</span>
+                          </button>
+                        )}
+
                         {!ord.credentialsPurged && (
                           <>
                             <button
@@ -966,6 +1458,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         )}
                       </div>
                     </div>
+
+                    {expandedOrderLogId === ord.id && changeLogList.length > 0 && (
+                      <div
+                        data-testid={`order-changelog-${ord.orderCode}`}
+                        className="p-2.5 rounded-xl bg-white/75 space-y-1 text-[10px] font-mono border border-slate-200/80"
+                      >
+                        {changeLogList.map((entry, idx) => (
+                          <div
+                            key={`${ord.id}-log-${idx}`}
+                            className="flex flex-wrap items-center justify-between gap-2 border-b last:border-b-0 border-slate-100 pb-1 last:pb-0"
+                          >
+                            <span className="text-slate-800">
+                              [{entry.by}] {entry.fromStatus ?? 'init'} ← {entry.toStatus}
+                              {entry.paymentStatus ? ` · دفع: ${entry.paymentStatus}` : ''}
+                              {entry.subscriptionStatus ? ` · اشتراك: ${entry.subscriptionStatus}` : ''}
+                              {entry.note ? ` — "${entry.note}"` : ''}
+                            </span>
+                            <span className="text-slate-500" dir="ltr">
+                              {entry.at.replace('T', ' ').slice(0, 19)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -1045,8 +1561,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </span>
                 </div>
 
-                <div className="p-2.5 rounded-xl clay-card text-slate-800">
-                  <span className="font-bold text-rose-600">وصف المشكلة:</span> {rep.description}
+                <div className="p-2.5 rounded-xl clay-card text-slate-800 space-y-1.5">
+                  {rep.reason && (
+                    <div>
+                      <span className="font-bold text-indigo-700">سبب البلاغ:</span>{' '}
+                      <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-900 font-bold">
+                        {rep.reason}
+                      </span>
+                    </div>
+                  )}
+                  <div>
+                    <span className="font-bold text-rose-600">وصف المشكلة:</span> {rep.description}
+                  </div>
+                  {rep.suggestedSolution && (
+                    <div className="p-2 rounded-lg bg-emerald-50/90 border border-emerald-200/80 text-emerald-950 font-mono text-[11px]" dir="auto">
+                      <span className="font-sans font-bold text-emerald-700 block mb-0.5">الحل المقترح من الطالب:</span>
+                      {rep.suggestedSolution}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1">
@@ -1117,18 +1649,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </span>
                     )}
                     <span
+                      data-testid={`comment-status-${cmt.id}`}
                       className={`px-2 py-0.5 rounded-lg text-[10px] font-bold ${
                         cmt.status === 'approved'
                           ? 'bg-indigo-500/15 text-indigo-700'
+                          : cmt.status === 'pending'
+                          ? 'bg-amber-500/15 text-amber-800'
                           : 'bg-rose-500/15 text-rose-700'
                       }`}
                     >
                       {cmt.status === 'approved'
                         ? 'ظاهر'
+                        : cmt.status === 'pending'
+                        ? 'بانتظار الموافقة'
                         : cmt.status === 'flagged'
                         ? 'موقوف للمراجعة'
                         : 'مخفي'}
                     </span>
+                    {cmt.orderCode && (
+                      <span className="px-2 py-0.5 rounded-lg bg-slate-200/80 text-slate-700 font-mono text-[10px] font-bold">
+                        #{cmt.orderCode}
+                      </span>
+                    )}
+                    {cmt.source === 'post_whatsapp' && (
+                      <span className="px-2 py-0.5 rounded-lg bg-emerald-500/15 text-emerald-800 text-[10px] font-bold">
+                        تجربة ما بعد واتساب
+                      </span>
+                    )}
                     {cmt.reportsCount > 0 && (
                       <span className="text-rose-600 font-bold">({cmt.reportsCount} بلاغ)</span>
                     )}
@@ -1179,22 +1726,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   {cmt.status !== 'approved' ? (
                     <button
                       type="button"
+                      data-testid={`approve-comment-${cmt.id}`}
                       onClick={() =>
                         handleCommentAction(cmt.id, { status: 'approved', clearReports: true })
                       }
-                      className="clay-btn px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-indigo-600"
+                      className="clay-btn px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-emerald-700"
                     >
-                      إظهار
+                      {cmt.status === 'pending' ? 'موافقة ونشر ✓' : 'إظهار'}
                     </button>
-                  ) : (
+                  ) : null}
+                  {cmt.status !== 'hidden' ? (
                     <button
                       type="button"
+                      data-testid={`hide-comment-${cmt.id}`}
                       onClick={() => handleCommentAction(cmt.id, { status: 'hidden' })}
                       className="clay-btn px-2.5 py-1.5 rounded-xl text-[11px] font-bold text-amber-600"
                     >
                       إخفاء
                     </button>
-                  )}
+                  ) : null}
 
                   {confirmDeleteCommentId === cmt.id ? (
                     <div className="flex items-center gap-1">
@@ -1232,7 +1782,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* PRICING & WHATSAPP SETTINGS */}
       {tab === 'settings' && (
-        <form onSubmit={handleSaveSettings} className="space-y-5 text-xs font-ios">
+        <form onSubmit={handleRequestSaveSettings} className="space-y-5 text-xs font-ios">
           <div className="clay-card p-4 sm:p-6 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <h2 className="text-base font-black font-decorative">إدارة الأسعار، العرض وواتساب Click-to-Chat</h2>
@@ -1363,13 +1913,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </label>
             </div>
 
-            <button
-              type="submit"
-              className="clay-apple-blue px-6 py-3 rounded-xl text-sm font-black text-white flex items-center gap-2 shadow-md"
-            >
-              <Save className="w-4 h-4" />
-              <span>حفظ الأسعار وإعدادات الطلبات</span>
-            </button>
+            {showSettingsConfirmPreview ? (
+              <div
+                data-testid="settings-confirm-preview"
+                className="p-4 rounded-2xl bg-indigo-50/90 border border-indigo-200 space-y-3"
+              >
+                <div className="font-black text-indigo-950 text-sm">
+                  مراجعة وتأكيد التعديلات قبل تطبيقها على الموقع للجميع:
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 text-[11px] font-mono">
+                  <div className="p-2 rounded-xl bg-white/80">
+                    QUREO: {qureoOfferPrice} ج (عادي {qureoOldPrice} ج)
+                  </div>
+                  <div className="p-2 rounded-xl bg-white/80">
+                    ثقافة مالية: {finOfferPrice} ج (عادي {finOldPrice} ج)
+                  </div>
+                  <div className="p-2 rounded-xl bg-white/80">
+                    المنصتين: {bundleOfferPrice} ج (عادي {bundleOldPrice} ج)
+                  </div>
+                  <div className="p-2 rounded-xl bg-white/80" dir="ltr">
+                    WhatsApp: {adminWhatsappDisplay}
+                  </div>
+                  <div className="p-2 rounded-xl bg-white/80 font-sans font-bold">
+                    بعد العداد: {afterOfferMode === 'regular_price' ? 'السعر العادي' : 'تمديد العرض'}
+                  </div>
+                  <div className="p-2 rounded-xl bg-white/80 font-sans font-bold">
+                    استقبال الطلبات: {ordersEnabled ? 'مفعّل' : 'موقوف'}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="confirm-save-settings-btn"
+                    onClick={handleConfirmSaveSettings}
+                    className="clay-apple-blue px-5 py-2.5 rounded-xl font-black text-white flex items-center gap-1.5 shadow-sm"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>تأكيد الحفظ النهائي</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowSettingsConfirmPreview(false)}
+                    className="clay-btn px-4 py-2.5 rounded-xl font-bold"
+                  >
+                    تعديل القيم
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="submit"
+                data-testid="review-save-settings-btn"
+                className="clay-apple-blue px-6 py-3 rounded-xl text-sm font-black text-white flex items-center gap-2 shadow-md"
+              >
+                <Save className="w-4 h-4" />
+                <span>مراجعة وحفظ الأسعار وإعدادات الطلبات</span>
+              </button>
+            )}
           </div>
         </form>
       )}
@@ -1407,7 +2007,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
 
-            <form onSubmit={handleSaveSettings} className="p-3 rounded-2xl clay-inset flex flex-wrap items-center gap-4">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void handleConfirmSaveSettings();
+              }}
+              className="p-3 rounded-2xl clay-inset flex flex-wrap items-center gap-4"
+            >
               <label className="flex items-center gap-2 cursor-pointer font-bold">
                 <input
                   type="checkbox"
@@ -1526,6 +2132,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           migrations={data?.stats.migrations || []}
           dbStatus={data?.dbStatus}
           dbError={data?.dbError}
+          staleSnapshot={Boolean(data?.staleSnapshot)}
           storageNotice={data?.stats.isEphemeralStorageNotice || ''}
           onNotice={flashNotice}
           onRefreshOverview={loadOverview}

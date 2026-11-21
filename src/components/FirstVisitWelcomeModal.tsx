@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Lock, Mail, Sparkles, User, X, ArrowLeft } from 'lucide-react';
+import { Lock, Mail, Sparkles, User, X, ArrowLeft, ShieldCheck } from 'lucide-react';
 import { api } from '../utils/api';
 import {
   getFirebaseIdToken,
@@ -12,7 +12,7 @@ import { useAuth } from '../context/AuthContext';
 const VISIT_MODE_STORAGE_KEY = 'crovo_visit_mode';
 
 const GoogleMark: React.FC = () => (
-  <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
     <path
       fill="#4285F4"
       d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
@@ -160,35 +160,35 @@ export const FirstVisitWelcomeModal: React.FC = () => {
       role="dialog"
       aria-modal="true"
       aria-label="نافذة الترحيب وتسجيل الدخول"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-200"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/65 backdrop-blur-sm transition-opacity duration-200 animate-fade-in"
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md clay-card bg-[#EEF2F7] p-5 sm:p-7 rounded-3xl border border-white/95 shadow-2xl relative text-right animate-modal-pop my-auto max-h-[90vh] overflow-y-auto"
+        className="w-full max-w-md clay-card bg-[#EEF2F7] p-6 sm:p-8 rounded-3xl border border-white/95 shadow-2xl relative text-right transition-transform duration-200 my-auto max-h-[92vh] overflow-y-auto"
       >
         <button
           type="button"
           onClick={handleContinueAsGuest}
           aria-label="تخطي والدخول كضيف"
-          className="absolute top-4 left-4 w-8 h-8 rounded-full clay-btn flex items-center justify-center text-slate-500 hover:text-rose-600"
+          className="absolute top-4 left-4 w-9 h-9 rounded-full clay-btn flex items-center justify-center text-slate-500 hover:text-rose-600 transition-colors shadow-sm"
         >
           <X className="w-4 h-4" />
         </button>
 
-        <div className="mb-4">
-          <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full clay-inset text-indigo-600 text-[11px] font-bold mb-1.5 font-decorative">
-            <Sparkles className="w-3.5 h-3.5" />
+        <div className="mb-5 text-center sm:text-right">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full clay-inset text-indigo-700 text-xs font-black mb-2.5 font-decorative shadow-xs border border-indigo-100">
+            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
             <span>مرحباً بك في CROVO SPACE</span>
           </div>
-          <h2 className="text-lg sm:text-xl font-black font-decorative text-slate-900">
-            {mode === 'register' ? 'إنشاء حساب جديد' : 'تسجيل الدخول إلى حسابك'}
+          <h2 className="text-xl sm:text-2xl font-black font-decorative text-slate-900">
+            {mode === 'register' ? 'إنشاء حسابك الشخصي' : 'تسجيل الدخول السريع'}
           </h2>
-          <p className="mt-1 text-xs text-slate-600 font-ios">
-            سجّل دخولك بنقرة واحدة بحساب Google عشان تلاقي تعليقاتك وطلباتك وإعجاباتك محفوظة معاك على طول.
+          <p className="mt-1.5 text-xs sm:text-sm font-bold text-slate-600 font-ios leading-relaxed">
+            اختار حسابك الشخصي على Google للوصول الفوري لحسابك وتعليقاتك وطلباتك دون أي كتابة أو إجهاد.
           </p>
         </div>
 
-        {/* Mode Switcher with Recommended Badge */}
+        {/* Mode Switcher */}
         <div className="clay-pill-track grid grid-cols-2 gap-1 p-1 mb-4">
           <button
             type="button"
@@ -202,7 +202,7 @@ export const FirstVisitWelcomeModal: React.FC = () => {
             }`}
           >
             <span>حساب جديد</span>
-            <span className="px-1.5 py-0.2 rounded-full bg-amber-400 text-slate-900 text-[9px] font-black">
+            <span className="px-1.5 py-0.5 rounded-full bg-amber-400 text-slate-900 text-[9px] font-black">
               موصى به
             </span>
           </button>
@@ -224,21 +224,23 @@ export const FirstVisitWelcomeModal: React.FC = () => {
         {error && (
           <div
             data-testid="welcome-error-box"
-            className="mb-3 p-2.5 rounded-xl clay-inset text-xs font-bold text-rose-600 font-ios leading-relaxed"
+            className="mb-3.5 p-3 rounded-2xl clay-inset text-xs font-bold text-rose-600 font-ios leading-relaxed border border-rose-200/60"
           >
             {error}
           </div>
         )}
 
         {mode === 'register' && (
-          <div className="mb-3 text-xs font-ios">
-            <label className="block font-bold text-slate-700 mb-1">الصف الدراسي</label>
-            <div className="grid grid-cols-2 gap-2">
+          <div className="mb-4 text-xs font-ios">
+            <label className="block font-bold text-slate-800 mb-1.5">حدد صفك الدراسي:</label>
+            <div className="grid grid-cols-2 gap-2.5">
               <button
                 type="button"
                 onClick={() => setGrade('bac1')}
-                className={`py-2 rounded-xl font-bold ${
-                  grade === 'bac1' ? 'clay-pill-active' : 'clay-inset text-slate-600'
+                className={`py-2.5 rounded-xl font-bold transition-all ${
+                  grade === 'bac1'
+                    ? 'clay-pill-active shadow-sm'
+                    : 'clay-inset text-slate-600 hover:text-slate-900'
                 }`}
               >
                 أولى بكالوريا
@@ -246,8 +248,10 @@ export const FirstVisitWelcomeModal: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setGrade('bac2')}
-                className={`py-2 rounded-xl font-bold ${
-                  grade === 'bac2' ? 'clay-pill-active' : 'clay-inset text-slate-600'
+                className={`py-2.5 rounded-xl font-bold transition-all ${
+                  grade === 'bac2'
+                    ? 'clay-pill-active shadow-sm'
+                    : 'clay-inset text-slate-600 hover:text-slate-900'
                 }`}
               >
                 تانية بكالوريا
@@ -256,16 +260,26 @@ export const FirstVisitWelcomeModal: React.FC = () => {
           </div>
         )}
 
-        <button
-          type="button"
-          data-testid="welcome-google-btn"
-          disabled={googleBusy || busy}
-          onClick={handleGoogleLogin}
-          className="w-full py-3 px-4 rounded-2xl bg-white hover:bg-slate-50 border border-indigo-200 shadow-md flex items-center justify-center gap-2.5 text-xs sm:text-sm font-black text-slate-900 font-ios transition-all disabled:opacity-60 active:scale-[0.99]"
-        >
-          <GoogleMark />
-          <span>{googleBusy ? 'جاري الدخول عبر Google...' : 'المتابعة باستخدام حساب Google (الأسرع)'}</span>
-        </button>
+        {/* Prominent Google 1-Click Account Selector Button */}
+        <div className="space-y-2 mb-4">
+          <button
+            type="button"
+            data-testid="welcome-google-btn"
+            disabled={googleBusy || busy}
+            onClick={handleGoogleLogin}
+            className="w-full py-3.5 px-4 rounded-2xl bg-white hover:bg-indigo-50/50 border-2 border-indigo-200/80 shadow-md flex items-center justify-center gap-3 text-xs sm:text-sm font-black text-slate-900 font-ios transition-all disabled:opacity-60 active:scale-[0.99] group"
+          >
+            <GoogleMark />
+            <span className="group-hover:text-indigo-700 transition-colors">
+              {googleBusy ? 'جاري فتح نافذة الحسابات...' : 'المتابعة باختيار حساب Google الشخصي (بدون كتابة كلمة سر)'}
+            </span>
+          </button>
+          
+          <div className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-700 font-ios pt-1">
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span>تسجيل آمن وسريع بنقرة واحدة — يربط حسابك فوراً بمشترياتك وطلباتك.</span>
+          </div>
+        </div>
 
         <div className="relative flex items-center justify-center my-3.5">
           <div className="w-full border-t border-slate-300/60" />
@@ -277,15 +291,15 @@ export const FirstVisitWelcomeModal: React.FC = () => {
               setShowEmailForm((prev) => !prev);
               setError(null);
             }}
-            className="px-3 py-1 bg-[#EEF2F7] text-[10px] font-bold text-slate-600 hover:text-indigo-700 font-ios whitespace-nowrap rounded-full"
+            className="px-3.5 py-1 bg-[#EEF2F7] text-[11px] font-bold text-slate-600 hover:text-indigo-700 font-ios whitespace-nowrap rounded-full clay-inset shadow-2xs"
           >
-            {showEmailForm ? 'إخفاء الدخول بالبريد الإلكتروني ▲' : 'أو الدخول بالبريد الإلكتروني وكلمة المرور ▼'}
+            {showEmailForm ? 'إخفاء الدخول التقليدي بالبريد الإلكتروني ▲' : 'أو تسجيل الدخول بالطريقة التقليدية بالبريد ▼'}
           </button>
           <div className="w-full border-t border-slate-300/60" />
         </div>
 
         {showEmailForm && (
-          <form onSubmit={handleSubmit} className="space-y-3 text-xs font-ios pt-1">
+          <form onSubmit={handleSubmit} className="space-y-3 text-xs font-ios pt-1 animate-fade-in">
             {mode === 'register' && (
               <div>
                 <label className="block font-bold text-slate-700 mb-1">الاسم الكامل</label>
@@ -298,7 +312,7 @@ export const FirstVisitWelcomeModal: React.FC = () => {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="مثال: عمر صبري"
-                    className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-semibold"
+                    className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-semibold text-slate-900"
                   />
                   <User className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                 </div>
@@ -316,7 +330,7 @@ export const FirstVisitWelcomeModal: React.FC = () => {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@example.com"
-                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
+                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left text-slate-900"
                 />
                 <Mail className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
@@ -334,7 +348,7 @@ export const FirstVisitWelcomeModal: React.FC = () => {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••"
-                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left"
+                  className="w-full pr-9 pl-3 py-2.5 rounded-xl clay-inset border-none outline-none font-mono text-left text-slate-900"
                 />
                 <Lock className="w-4 h-4 text-indigo-500 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
               </div>
@@ -344,7 +358,7 @@ export const FirstVisitWelcomeModal: React.FC = () => {
               type="submit"
               disabled={busy || googleBusy}
               data-testid="welcome-submit-btn"
-              className="w-full clay-apple-blue py-3 rounded-2xl text-sm font-black text-white shadow-md disabled:opacity-60 mt-2"
+              className="w-full clay-apple-blue py-3.5 rounded-2xl text-sm font-black text-white shadow-md disabled:opacity-60 mt-2"
             >
               {busy
                 ? 'جاري التنفيذ...'
@@ -356,15 +370,15 @@ export const FirstVisitWelcomeModal: React.FC = () => {
         )}
 
         {/* Subtle bottom skip / guest button */}
-        <div className="pt-3 mt-3 border-t border-slate-200/60 text-center">
+        <div className="pt-3.5 mt-3.5 border-t border-slate-200/60 text-center">
           <button
             type="button"
             data-testid="welcome-skip-btn"
             onClick={handleContinueAsGuest}
-            className="text-[11px] font-bold text-slate-500 hover:text-indigo-600 transition-colors inline-flex items-center gap-1 opacity-80 hover:opacity-100"
+            className="text-xs font-bold text-slate-500 hover:text-indigo-600 transition-colors inline-flex items-center gap-1.5 opacity-90 hover:opacity-100"
           >
-            <span>تخطي وتسجيل الدخول كضيف (بدون حساب)</span>
-            <ArrowLeft className="w-3 h-3" />
+            <span>تخطي وتسجيل الدخول كضيف مؤقتاً</span>
+            <ArrowLeft className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>

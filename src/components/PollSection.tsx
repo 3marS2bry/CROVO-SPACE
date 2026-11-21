@@ -211,7 +211,7 @@ export const PollSection: React.FC = () => {
               {pollToRender?.question || 'إيه رأيكم نمد العرض؟'}
             </h2>
             <p className="text-xs text-slate-600 font-ios">
-              صوت واحد فقط لكل حساب مسجّل — النتائج والنسب المئوية تتحدث مباشرة بشفافية كاملة.
+              صوت واحد فقط لكل حساب مسجّل — النتائج وعدد الأصوات تتحدث مباشرة بشفافية كاملة.
             </p>
           </div>
 
@@ -264,92 +264,72 @@ export const PollSection: React.FC = () => {
           <div className="space-y-4">
             {/* Choice Cards */}
             <div className={`grid grid-cols-1 ${options.length >= 2 ? 'sm:grid-cols-2' : ''} gap-3.5`}>
-              {options.map((opt, idx) => {
-                const isSelected = pollToRender?.userChoice === opt.key;
-                const isClickable = !isClosed && !alreadyVoted && !submitting;
-                const accentBar =
-                  idx % 2 === 0
-                    ? 'from-indigo-600 to-purple-600'
-                    : 'from-sky-500 to-indigo-600';
+              {(() => {
+                const maxCount = Math.max(1, ...options.map((o) => o.count || 0));
+                return options.map((opt, idx) => {
+                  const isSelected = pollToRender?.userChoice === opt.key;
+                  const isClickable = !isClosed && !alreadyVoted && !submitting;
+                  const accentBar =
+                    idx % 2 === 0
+                      ? 'from-indigo-600 to-purple-600'
+                      : 'from-sky-500 to-indigo-600';
+                  const ratio = opt.count > 0 ? Math.max(0.05, opt.count / maxCount) : 0.02;
 
-                return (
-                  <button
-                    key={opt.key}
-                    type="button"
-                    data-testid={`poll-option-${opt.key}`}
-                    disabled={!isClickable && Boolean(user)}
-                    onClick={() => handleOptionClick(opt.key)}
-                    className={`p-4 sm:p-5 rounded-2xl text-right transition-transform duration-150 relative overflow-hidden ${
-                      isSelected
-                        ? 'clay-purple-soft ring-2 ring-indigo-500 shadow-md'
-                        : isClickable
-                        ? 'clay-btn hover:ring-2 hover:ring-indigo-300/80 cursor-pointer'
-                        : 'clay-inset opacity-95 cursor-default'
-                    }`}
-                  >
-                    <div className="relative z-10 space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div
-                            className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
-                              isSelected
-                                ? 'bg-indigo-600 text-white'
-                                : 'bg-white border border-indigo-200 text-transparent'
-                            }`}
-                          >
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          </div>
-                          <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate">
-                            {opt.label}
-                          </span>
-                        </div>
-
-                        <div className="text-left font-mono tabular-nums shrink-0">
-                          <span className="text-base sm:text-lg font-black text-indigo-700">
-                            {opt.percent}%
-                          </span>
-                          <span className="block text-[10px] font-bold text-slate-500">
-                            {opt.count} صوت
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Compositor-friendly percentage bar */}
-                      <div className="w-full h-2.5 rounded-full bg-slate-200/80 overflow-hidden shadow-inner">
-                        <div
-                          className={`h-full w-full rounded-full bg-gradient-to-l ${accentBar} origin-right transition-transform duration-500`}
-                          style={{ transform: `scaleX(${Math.max(0.02, opt.percent / 100)})` }}
-                        />
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Summary Distribution Chart Strip */}
-            {pollToRender && pollToRender.totalVotes > 0 && (
-              <div className="clay-inset p-3 rounded-2xl space-y-1.5">
-                <div className="flex items-center justify-between text-[11px] font-bold text-slate-600 font-ios">
-                  <span>توزيع النسب المئوية المباشر</span>
-                  <span className="font-mono text-indigo-700">100%</span>
-                </div>
-                <div className="w-full h-3 rounded-full overflow-hidden bg-white flex">
-                  {options.map((opt, idx) => (
-                    <div
+                  return (
+                    <button
                       key={opt.key}
-                      title={`${opt.label}: ${opt.percent}%`}
-                      className={`h-full transition-all duration-500 ${
-                        idx % 2 === 0
-                          ? 'bg-gradient-to-r from-indigo-600 to-purple-500'
-                          : 'bg-gradient-to-r from-sky-400 to-indigo-400'
+                      type="button"
+                      data-testid={`poll-option-${opt.key}`}
+                      disabled={!isClickable && Boolean(user)}
+                      onClick={() => handleOptionClick(opt.key)}
+                      className={`p-4 sm:p-5 rounded-2xl text-right transition-transform duration-150 relative overflow-hidden ${
+                        isSelected
+                          ? 'clay-purple-soft ring-2 ring-indigo-500 shadow-md'
+                          : isClickable
+                          ? 'clay-btn hover:ring-2 hover:ring-indigo-300/80 cursor-pointer'
+                          : 'clay-inset opacity-95 cursor-default'
                       }`}
-                      style={{ width: `${opt.percent}%` }}
-                    />
-                  ))}
-                </div>
-              </div>
-            )}
+                    >
+                      <div className="relative z-10 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div
+                              className={`w-5 h-5 rounded-full flex items-center justify-center shrink-0 ${
+                                isSelected
+                                  ? 'bg-indigo-600 text-white'
+                                  : 'bg-white border border-indigo-200 text-transparent'
+                              }`}
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="text-xs sm:text-sm font-black font-ios text-slate-900 truncate">
+                              {opt.label}
+                            </span>
+                          </div>
+
+                          <div className="text-left font-mono tabular-nums shrink-0">
+                            <span className="text-base sm:text-lg font-black text-indigo-700">
+                              {opt.count}
+                            </span>
+                            <span className="block text-[10px] font-bold text-slate-500 font-ios">
+                              صوت
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Relative vote bar without percentage numbers */}
+                        <div className="w-full h-2.5 rounded-full bg-slate-200/80 overflow-hidden shadow-inner">
+                          <div
+                            className={`h-full w-full rounded-full bg-gradient-to-l ${accentBar} origin-right transition-transform duration-500`}
+                            style={{ transform: `scaleX(${ratio})` }}
+                          />
+                        </div>
+                      </div>
+                    </button>
+                  );
+                });
+              })()}
+            </div>
           </div>
         )}
 
