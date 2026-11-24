@@ -181,9 +181,31 @@ export async function createCrovoApp(options: CreateServerOptions = {}) {
     if (process.env.NODE_ENV === 'production') {
       const distDir = path.resolve(process.cwd(), 'dist');
       if (fs.existsSync(distDir)) {
-        app.use(express.static(distDir));
-        app.get('*', (_req, res) => {
-          res.sendFile(path.join(distDir, 'index.html'));
+        const indexHtmlPath = path.join(distDir, 'index.html');
+        const cachedIndexHtml = fs.existsSync(indexHtmlPath)
+          ? fs.readFileSync(indexHtmlPath, 'utf-8')
+          : null;
+        app.use(express.static(distDir, { index: false }));
+        app.get('*', (req, res) => {
+          if (!cachedIndexHtml) {
+            res.sendFile(indexHtmlPath);
+            return;
+          }
+          const protoHeader = req.headers['x-forwarded-proto'];
+          const proto = (Array.isArray(protoHeader) ? protoHeader[0] : protoHeader)?.split(',')[0]?.trim() || req.protocol || 'https';
+          const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
+          const host = (Array.isArray(hostHeader) ? hostHeader[0] : hostHeader)?.split(',')[0]?.trim();
+          const origin = process.env.APP_URL?.replace(/\/+$/, '') || (host ? `${proto}://${host}` : 'https://crovo-space.ai.studio');
+          const safePath = (req.path || '/').replace(/["'<>]/g, '');
+          const isAdminRoute = safePath === '/admin' || safePath.startsWith('/admin/');
+          if (isAdminRoute) {
+            res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+          }
+          const html = cachedIndexHtml
+            .replace(/https:\/\/crovo-space\.ai\.studio\/og-cover\.jpg(\?v=\d+)?/g, `${origin}/og-cover.jpg?v=2`)
+            .replace(/<link rel="canonical" href="https:\/\/crovo-space\.ai\.studio\/" \/>/g, `<link rel="canonical" href="${origin}${safePath}" />`)
+            .replace(/<meta property="og:url" content="https:\/\/crovo-space\.ai\.studio\/" \/>/g, `<meta property="og:url" content="${origin}${safePath}" />`);
+          res.type('text/html; charset=utf-8').send(html);
         });
       } else {
         app.get('*', (_req, res) => {

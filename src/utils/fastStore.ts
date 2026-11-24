@@ -206,7 +206,20 @@ export function setFastComments(comments: CommentItem[]): void {
 
 export function setFastQuestionStats(stats: QuestionStatsResponse): void {
   hydrateFromStorage();
-  memoryState.questionStats = stats;
+  const prevCopyCounts = memoryState.questionStats?.copyCounts || {};
+  const mergedCopyCounts = { ...stats.copyCounts };
+  for (const [k, v] of Object.entries(prevCopyCounts)) {
+    mergedCopyCounts[k] = Math.max(Number(v || 0), Number(mergedCopyCounts[k] || 0));
+  }
+  const mergedTotalCopies = Math.max(
+    Number(memoryState.questionStats?.totalCopies || 0),
+    Number(stats.totalCopies || 0)
+  );
+  memoryState.questionStats = {
+    ...stats,
+    totalCopies: mergedTotalCopies,
+    copyCounts: mergedCopyCounts,
+  };
   memoryState.updatedAt = Date.now();
   schedulePersist();
   emitStoreChange();

@@ -160,7 +160,7 @@ service cloud.firestore {
           'afterOfferMode', 'ordersEnabled', 'pollClosed', 'whatsappNumber',
           'adminWhatsappDisplay', 'offerText', 'notificationsEnabled',
           'notificationsIntervalDays', 'heroPromo', 'promoBanner', 'libraryAd',
-          'toolServices', 'toolVideos', 'trackingStartedAt', 'updatedAt'
+          'ads', 'toolServices', 'toolVideos', 'trackingStartedAt', 'updatedAt'
         ])
         && data.id == 'public'
         && data.qureoOldPrice is int && data.qureoOldPrice >= 1 && data.qureoOldPrice <= 100000
@@ -182,6 +182,7 @@ service cloud.firestore {
         && (!('heroPromo' in data) || data.heroPromo is map)
         && (!('promoBanner' in data) || data.promoBanner is map)
         && (!('libraryAd' in data) || data.libraryAd is map)
+        && (!('ads' in data) || (data.ads is list && data.ads.size() <= 40))
         && (!('toolServices' in data) || (data.toolServices is list && data.toolServices.size() <= 30))
         && (!('toolVideos' in data) || (data.toolVideos is list && data.toolVideos.size() <= 30))
         && (!('trackingStartedAt' in data) || (data.trackingStartedAt is string && data.trackingStartedAt.size() <= 64))

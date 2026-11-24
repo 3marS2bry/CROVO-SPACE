@@ -1,0 +1,133 @@
+{
+  "version": "1.0.0",
+  "locale": "ar-EG",
+  "groups": {
+    "personalIdentity": [
+      "عمر صبري",
+      "عمر صبري إبراهيم إبراهيم أحمد سليمان",
+      "OMAR SABRY",
+      "omar sabry",
+      "omar sabry yooyoyooyoooooo",
+      "Omar Sabry Developer",
+      "عمر صبري مطور مواقع"
+    ],
+    "projectIdentity": [
+      "CROVO SPACE",
+      "Crovo Space Egypt",
+      "كروفو سبيس",
+      "مؤسس Crovo Space",
+      "مطور Crovo Space"
+    ],
+    "educationalDomain": [
+      "حل منصة QUREO",
+      "كوريو بكالوريا مصر",
+      "QUREO Java",
+      "QUREO Python",
+      "الثقافة المالية بكالوريا مصر",
+      "منصة الثقافة المالية"
+    ],
+    "servicesAndContent": [
+      "مكتبة حلول QUREO أولى وتانية بكالوريا مصر",
+      "حلول مستويات QUREO Java",
+      "حلول فصول Python تانية بكالوريا",
+      "إجابات دروس وتدريبات الثقافة المالية",
+      "أداة حل تدريبات واختبارات منصة QUREO",
+      "محاكاة بشرية آمنة لحل منصة كوريو",
+      "آراء وتقييمات طلاب البكالوريا المصرية"
+    ]
+  },
+  "byIntent": {
+    "navigational": [
+      "CROVO SPACE",
+      "Crovo Space Egypt",
+      "كروفو سبيس",
+      "عمر صبري",
+      "OMAR SABRY",
+      "omar sabry",
+      "Omar Sabry Developer",
+      "عمر صبري مطور مواقع",
+      "مؤسس Crovo Space",
+      "مطور Crovo Space",
+      "omar sabry yooyoyooyoooooo"
+    ],
+    "informational": [
+      "حل منصة QUREO",
+      "كوريو بكالوريا مصر",
+      "QUREO Java",
+      "QUREO Python",
+      "الثقافة المالية بكالوريا مصر",
+      "منصة الثقافة المالية",
+      "مكتبة حلول QUREO أولى وتانية بكالوريا مصر",
+      "إجابات دروس وتدريبات الثقافة المالية"
+    ],
+    "transactional": [
+      "أداة حل تدريبات واختبارات منصة QUREO",
+      "محاكاة بشرية آمنة لحل منصة كوريو",
+      "اشتراك حل منصة QUREO Java و الثقافة المالية"
+    ],
+    "socialProof": [
+      "آراء وتقييمات طلاب البكالوريا المصرية",
+      "تجارب طلاب CROVO SPACE"
+    ]
+  },
+  "byPage": {
+    "library": {
+      "path": "/",
+      "intent": "informational_and_navigational",
+      "primaryKeywords": [
+        "CROVO SPACE",
+        "كروفو سبيس",
+        "Crovo Space Egypt",
+        "حل منصة QUREO",
+        "كوريو بكالوريا مصر",
+        "QUREO Java",
+        "QUREO Python",
+        "الثقافة المالية بكالوريا مصر",
+        "منصة الثقافة المالية"
+      ],
+      "secondaryKeywords": [
+        "عمر صبري",
+        "عمر صبري إبراهيم إبراهيم أحمد سليمان",
+        "OMAR SABRY",
+        "Omar Sabry Developer",
+        "عمر صبري مطور مواقع",
+        "مؤسس Crovo Space",
+        "مطور Crovo Space"
+      ]
+    },
+    "toolDetails": {
+      "path": "/tool",
+      "intent": "transactional_and_informational",
+      "primaryKeywords": [
+        "أداة حل تدريبات واختبارات منصة QUREO",
+        "حل منصة QUREO",
+        "QUREO Java",
+        "منصة الثقافة المالية",
+        "CROVO SPACE",
+        "كوريو بكالوريا مصر"
+      ],
+      "secondaryKeywords": [
+        "محاكاة بشرية آمنة لحل منصة كوريو",
+        "عمر صبري",
+        "OMAR SABRY",
+        "مطور Crovo Space"
+      ]
+    },
+    "reviews": {
+      "path": "/reviews",
+      "intent": "social_proof_and_navigational",
+      "primaryKeywords": [
+        "آراء وتقييمات طلاب البكالوريا المصرية",
+        "CROVO SPACE",
+        "كروفو سبيس",
+        "تجارب طلاب CROVO SPACE",
+        "حل منصة QUREO"
+      ],
+      "secondaryKeywords": [
+        "عمر صبري",
+        "OMAR SABRY",
+        "الثقافة المالية بكالوريا مصر"
+      ]
+    }
+  }
+}

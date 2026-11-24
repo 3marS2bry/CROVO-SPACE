@@ -32,11 +32,13 @@ const GoogleMark: React.FC = () => (
   </svg>
 );
 
-export const FirstVisitWelcomeModal: React.FC = () => {
+export const FirstVisitWelcomeModal: React.FC<{ onVisibilityChange?: (visible: boolean) => void }> = ({
+  onVisibilityChange,
+}) => {
   const { user, loading, consumePendingAction, loginWithGoogle } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [mode, setMode] = useState<'login' | 'register'>('register');
-  const [showEmailForm, setShowEmailForm] = useState(false);
+  const [showEmailForm, setShowEmailForm] = useState(true);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -65,6 +67,10 @@ export const FirstVisitWelcomeModal: React.FC = () => {
       setIsOpen(true);
     }
   }, [user, loading]);
+
+  useEffect(() => {
+    onVisibilityChange?.(Boolean(isOpen && !user));
+  }, [isOpen, user, onVisibilityChange]);
 
   useEffect(() => {
     if (!isOpen || user) return;

@@ -85,6 +85,12 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
         topQuestions: [],
       }
   );
+  const statsRef = useRef<QuestionStatsResponse>(stats);
+
+  const applyStats = useCallback((nextStats: QuestionStatsResponse) => {
+    statsRef.current = nextStats;
+    setStats(nextStats);
+  }, []);
 
   const [isAdExpanded, setIsAdExpanded] = useState(false);
 
@@ -92,24 +98,37 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
     try {
       const statsData = await api.getQuestionStats().catch(() => fetchQuestionStatsCloud());
       if (statsData) {
-        setStats(statsData);
-        setFastQuestionStats(statsData);
+        const prev = statsRef.current;
+        const merged = { ...statsData.copyCounts };
+        for (const [k, v] of Object.entries(prev.copyCounts)) {
+          merged[k] = Math.max(Number(v || 0), Number(merged[k] || 0));
+        }
+        const finalTotal = Math.max(prev.totalCopies, statsData.totalCopies);
+        const finalStats: QuestionStatsResponse = {
+          ...statsData,
+          totalCopies: finalTotal,
+          copyCounts: merged,
+        };
+        applyStats(finalStats);
+        setFastQuestionStats(finalStats);
       }
     } catch {
       // Keep previous stats safely
     }
-  }, []);
+  }, [applyStats]);
 
   useEffect(() => {
     const unsubFast = subscribeFastStore(() => {
       const cached = getCachedQuestionStats();
-      if (cached) setStats(cached);
+      if (cached && cached !== statsRef.current) {
+        applyStats(cached);
+      }
     });
     if (hasCompletedInitialBootstrap() && !getCachedQuestionStats()) {
       void loadStats();
     }
     return unsubFast;
-  }, [loadStats]);
+  }, [applyStats, loadStats]);
 
   // Finite attention highlight on Choose Level button when entering or switching grade/section
   useEffect(() => {
@@ -225,14 +244,15 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
       chapterNum: number,
       qIndex: number
     ) => {
-      setStats((prev) => ({
+      const prev = statsRef.current;
+      applyStats({
         ...prev,
         totalCopies: prev.totalCopies + 1,
         copyCounts: {
           ...prev.copyCounts,
           [questionKey]: (prev.copyCounts[questionKey] || 0) + 1,
         },
-      }));
+      });
 
       if (onCopyTrigger) {
         onCopyTrigger();
@@ -247,13 +267,16 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
           qIndex,
           questionTitle,
         });
-        setStats((prev) => ({
-          ...prev,
+        const current = statsRef.current;
+        const confirmedStats: QuestionStatsResponse = {
+          ...current,
           copyCounts: {
-            ...prev.copyCounts,
-            [saved.questionKey]: Math.max(prev.copyCounts[saved.questionKey] || 0, saved.copyCount),
+            ...current.copyCounts,
+            [saved.questionKey]: Math.max(current.copyCounts[saved.questionKey] || 0, saved.copyCount),
           },
-        }));
+        };
+        applyStats(confirmedStats);
+        setFastQuestionStats(confirmedStats);
         void loadStats();
       } catch {
         void incrementQuestionCopyCloud({
@@ -266,7 +289,7 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
         });
       }
     },
-    [academicGrade, activeSection, onCopyTrigger, loadStats]
+    [academicGrade, activeSection, applyStats, onCopyTrigger, loadStats]
   );
 
   const handleJumpToPopularQuestion = (item: QuestionStatsResponse['topQuestions'][number]) => {
@@ -300,9 +323,17 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
 
   return (
     <section id="solutions-library" className="max-w-7xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
-      {/* 1. Academic Grade & Subject Header Banner */}
-      <div className="clay-card p-4 sm:p-6 mb-4 sm:mb-6 text-right relative overflow-hidden border border-white/85">
-        <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3.5">
+      {/* 1. Academic Grade & Subject Header Banner — Subtle Rose Ambient Blur */}
+      <div className="clay-card ambient-rose p-4 sm:p-6 mb-4 sm:mb-6 text-right relative overflow-hidden border border-white/85">
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -top-16 -right-12 w-72 h-72 rounded-full bg-rose-300/14 blur-3xl"
+        />
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute -bottom-20 -left-10 w-64 h-64 rounded-full bg-pink-200/14 blur-3xl"
+        />
+        <div className="relative z-10 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3.5">
           <div className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
               <h2 className="text-base sm:text-2xl font-black font-ios text-slate-900">
@@ -373,7 +404,7 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
 
         {/* Bac2 Secondary Subject Switcher */}
         {academicGrade === 'bac2' && (
-          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-2 pt-3 mt-3 border-t border-slate-200/70">
+          <div className="relative z-10 flex flex-col sm:flex-row items-start sm:items-center gap-2 pt-3 mt-3 border-t border-slate-200/70">
             <span className="text-xs font-bold text-slate-500 font-decorative shrink-0">
               المادة الدراسية:
             </span>
@@ -436,7 +467,7 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
         <div className="lg:col-span-8 flex flex-col gap-4 order-1">
           <div
             id="active-chapter-container"
-            className="clay-card p-3.5 sm:p-5 text-right border border-white/85 scroll-mt-20 space-y-3"
+            className="clay-card ambient-ice p-3.5 sm:p-5 text-right border border-white/85 scroll-mt-20 space-y-3"
           >
             {/* Prominent Choose Level Row */}
             <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -679,7 +710,7 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={onOpenSubscription}
+                              onClick={() => onOpenSubscription()}
                               className="clay-whatsapp flex-1 sm:flex-initial px-3.5 py-1.5 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 font-ios whitespace-nowrap"
                             >
                               <WhatsAppIcon className="w-4 h-4" />
@@ -723,7 +754,7 @@ export const SolutionsLibrary: React.FC<SolutionsLibraryProps> = ({
           {/* 6. Real Most Copied Questions Strip */}
           <div
             data-testid="most-copied-section"
-            className="clay-card p-3.5 sm:p-4 text-right border border-white/80"
+            className="clay-card ambient-gold p-3.5 sm:p-4 text-right border border-white/80"
           >
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <div className="flex items-center gap-2">

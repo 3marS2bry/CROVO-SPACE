@@ -15,7 +15,7 @@ export const CommunitySection: React.FC = () => {
       data-testid="community-section"
       className="max-w-5xl mx-auto px-3 sm:px-6 my-6 sm:my-10"
     >
-      <div className="clay-card p-4 sm:p-7 text-right border border-white/85 space-y-5">
+      <div className="clay-card ambient-sage p-4 sm:p-7 text-right border border-white/85 space-y-5">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3.5 border-b border-slate-200/65">
           <div>

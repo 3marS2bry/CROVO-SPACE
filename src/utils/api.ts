@@ -1,7 +1,10 @@
 import type { ClientPricingConfig, OrderGrade, PlatformChoice, QureoSectionChoice } from './rules';
 import type { AcademicGrade, Chapter, SectionType } from '../types';
+import type { AdUnitConfig } from './adSystem';
 import { getFirebaseIdToken, getFirebaseIdTokenIfReady } from './cloudStore';
 import { classifyApiError, type ApiErrorKind } from './errorClassifier';
+
+export type { AdUnitConfig };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 8000;
 
@@ -82,6 +85,7 @@ export interface PublicConfig extends ClientPricingConfig {
     enabled: boolean;
     text: string;
   };
+  ads?: AdUnitConfig[];
   notificationsEnabled: boolean;
   notificationsIntervalDays: number;
   adminWhatsappDisplay: string;
@@ -1343,6 +1347,16 @@ export const api = {
     }),
 
   adminUpdateSettings: (payload: Record<string, unknown> & { resetToRegularPrices?: boolean }) =>
+    apiFetch<{ ok: boolean; config: PublicConfig }>('/api/admin/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    }),
+
+  adminAdCenterAction: (payload: {
+    adCenterAction: 'save_draft' | 'publish' | 'toggle' | 'duplicate' | 'delete' | 'restore_default';
+    adId?: string;
+    adUnit?: AdUnitConfig;
+  }) =>
     apiFetch<{ ok: boolean; config: PublicConfig }>('/api/admin/settings', {
       method: 'PUT',
       body: JSON.stringify(payload),

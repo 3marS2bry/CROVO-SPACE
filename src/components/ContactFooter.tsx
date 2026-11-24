@@ -7,7 +7,7 @@ interface ContactFooterProps {
   onOpenDemo: () => void;
   onOpenReviews: () => void;
   onOpenHelp: () => void;
-  onOpenSubscription: () => void;
+  onOpenSubscription: (channel?: 'whatsapp' | 'telegram') => void;
   onOpenAdmin: () => void;
 }
 
@@ -19,7 +19,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
   onOpenAdmin,
 }) => {
   return (
-    <footer className="mt-16 border-t border-white/60 bg-[#EEF2F7]/95 backdrop-blur-xl py-12 px-4 sm:px-6">
+    <footer className="mt-16 border-t border-white/60 bg-[#EEF2F7]/95 ambient-sky backdrop-blur-xl py-12 px-4 sm:px-6">
       <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-8 text-right">
         {/* Brand Summary */}
         <div className="flex flex-col items-center md:items-start text-center md:text-right gap-2">
@@ -82,7 +82,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={onOpenSubscription}
+            onClick={() => onOpenSubscription('telegram')}
             data-testid="footer-telegram-btn"
             className="clay-telegram px-4 py-3 rounded-2xl text-xs font-bold flex items-center gap-1.5 text-white cursor-pointer"
           >
@@ -92,7 +92,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
 
           <button
             type="button"
-            onClick={onOpenSubscription}
+            onClick={() => onOpenSubscription('whatsapp')}
             className="clay-whatsapp px-5 py-3 rounded-2xl text-xs sm:text-sm font-bold flex items-center gap-1.5 text-white font-ios"
           >
             <WhatsAppIcon className="w-4 h-4" />
@@ -114,6 +114,7 @@ export const ContactFooter: React.FC<ContactFooterProps> = ({
             <span>مكتبة حلول QUREO والثقافة المالية للبكالوريا المصرية</span>
             <a
               href="/admin"
+              rel="nofollow"
               onClick={(e) => {
                 e.preventDefault();
                 onOpenAdmin();

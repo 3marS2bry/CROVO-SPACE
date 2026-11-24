@@ -16,7 +16,7 @@ import { examSolverFaqs } from '../data/chaptersData';
 interface HelpCenterSectionProps {
   adminWhatsappDisplay: string;
   onOpenToolDetails: () => void;
-  onOpenSubscription: () => void;
+  onOpenSubscription: (channel?: 'whatsapp' | 'telegram') => void;
 }
 
 const HELP_TABS = [
@@ -84,7 +84,7 @@ export const HelpCenterSection: React.FC<HelpCenterSectionProps> = ({
       data-testid="help-center-section"
       className="max-w-5xl mx-auto px-3 sm:px-6 my-6 sm:my-10"
     >
-      <div className="clay-card p-4 sm:p-7 text-right border border-white/80 space-y-5">
+      <div className="clay-card ambient-ice p-4 sm:p-7 text-right border border-white/80 space-y-5">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-200/60">
           <div>
@@ -107,7 +107,7 @@ export const HelpCenterSection: React.FC<HelpCenterSectionProps> = ({
             </button>
             <button
               type="button"
-              onClick={onOpenSubscription}
+              onClick={() => onOpenSubscription()}
               className="clay-apple-blue px-3.5 py-2 rounded-xl text-xs font-bold text-white font-ios"
             >
               طلب اشتراك
@@ -160,7 +160,7 @@ export const HelpCenterSection: React.FC<HelpCenterSectionProps> = ({
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <PushPreferenceWidget />
 
-          <div className="p-3.5 sm:p-4 rounded-2xl clay-inset flex flex-col justify-between gap-2.5">
+          <div className="p-3.5 sm:p-4 rounded-2xl clay-inset ambient-sage flex flex-col justify-between gap-2.5">
             <div>
               <div className="flex items-center gap-1.5 text-xs sm:text-sm font-black font-ios text-slate-900">
                 <MessageCircle className="w-4 h-4 text-emerald-500" />
@@ -184,7 +184,7 @@ export const HelpCenterSection: React.FC<HelpCenterSectionProps> = ({
 
               <button
                 type="button"
-                onClick={onOpenSubscription}
+                onClick={() => onOpenSubscription('telegram')}
                 data-testid="help-telegram-btn"
                 className="clay-telegram py-2 px-3.5 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 font-ios cursor-pointer"
               >

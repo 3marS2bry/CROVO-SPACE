@@ -13,6 +13,7 @@ import {
   verifyToken,
 } from './crypto.ts';
 import {
+  type AdUnitConfig,
   type AdWorkflowStatus,
   buildDefaultSiteConfig,
   DEFAULT_TOOL_SERVICES,
@@ -24,6 +25,13 @@ import {
   type ToolServiceConfig,
   type ToolVideoConfig,
 } from './defaults.ts';
+import {
+  buildDefaultAdUnits,
+  mergeAdUnitsWithDefaults,
+  sanitizeAdUnit,
+  syncLegacyAdFieldsFromUnits,
+  syncUnitsFromLegacyAdFields,
+} from '../../src/utils/adSystem.ts';
 import {
   calculateOrderPricing,
   formatOrderCode,
@@ -533,6 +541,20 @@ function mergeSiteConfig(raw: Record<string, unknown> | null, env: Env): PublicS
       ? raw.whatsappNumber.trim()
       : base.whatsappNumber;
 
+  const heroPromo =
+    raw.heroPromo && typeof raw.heroPromo === 'object'
+      ? { ...base.heroPromo, ...(raw.heroPromo as Partial<PublicSiteConfig['heroPromo']>) }
+      : base.heroPromo;
+  const promoBanner =
+    raw.promoBanner && typeof raw.promoBanner === 'object'
+      ? { ...base.promoBanner, ...(raw.promoBanner as Partial<PublicSiteConfig['promoBanner']>) }
+      : base.promoBanner;
+  const libraryAd =
+    raw.libraryAd && typeof raw.libraryAd === 'object'
+      ? { ...base.libraryAd, ...(raw.libraryAd as Partial<PublicSiteConfig['libraryAd']>) }
+      : base.libraryAd;
+  const ads = mergeAdUnitsWithDefaults(raw.ads, { promoBanner, heroPromo, libraryAd });
+
   return {
     ...base,
     qureoOldPrice: typeof raw.qureoOldPrice === 'number' ? raw.qureoOldPrice : base.qureoOldPrice,
@@ -559,18 +581,10 @@ function mergeSiteConfig(raw: Record<string, unknown> | null, env: Env): PublicS
       typeof raw.notificationsIntervalDays === 'number'
         ? Math.max(1, Math.min(365, Math.round(raw.notificationsIntervalDays)))
         : base.notificationsIntervalDays,
-    heroPromo:
-      raw.heroPromo && typeof raw.heroPromo === 'object'
-        ? { ...base.heroPromo, ...(raw.heroPromo as Partial<PublicSiteConfig['heroPromo']>) }
-        : base.heroPromo,
-    promoBanner:
-      raw.promoBanner && typeof raw.promoBanner === 'object'
-        ? { ...base.promoBanner, ...(raw.promoBanner as Partial<PublicSiteConfig['promoBanner']>) }
-        : base.promoBanner,
-    libraryAd:
-      raw.libraryAd && typeof raw.libraryAd === 'object'
-        ? { ...base.libraryAd, ...(raw.libraryAd as Partial<PublicSiteConfig['libraryAd']>) }
-        : base.libraryAd,
+    heroPromo,
+    promoBanner,
+    libraryAd,
+    ads,
     toolServices: Array.isArray(raw.toolServices)
       ? (raw.toolServices as ToolServiceConfig[])
       : DEFAULT_TOOL_SERVICES,
@@ -699,6 +713,7 @@ function buildSiteConfigDocPayload(cfgObj: PublicSiteConfig): Record<string, unk
     heroPromo: cfgObj.heroPromo,
     promoBanner: cfgObj.promoBanner,
     libraryAd: cfgObj.libraryAd,
+    ads: (cfgObj.ads || []).slice(0, 40),
     toolServices: cfgObj.toolServices.slice(0, 30),
     toolVideos: cfgObj.toolVideos.slice(0, 30),
     trackingStartedAt: String(cfgObj.trackingStartedAt).slice(0, 64),
@@ -5492,11 +5507,204 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
           })(),
         };
 
-        await setDoc(cfg, 'site_config/public', buildSiteConfigDocPayload(nextConfig), ['updatedAt'], authObj);
+        // Process Centralized Ad Center operations & keep legacy fields <-> ads synchronized
+        const nowIso = new Date().toISOString();
+        let finalConfig: PublicSiteConfig = nextConfig;
+        const adCenterAction = typeof body.adCenterAction === 'string' ? body.adCenterAction : null;
+        const targetAdId = typeof body.adId === 'string' ? body.adId.trim() : '';
+
+        if (adCenterAction) {
+          let nextAds = [...(current.ads || [])];
+
+          if (adCenterAction === 'save_draft' && body.adUnit && typeof body.adUnit === 'object') {
+            const incomingClean = sanitizeAdUnit(body.adUnit);
+            const idx = nextAds.findIndex((a) => a.id === incomingClean.id);
+            if (idx >= 0) {
+              const existing = nextAds[idx];
+              nextAds[idx] = {
+                ...existing,
+                draft: {
+                  name: incomingClean.name,
+                  type: incomingClean.type,
+                  placement: incomingClean.placement,
+                  content: incomingClean.content,
+                  design: incomingClean.design,
+                  motion: incomingClean.motion,
+                  behavior: incomingClean.behavior,
+                  updatedAt: nowIso,
+                },
+                updatedAt: nowIso,
+              };
+            } else {
+              if (nextAds.length >= 40) {
+                return jsonResponse(ctx, { error: 'تم الوصول للحد الأقصى لعدد الوحدات الإعلانية (40 إعلاناً).' }, 400);
+              }
+              nextAds.unshift({
+                ...incomingClean,
+                status: 'draft',
+                behavior: { ...incomingClean.behavior, enabled: false },
+                draft: {
+                  name: incomingClean.name,
+                  type: incomingClean.type,
+                  placement: incomingClean.placement,
+                  content: incomingClean.content,
+                  design: incomingClean.design,
+                  motion: incomingClean.motion,
+                  behavior: { ...incomingClean.behavior, enabled: false },
+                  updatedAt: nowIso,
+                },
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              });
+            }
+          } else if (adCenterAction === 'publish' && body.adUnit && typeof body.adUnit === 'object') {
+            const incomingClean = sanitizeAdUnit(body.adUnit);
+            const startMs = incomingClean.behavior.startAt ? Date.parse(incomingClean.behavior.startAt) : NaN;
+            const computedStatus =
+              incomingClean.status === 'archived'
+                ? 'archived'
+                : incomingClean.behavior.enabled === false
+                ? 'paused'
+                : Number.isFinite(startMs) && Date.now() < startMs
+                ? 'scheduled'
+                : 'active';
+
+            const publishedUnit: AdUnitConfig = {
+              ...incomingClean,
+              status: computedStatus,
+              behavior: {
+                ...incomingClean.behavior,
+                enabled: computedStatus === 'active' || computedStatus === 'scheduled',
+              },
+              draft: null,
+              updatedAt: nowIso,
+            };
+
+            const idx = nextAds.findIndex((a) => a.id === publishedUnit.id);
+            if (idx >= 0) {
+              nextAds[idx] = { ...publishedUnit, createdAt: nextAds[idx].createdAt, isSystemDefault: nextAds[idx].isSystemDefault, systemKey: nextAds[idx].systemKey };
+            } else {
+              if (nextAds.length >= 40) {
+                return jsonResponse(ctx, { error: 'تم الوصول للحد الأقصى لعدد الوحدات الإعلانية (40 إعلاناً).' }, 400);
+              }
+              nextAds.unshift({ ...publishedUnit, createdAt: nowIso });
+            }
+          } else if (adCenterAction === 'toggle' && targetAdId) {
+            nextAds = nextAds.map((ad) => {
+              if (ad.id !== targetAdId) return ad;
+              const willEnable = !ad.behavior.enabled || ad.status === 'paused' || ad.status === 'draft' || ad.status === 'archived';
+              const nextStatus = willEnable
+                ? ad.behavior.startAt && Date.parse(ad.behavior.startAt) > Date.now()
+                  ? 'scheduled'
+                  : 'active'
+                : 'paused';
+              return {
+                ...ad,
+                status: nextStatus,
+                behavior: { ...ad.behavior, enabled: willEnable },
+                updatedAt: nowIso,
+              };
+            });
+          } else if (adCenterAction === 'duplicate' && targetAdId) {
+            if (nextAds.length >= 40) {
+              return jsonResponse(ctx, { error: 'تم الوصول للحد الأقصى لعدد الوحدات الإعلانية (40 إعلاناً).' }, 400);
+            }
+            const source = nextAds.find((a) => a.id === targetAdId);
+            if (source) {
+              const clonedId = `ad_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+              const cloned: AdUnitConfig = sanitizeAdUnit({
+                ...source,
+                id: clonedId,
+                name: `${source.name} (نسخة)`,
+                status: 'draft',
+                isSystemDefault: false,
+                systemKey: undefined,
+                behavior: { ...source.behavior, enabled: false },
+                draft: null,
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              });
+              nextAds.unshift(cloned);
+            }
+          } else if (adCenterAction === 'delete' && targetAdId) {
+            const target = nextAds.find((a) => a.id === targetAdId);
+            if (target?.isSystemDefault) {
+              return jsonResponse(
+                ctx,
+                { error: 'لا يمكن حذف إعلان النظام الأساسي؛ يمكنك إيقافه أو استعادة إعداداته الافتراضية.' },
+                400
+              );
+            }
+            nextAds = nextAds.filter((a) => a.id !== targetAdId);
+          } else if (adCenterAction === 'restore_default' && targetAdId) {
+            const defaultSet = buildDefaultAdUnits();
+            const factoryDefault = defaultSet.find((d) => d.id === targetAdId);
+            if (!factoryDefault) {
+              return jsonResponse(ctx, { error: 'لا توجد إعدادات افتراضية قياسية لهذا الإعلان.' }, 404);
+            }
+            nextAds = nextAds.map((a) =>
+              a.id === targetAdId ? { ...factoryDefault, updatedAt: nowIso } : a
+            );
+          }
+
+          const syncedLegacy = syncLegacyAdFieldsFromUnits(
+            {
+              promoBanner: nextConfig.promoBanner,
+              heroPromo: nextConfig.heroPromo,
+              libraryAd: {
+                ...nextConfig.libraryAd,
+                draft: (nextConfig.libraryAd.draft as Record<string, unknown> | null) ?? null,
+              },
+            },
+            nextAds
+          );
+          finalConfig = {
+            ...nextConfig,
+            promoBanner: syncedLegacy.promoBanner,
+            heroPromo: syncedLegacy.heroPromo,
+            libraryAd: {
+              ...nextConfig.libraryAd,
+              ...syncedLegacy.libraryAd,
+              draft: nextConfig.libraryAd.draft,
+            },
+            ads: nextAds,
+          };
+        } else {
+          // Legacy settings update path (promoBanner, heroPromo, libraryAd, resetToRegularPrices)
+          const syncedAds = syncUnitsFromLegacyAdFields(current.ads || [], {
+            promoBanner: body.promoBanner ? finalConfig.promoBanner : undefined,
+            heroPromo: body.heroPromo ? finalConfig.heroPromo : undefined,
+            libraryAd:
+              resetToRegular || body.libraryAd || body.libraryAdWorkflowAction
+                ? finalConfig.libraryAd
+                : undefined,
+          });
+          finalConfig = { ...finalConfig, ads: syncedAds };
+        }
+
+        const docPayload = buildSiteConfigDocPayload(finalConfig);
+        if (JSON.stringify(docPayload).length > 880_000) {
+          return jsonResponse(
+            ctx,
+            {
+              error:
+                'حجم الإعدادات وصور الإعلانات تجاوز الحد المسموح لوثيقة Firestore (880KB). استخدم روابط صور أو صوراً مضغوطة.',
+            },
+            400
+          );
+        }
+
+        await setDoc(cfg, 'site_config/public', docPayload, ['updatedAt'], authObj);
         clearPublicReadCache('site_config');
         adminReadCache.clear();
-        await logAdminAudit(cfg, admin.idToken, admin.username, 'update_settings', 'site_config');
-        return jsonResponse(ctx, { ok: true, config: buildPublicConfigResponse(nextConfig) });
+        await logAdminAudit(
+          cfg,
+          admin.idToken,
+          admin.username,
+          adCenterAction ? `ad_center_${adCenterAction}` : 'update_settings',
+          'site_config'
+        );
+        return jsonResponse(ctx, { ok: true, config: buildPublicConfigResponse(finalConfig) });
       }
 
       // ---------- ADMIN BACKUP & AUDIT LOGS ----------

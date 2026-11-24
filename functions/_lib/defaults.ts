@@ -5,6 +5,9 @@ import {
   chaptersPy,
 } from '../../src/data/chaptersData.ts';
 import type { Chapter } from '../../src/types/index.ts';
+import { type AdUnitConfig, buildDefaultAdUnits } from '../../src/utils/adSystem.ts';
+
+export type { AdUnitConfig };
 
 export interface ToolVideoConfig {
   id: string;
@@ -80,6 +83,7 @@ export interface PublicSiteConfig {
     workflowStatus?: AdWorkflowStatus;
     draft?: LibraryAdDraftConfig | null;
   };
+  ads: AdUnitConfig[];
   toolServices: ToolServiceConfig[];
   toolVideos: ToolVideoConfig[];
   trackingStartedAt: string;
@@ -137,6 +141,29 @@ export const DEFAULT_TOOL_VIDEOS: ToolVideoConfig[] = [
 
 export function buildDefaultSiteConfig(whatsappFallback = '201550324450'): PublicSiteConfig {
   const cleanPhone = (whatsappFallback || '201550324450').replace(/\D/g, '') || '201550324450';
+  const heroPromo = {
+    enabled: true,
+    title: 'أداة CROVO ومكتبة الحلول الموثوقة لطلاب البكالوريا',
+    subtitle: 'إجابات منظمة ومحدثة + خدمة اشتراك ميسّرة عبر واتساب.',
+  };
+  const promoBanner = {
+    enabled: true,
+    text: 'العرض متاح الآن لفترة محدودة — اشترك قبل انتهاء العداد!',
+  };
+  const libraryAd: PublicSiteConfig['libraryAd'] = {
+    enabled: true,
+    title: 'تحتاج مساعدة منظمة لإنهاء دروس المنصة بسرعة؟',
+    subtitle: 'أداة CROVO متوفرة للاشتراك الميسّر مع متابعة مباشرة وتأكيد يدوي عبر واتساب.',
+    priceText: 'ابتداءً من 50 ج بدلاً من 100 ج',
+    ctaText: 'اشترك الآن في الأداة',
+    ctaLink: '/#order-section',
+    delaySeconds: 18,
+    cooldownHours: 24,
+    templateMode: 'rich_crovo',
+    workflowStatus: 'published',
+    draft: null,
+  };
+
   return {
     id: 'public',
     qureoOldPrice: 100,
@@ -155,28 +182,10 @@ export function buildDefaultSiteConfig(whatsappFallback = '201550324450'): Publi
     offerText: 'خصم لفترة محدودة على باقات المساعدة والاشتراك في CROVO SPACE!',
     notificationsEnabled: true,
     notificationsIntervalDays: 3,
-    heroPromo: {
-      enabled: true,
-      title: 'أداة CROVO ومكتبة الحلول الموثوقة لطلاب البكالوريا',
-      subtitle: 'إجابات منظمة ومحدثة + خدمة اشتراك ميسّرة عبر واتساب.',
-    },
-    promoBanner: {
-      enabled: true,
-      text: 'العرض متاح الآن لفترة محدودة — اشترك قبل انتهاء العداد!',
-    },
-    libraryAd: {
-      enabled: true,
-      title: 'تحتاج مساعدة منظمة لإنهاء دروس المنصة بسرعة؟',
-      subtitle: 'أداة CROVO متوفرة للاشتراك الميسّر مع متابعة مباشرة وتأكيد يدوي عبر واتساب.',
-      priceText: 'ابتداءً من 50 ج بدلاً من 100 ج',
-      ctaText: 'اشترك الآن في الأداة',
-      ctaLink: '/#order-section',
-      delaySeconds: 18,
-      cooldownHours: 24,
-      templateMode: 'rich_crovo',
-      workflowStatus: 'published',
-      draft: null,
-    },
+    heroPromo,
+    promoBanner,
+    libraryAd,
+    ads: buildDefaultAdUnits({ promoBanner, heroPromo, libraryAd }),
     toolServices: DEFAULT_TOOL_SERVICES,
     toolVideos: DEFAULT_TOOL_VIDEOS,
     trackingStartedAt: new Date('2026-01-01T00:00:00.000Z').toISOString(),

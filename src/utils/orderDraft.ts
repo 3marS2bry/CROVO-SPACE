@@ -228,6 +228,69 @@ export function sanitizeWhatsappNumber(raw: string | undefined | null): string {
   return digits.length >= 8 ? digits : '201550324450';
 }
 
+export function buildSubscriptionMessageUrl(params: {
+  channel: 'whatsapp' | 'telegram';
+  whatsappNumber: string;
+  orderCode: string;
+  fullName: string;
+  grade: AcademicGrade;
+  platformLabel: string;
+  sectionDetails?: string;
+  platformUsername: string;
+  platformPassword?: string;
+  oldPrice: number;
+  finalPrice: number;
+  offerApplied: boolean;
+  paymentMethod: string;
+  manualConfirmationNeeded?: boolean;
+}): string {
+  const gradeLabel = params.grade === 'bac1' ? 'أولى بكالوريا' : 'تانية بكالوريا';
+  const sectionText = params.sectionDetails || 'المنصة كاملة';
+  const passText = params.platformPassword && params.platformPassword.trim() ? params.platformPassword.trim() : 'غير مسجلة';
+  const oldPriceText = `${params.oldPrice}`;
+  const finalPriceText = `${params.finalPrice}`;
+
+  const messageLines = [
+    `━━━ 𝐂𝐑𝐎𝐕𝐎 𝐒𝐏𝐀𝐂𝐄 ━━━`,
+    ``,
+    `𝐍𝐄𝐖 𝐎𝐑𝐃𝐄𝐑 | طلب اشتراك`,
+    ``,
+    `السلام عليكم، عاوز أشترك معاك يخويااا.`,
+    ``,
+    `✦ بيانات العميل`,
+    `• الاسم: \`${params.fullName.trim()}\``,
+    `• السنة: \`${gradeLabel}\``,
+    `• المنصة: \`${params.platformLabel}\``,
+    `• القسم: \`${sectionText}\``,
+    ``,
+    `✦ بيانات المنصة`,
+    `• اليوزر: \`${params.platformUsername.trim()}\``,
+    `• الباسورد: \`${passText}\``,
+    ``,
+    `✦ تفاصيل الطلب`,
+    `• قبل الخصم: \`${oldPriceText}\` ج`,
+    `• بعد الخصم: \`${finalPriceText}\` ج`,
+    `• الدفع: ${params.paymentMethod}`,
+    ``,
+    `✪ رقم الطلب: \`#${params.orderCode}\``,
+    ``,
+    `• ♕ 𝑶𝒎𝒂𝒓 𝑺𝒂𝒃𝒓𝒚`,
+    `✪ 𝐂𝐑𝐎𝐕𝐎 𝐒𝐏𝐀𝐂𝐄`,
+  ];
+
+  if (params.manualConfirmationNeeded) {
+    messageLines.push(``, `ملاحظة: الطلب بانتظار التسجيل والتأكيد اليدوي من الإدارة.`);
+  }
+
+  const text = messageLines.join('\n');
+  if (params.channel === 'telegram') {
+    return `https://t.me/omarsaabry?text=${encodeURIComponent(text)}`;
+  } else {
+    const waNum = sanitizeWhatsappNumber(params.whatsappNumber);
+    return `https://wa.me/${waNum}?text=${encodeURIComponent(text)}`;
+  }
+}
+
 export function buildSubscriptionWhatsappUrl(params: {
   whatsappNumber: string;
   orderCode: string;
@@ -243,25 +306,5 @@ export function buildSubscriptionWhatsappUrl(params: {
   paymentMethod: string;
   manualConfirmationNeeded?: boolean;
 }): string {
-  const waNum = sanitizeWhatsappNumber(params.whatsappNumber);
-  const gradeLabel = params.grade === 'bac1' ? 'أولى بكالوريا' : 'تانية بكالوريا';
-  const lines = [
-    `طلب اشتراك جديد #${params.orderCode} - CROVO SPACE`,
-    `الاسم: ${params.fullName.trim()}`,
-    `الصف: ${gradeLabel}`,
-    `المنصة: ${params.platformLabel}`,
-  ];
-  if (params.sectionDetails) {
-    lines.push(`القسم: ${params.sectionDetails}`);
-  }
-  lines.push(`يوزر المنصة: ${params.platformUsername.trim()}`);
-  if (params.platformPassword && params.platformPassword.trim()) {
-    lines.push(`كلمة السر للمنصة: ${params.platformPassword.trim()}`);
-  }
-  lines.push(`السعر: ${params.finalPrice} جنيه${params.offerApplied && params.oldPrice > params.finalPrice ? ` (بدلاً من ${params.oldPrice} جنيه)` : ''}`);
-  lines.push(`طريقة الدفع: ${params.paymentMethod}`);
-  if (params.manualConfirmationNeeded) {
-    lines.push('ملاحظة: الطلب بانتظار التسجيل والتأكيد اليدوي من الإدارة.');
-  }
-  return `https://wa.me/${waNum}?text=${encodeURIComponent(lines.join('\n'))}`;
+  return buildSubscriptionMessageUrl({ channel: 'whatsapp', ...params });
 }

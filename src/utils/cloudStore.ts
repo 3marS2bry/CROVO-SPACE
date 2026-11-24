@@ -1325,6 +1325,9 @@ export function subscribeSiteConfigCloud(
       if (d.libraryAd && typeof d.libraryAd === 'object') {
         partial.libraryAd = d.libraryAd as PublicConfig['libraryAd'];
       }
+      if (Array.isArray(d.ads)) {
+        partial.ads = d.ads as PublicConfig['ads'];
+      }
       if (Array.isArray(d.toolServices)) {
         partial.toolServices = d.toolServices as PublicConfig['toolServices'];
       }
@@ -1379,6 +1382,9 @@ export async function syncSiteConfigToCloud(
     }
     if (cleanLibAd) {
       payload.libraryAd = cleanLibAd;
+    }
+    if (Array.isArray(config.ads)) {
+      payload.ads = stripUndefinedDeep(config.ads.slice(0, 40));
     }
     if (Array.isArray(config.toolServices)) {
       payload.toolServices = stripUndefinedDeep(config.toolServices.slice(0, 30));

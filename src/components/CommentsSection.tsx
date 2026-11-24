@@ -117,6 +117,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
   const { user, isCloudUser, openAuthModal } = useAuth();
   const [cloudComments, setCloudComments] = useState<CommentItem[]>([]);
   const [apiComments, setApiComments] = useState<CommentItem[]>(() => getCachedComments() || []);
+  const apiCommentsRef = useRef<CommentItem[]>(apiComments);
+  const applyApiComments = useCallback((next: CommentItem[]) => {
+    apiCommentsRef.current = next;
+    setApiComments(next);
+  }, []);
   const [loading, setLoading] = useState(() => getCachedComments() === null);
   const [error, setError] = useState<string | null>(null);
   const [isFormOpen, setIsFormOpen] = useState(fullPageMode);
@@ -162,7 +167,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       if (res.quotaDegraded && mapped.length === 0) {
         const cached = getCachedComments();
         if (cached && cached.length > 0) {
-          setApiComments(cached);
+          applyApiComments(cached);
           setError(null);
           return;
         }
@@ -180,18 +185,15 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
             // Fall through to soft non-blocking notice below
           }
         }
-        setApiComments((prev) => {
-          if (prev.length > 0) {
-            setError(null);
-            return prev;
-          }
+        if (apiCommentsRef.current.length > 0) {
+          setError(null);
+        } else {
           setError('يتم تحديث التعليقات مؤقتاً بسبب ضغط قاعدة البيانات. اضغط «إعادة المحاولة».');
-          return prev;
-        });
+        }
         return;
       }
 
-      setApiComments(mapped);
+      applyApiComments(mapped);
       if (!res.quotaDegraded || mapped.length > 0) {
         setFastComments(mapped);
       }
@@ -201,13 +203,13 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [user?.id]);
+  }, [applyApiComments, user?.id]);
 
   useEffect(() => {
     const unsubFast = subscribeFastStore(() => {
       const cached = getCachedComments();
-      if (cached && (!cached.length ? false : true)) {
-        setApiComments(cached);
+      if (cached && cached.length > 0 && cached !== apiCommentsRef.current) {
+        applyApiComments(cached);
         setLoading(false);
       }
     });
@@ -352,11 +354,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         wasModerationPending = Boolean(res.moderationPending);
         if (!wasModerationPending) {
           savedComment = { ...res.comment, source: 'api' };
-          setApiComments((prev) => {
-            const next = [savedComment!, ...prev];
-            setFastComments(next);
-            return next;
-          });
+          const next = [savedComment, ...apiCommentsRef.current];
+          applyApiComments(next);
+          setFastComments(next);
         }
       } catch (apiErr) {
         if (apiErr instanceof ApiError && (apiErr.status === 401 || apiErr.status === 400 || apiErr.status === 429)) {
@@ -450,11 +450,9 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         if (!fbUid) throw apiErr;
         await deleteCloudComment(cmt.id);
       }
-      setApiComments((prev) => {
-        const next = prev.filter((c) => c.id !== cmt.id);
-        setFastComments(next);
-        return next;
-      });
+      const next = apiCommentsRef.current.filter((c) => c.id !== cmt.id);
+      applyApiComments(next);
+      setFastComments(next);
       setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
       if (fbUid) {
         void logCloudActivity(fbUid, {
@@ -477,7 +475,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         setReportingId(null);
         setReportNotice(res.message);
         if (res.flaggedForReview) {
-          setApiComments((prev) => prev.filter((c) => c.id !== cmt.id));
+          applyApiComments(apiCommentsRef.current.filter((c) => c.id !== cmt.id));
           setCloudComments((prev) => prev.filter((c) => c.id !== cmt.id));
         }
       } catch (apiErr) {
@@ -520,13 +518,11 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
         res = await toggleCloudCommentLike(cmt.id, fbUid, nextDesired);
       }
 
-      setApiComments((prev) => {
-        const next = prev.map((c) =>
-          c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
-        );
-        setFastComments(next);
-        return next;
-      });
+      const next = apiCommentsRef.current.map((c) =>
+        c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
+      );
+      applyApiComments(next);
+      setFastComments(next);
       setCloudComments((prev) =>
         prev.map((c) =>
           c.id === cmt.id ? { ...c, likesCount: res.count, hasLiked: res.liked } : c
@@ -557,7 +553,7 @@ export const CommentsSection: React.FC<CommentsSectionProps> = ({
       data-testid={fullPageMode ? 'reviews-full-page' : 'comments-section'}
       className="max-w-5xl mx-auto px-3 sm:px-6 my-6 sm:my-10"
     >
-      <div className="clay-card p-4 sm:p-7 text-right border border-white/80">
+      <div className="clay-card ambient-gold p-4 sm:p-7 text-right border border-white/80">
         {fullPageMode && onBackToLibrary && (
           <div className="mb-4">
             <button

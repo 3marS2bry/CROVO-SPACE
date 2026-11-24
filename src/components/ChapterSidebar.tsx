@@ -56,7 +56,7 @@ export const ChapterSidebar: React.FC<ChapterSidebarProps> = ({
 
       {/* Sidebar Container */}
       <aside
-        className={`fixed lg:sticky top-0 lg:top-24 right-0 h-screen lg:h-[calc(100vh-7rem)] w-[86vw] max-w-xs sm:w-88 clay-card z-50 lg:z-10 flex flex-col p-4 sm:p-5 transition-transform duration-300 border border-white/80 ${
+        className={`fixed lg:sticky top-0 lg:top-24 right-0 h-screen lg:h-[calc(100vh-7rem)] w-[86vw] max-w-xs sm:w-88 clay-card ambient-violet z-50 lg:z-10 flex flex-col p-4 sm:p-5 transition-transform duration-300 border border-white/80 ${
           isOpenMobile
             ? 'translate-x-0 visible pointer-events-auto'
             : 'translate-x-full invisible pointer-events-none lg:translate-x-0 lg:visible lg:pointer-events-auto'

@@ -1,0 +1,44 @@
+{
+  "founder": {
+    "displayName": "عمر صبري",
+    "fullName": "عمر صبري إبراهيم إبراهيم أحمد سليمان",
+    "englishName": "OMAR SABRY",
+    "alternateNames": [
+      "عمر صبري",
+      "عمر صبري إبراهيم إبراهيم أحمد سليمان",
+      "OMAR SABRY",
+      "omar sabry",
+      "omar sabry yooyoyooyoooooo",
+      "Omar Sabry Developer",
+      "عمر صبري مطور مواقع"
+    ],
+    "role": "مؤسس ومطور المشروع",
+    "roleEn": "Founder & Web Developer"
+  },
+  "project": {
+    "name": "CROVO SPACE",
+    "arabicName": "كروفو سبيس",
+    "alternateNames": [
+      "CROVO SPACE",
+      "Crovo Space Egypt",
+      "كروفو سبيس",
+      "مؤسس Crovo Space",
+      "مطور Crovo Space"
+    ],
+    "tagline": "مكتبة الحلول المعتمدة لطلاب البكالوريا المصرية — QUREO والبرمجة والثقافة المالية",
+    "country": "Egypt",
+    "countryCode": "EG",
+    "language": "ar-EG",
+    "locale": "ar_EG",
+    "officialUrl": "https://crovo-space.ai.studio",
+    "ogImagePath": "/og-cover.jpg?v=2",
+    "previewImagePath": "/media/crovo-pixel-art.png",
+    "logoPath": "/icon-512.png"
+  },
+  "verifiedProfiles": {
+    "website": "https://crovo-space.ai.studio/",
+    "telegramChannel": "https://t.me/CrovoSpace",
+    "telegramDeveloper": "https://t.me/omarsaabry",
+    "whatsappSupport": "https://wa.me/201550324450"
+  }
+}

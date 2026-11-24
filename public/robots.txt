@@ -2,7 +2,12 @@ User-agent: *
 Allow: /
 Allow: /tool
 Allow: /reviews
+Allow: /media/
+Allow: /og-cover.jpg
 Disallow: /admin
+Disallow: /admin/
 Disallow: /api/
+Disallow: /*?admin=
 
+Sitemap: https://crovo-space.ai.studio/sitemap-index.xml
 Sitemap: https://crovo-space.ai.studio/sitemap.xml

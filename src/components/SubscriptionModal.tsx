@@ -13,7 +13,7 @@ import {
   Tag,
   X,
 } from 'lucide-react';
-import { WhatsAppIcon } from './SocialIcons';
+import { WhatsAppIcon, TelegramIcon } from './SocialIcons';
 import { api, ApiError, OrderReceipt, PublicConfig } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import { getFirebaseUid, logCloudActivity } from '../utils/cloudStore';
@@ -24,6 +24,7 @@ import {
   PlatformChoice,
 } from '../utils/rules';
 import {
+  buildSubscriptionMessageUrl,
   buildSubscriptionWhatsappUrl,
   clearSubscriptionDraft,
   deriveOrderCodeFromRequestId,
@@ -38,6 +39,7 @@ interface SubscriptionModalProps {
   onClose: () => void;
   config: PublicConfig | null;
   serverOffsetMs: number;
+  initialChannel?: 'whatsapp' | 'telegram';
 }
 
 type WizardStep = 'grade' | 'platform' | 'pricing' | 'details' | 'confirm' | 'receipt';
@@ -94,9 +96,17 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
   onClose,
   config,
   serverOffsetMs,
+  initialChannel = 'whatsapp',
 }) => {
   const { user } = useAuth();
   const activeConfig = config || FALLBACK_CONFIG;
+
+  const [channel, setChannel] = useState<'whatsapp' | 'telegram'>(initialChannel);
+  useEffect(() => {
+    if (isOpen && initialChannel) {
+      setChannel(initialChannel);
+    }
+  }, [initialChannel, isOpen]);
 
   const [step, setStep] = useState<WizardStep>('grade');
   const [grade, setGrade] = useState<OrderGrade | null>(null);
@@ -334,7 +344,8 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
       savedToServer = false;
     }
 
-    const waUrl = buildSubscriptionWhatsappUrl({
+    const msgUrl = buildSubscriptionMessageUrl({
+      channel,
       whatsappNumber: activeConfig.adminWhatsappDisplay,
       orderCode: resolvedOrder.orderCode,
       fullName: resolvedOrder.fullName,
@@ -352,7 +363,7 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
 
     setReceipt(resolvedOrder);
     setReceiptSavedToServer(savedToServer);
-    setReceiptWhatsappUrl(waUrl);
+    setReceiptWhatsappUrl(msgUrl);
     // Clear raw password input field & non-sensitive draft immediately
     setPlatformPassword('');
     clearSubscriptionDraft();
@@ -379,9 +390,9 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
       });
     }
 
-    // Launch WhatsApp Click-to-Chat link directly without window.open popup abuse
+    // Launch Click-to-Chat link directly without window.open popup abuse
     const anchor = document.createElement('a');
-    anchor.href = waUrl;
+    anchor.href = msgUrl;
     anchor.target = '_blank';
     anchor.rel = 'noopener noreferrer';
     anchor.style.display = 'none';
@@ -1064,7 +1075,8 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
             </div>
 
             <p className="text-[11px] text-slate-500 font-ios leading-relaxed">
-              لما تضغط «تأكيد الاشتراك»، طلبك هيتسجل برقم طلب خاص ويتجهزلك شات واتساب مباشرة برسالة الطلب الكاملة عشان تبعتها للإدارة بنفسك.
+              لما تضغط «تأكيد الاشتراك»، طلبك هيتسجل برقم طلب خاص ويتجهزلك شات{' '}
+              {channel === 'telegram' ? 'تيليجرام' : 'واتساب'} مباشرة برسالة الطلب الكاملة عشان تبعتها للإدارة بنفسك.
             </p>
 
             <div className="flex items-center justify-between gap-2 pt-1">
@@ -1082,9 +1094,13 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
                 data-testid="confirm-subscription-btn"
                 disabled={submitting || !activeConfig.ordersEnabled}
                 onClick={handleConfirmOrder}
-                className="clay-whatsapp flex-1 py-3 px-5 rounded-xl text-sm font-black text-white flex items-center justify-center gap-2 font-ios shadow-lg disabled:opacity-50 min-h-[44px]"
+                className={`${channel === 'telegram' ? 'clay-telegram' : 'clay-whatsapp'} flex-1 py-3 px-5 rounded-xl text-sm font-black text-white flex items-center justify-center gap-2 font-ios shadow-lg disabled:opacity-50 min-h-[44px]`}
               >
-                <WhatsAppIcon className="w-4 h-4" />
+                {channel === 'telegram' ? (
+                  <TelegramIcon className="w-4 h-4" />
+                ) : (
+                  <WhatsAppIcon className="w-4 h-4" />
+                )}
                 <span>{submitting ? 'جاري تسجيل الطلب...' : 'تأكيد الاشتراك'}</span>
               </button>
             </div>
@@ -1150,8 +1166,8 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               )}
               <span>
                 {receiptSavedToServer
-                  ? `طلبك تسجّل برقم (#${receipt.orderCode}) وهو الآن بانتظار مراجعة الإدارة وتأكيد الدفع بعد إرسال رسالة واتساب.`
-                  : `تم فتح واتساب بنجاح! نظراً لضغط مؤقت في السيرفر، طلبك بانتظار التسجيل والتأكيد اليدوي من الإدارة فور وصول رسالتك برقم (#${receipt.orderCode}).`}
+                  ? `طلبك تسجّل برقم (#${receipt.orderCode}) وهو الآن بانتظار مراجعة الإدارة وتأكيد الدفع بعد إرسال رسالة ${channel === 'telegram' ? 'تيليجرام' : 'واتساب'}.`
+                  : `تم فتح ${channel === 'telegram' ? 'تيليجرام' : 'واتساب'} بنجاح! نظراً لضغط مؤقت في السيرفر، طلبك بانتظار التسجيل والتأكيد اليدوي من الإدارة فور وصول رسالتك برقم (#${receipt.orderCode}).`}
               </span>
             </div>
 
@@ -1160,10 +1176,10 @@ export const SubscriptionModal: React.FC<SubscriptionModalProps> = ({
               href={receiptWhatsappUrl || '#'}
               target="_blank"
               rel="noopener noreferrer"
-              className="clay-whatsapp w-full py-3.5 px-5 rounded-2xl text-sm font-black text-white flex items-center justify-center gap-2 shadow-lg font-ios"
+              className={`${channel === 'telegram' ? 'clay-telegram' : 'clay-whatsapp'} w-full py-3.5 px-5 rounded-2xl text-sm font-black text-white flex items-center justify-center gap-2 shadow-lg font-ios`}
             >
-              <WhatsAppIcon className="w-5 h-5" />
-              <span>فتح واتساب وإرسال رسالة الاشتراك</span>
+              {channel === 'telegram' ? <TelegramIcon className="w-5 h-5" /> : <WhatsAppIcon className="w-5 h-5" />}
+              <span>{channel === 'telegram' ? 'فتح تيليجرام وإرسال رسالة الاشتراك' : 'فتح واتساب وإرسال رسالة الاشتراك'}</span>
             </a>
 
             <button

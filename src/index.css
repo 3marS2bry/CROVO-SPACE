@@ -40,12 +40,28 @@
 }
 
 /* ==========================================================================
-   Crovo Space Soft Snowy Claymorphism Visual System
+   Crovo Space Soft Snowy Claymorphism Visual System & Ambient Design Tokens
    ========================================================================== */
+
+:root {
+  --crovo-glass-sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.44) 0%, rgba(255, 255, 255, 0) 40%);
+  --ambient-rose-primary: rgba(244, 174, 199, 0.21);
+  --ambient-rose-secondary: rgba(251, 207, 232, 0.13);
+  --ambient-violet-primary: rgba(182, 172, 244, 0.18);
+  --ambient-violet-secondary: rgba(214, 206, 252, 0.11);
+  --ambient-ice-primary: rgba(160, 198, 246, 0.18);
+  --ambient-ice-secondary: rgba(219, 234, 254, 0.12);
+  --ambient-sky-primary: rgba(154, 214, 238, 0.17);
+  --ambient-sky-secondary: rgba(207, 242, 252, 0.11);
+  --ambient-gold-primary: rgba(244, 210, 146, 0.19);
+  --ambient-gold-secondary: rgba(254, 240, 202, 0.12);
+  --ambient-sage-primary: rgba(158, 220, 194, 0.17);
+  --ambient-sage-secondary: rgba(209, 250, 229, 0.11);
+}
 
 /* بطاقة الطين الناعمة ثلاثية الأبعاد (Soft Snowy 3D Clay Card) */
 .clay-card {
-  background: #F1F5FA;
+  background-color: #F1F5FA;
   border-radius: 1.5rem;
   box-shadow:
     10px 10px 22px rgba(178, 191, 212, 0.56),
@@ -65,12 +81,65 @@
 
 /* السطح الغائر الناعم (Soft Concave Inset) */
 .clay-inset {
-  background: #E6EDF6;
+  background-color: #E6EDF6;
   border-radius: 1.25rem;
   box-shadow:
     inset 5px 5px 10px rgba(178, 191, 212, 0.62),
     inset -5px -5px 10px rgba(255, 255, 255, 0.94);
   border: 1px solid rgba(206, 217, 232, 0.55);
+}
+
+/* تأثيرات الإضاءة المحيطية الزجاجية الخفية (Subtle Ambient Color Blur System) */
+.ambient-rose {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 92% 10%, var(--ambient-rose-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 8% 92%, var(--ambient-rose-secondary) 0%, transparent 66%);
+}
+
+.ambient-violet {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 10% 10%, var(--ambient-violet-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 92% 92%, var(--ambient-violet-secondary) 0%, transparent 66%);
+}
+
+.ambient-ice {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 90% 12%, var(--ambient-ice-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 10% 90%, var(--ambient-ice-secondary) 0%, transparent 66%);
+}
+
+.ambient-sky {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 12% 10%, var(--ambient-sky-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 90% 92%, var(--ambient-sky-secondary) 0%, transparent 66%);
+}
+
+.ambient-gold {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 90% 12%, var(--ambient-gold-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 10% 90%, var(--ambient-gold-secondary) 0%, transparent 66%);
+}
+
+.ambient-sage {
+  background-image:
+    var(--crovo-glass-sheen),
+    radial-gradient(ellipse 80% 72% at 12% 12%, var(--ambient-sage-primary) 0%, transparent 68%),
+    radial-gradient(ellipse 72% 66% at 90% 90%, var(--ambient-sage-secondary) 0%, transparent 66%);
+}
+
+/* عنصر العلامة الزخرفية لهوية CROVO SPACE في الصورة الرئيسية */
+.crovo-emblem-wordmark {
+  font-family: 'Cairo', 'iOS15Arabic', sans-serif;
+  letter-spacing: 0.19em;
+  background: linear-gradient(135deg, #0f172a 0%, #312e81 52%, #1e293b 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 /* الزر ثلاثي الأبعاد اللمسي البارز (Tactile 3D Clay Button) */
@@ -336,10 +405,119 @@
   animation: modalPopIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) 1 forwards;
 }
 
+/* ==========================================================================
+   CROVO SPACE Centralized Ad Motion & Seamless Marquee Engine
+   ========================================================================== */
+@keyframes crovoMarqueeLeft {
+  0% {
+    transform: translate3d(0%, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes crovoMarqueeRight {
+  0% {
+    transform: translate3d(-50%, 0, 0);
+  }
+  100% {
+    transform: translate3d(0%, 0, 0);
+  }
+}
+
+.crovo-marquee-viewport {
+  overflow: hidden;
+  width: 100%;
+  direction: ltr;
+  position: relative;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 3%, #000 97%, transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0%, #000 3%, #000 97%, transparent 100%);
+}
+
+.crovo-marquee-track {
+  display: flex;
+  align-items: center;
+  width: max-content;
+  will-change: transform;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.crovo-marquee-track.dir-rtl {
+  animation-name: crovoMarqueeLeft;
+}
+
+.crovo-marquee-track.dir-ltr {
+  animation-name: crovoMarqueeRight;
+}
+
+.crovo-marquee-viewport.pause-on-hover:hover .crovo-marquee-track {
+  animation-play-state: paused;
+}
+
+@keyframes adFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes adSlideUp {
+  from { opacity: 0; transform: translate3d(0, 18px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes adSlideDown {
+  from { opacity: 0; transform: translate3d(0, -18px, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes adSlideRight {
+  from { opacity: 0; transform: translate3d(-20px, 0, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes adSlideLeft {
+  from { opacity: 0; transform: translate3d(20px, 0, 0); }
+  to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+@keyframes adZoomIn {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes adAmbientFloat {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -4px, 0); }
+}
+
+@keyframes adAmbientPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.012); }
+}
+
+.ad-anim-fade { animation-name: adFadeIn; animation-fill-mode: both; }
+.ad-anim-slide_up { animation-name: adSlideUp; animation-fill-mode: both; }
+.ad-anim-slide_down { animation-name: adSlideDown; animation-fill-mode: both; }
+.ad-anim-slide_right { animation-name: adSlideRight; animation-fill-mode: both; }
+.ad-anim-slide_left { animation-name: adSlideLeft; animation-fill-mode: both; }
+.ad-anim-zoom { animation-name: adZoomIn; animation-fill-mode: both; }
+.ad-ambient-float_gentle { animation: adAmbientFloat 4s ease-in-out infinite; }
+.ad-ambient-soft_pulse { animation: adAmbientPulse 3.2s ease-in-out infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   .is-attention-burst,
   .animate-modal-pop,
-  .promo-light-sweep::after {
+  .promo-light-sweep::after,
+  .crovo-marquee-track,
+  .ad-anim-fade,
+  .ad-anim-slide_up,
+  .ad-anim-slide_down,
+  .ad-anim-slide_right,
+  .ad-anim-slide_left,
+  .ad-anim-zoom,
+  .ad-ambient-float_gentle,
+  .ad-ambient-soft_pulse {
     animation: none !important;
   }
   *,
@@ -349,5 +527,6 @@
     scroll-behavior: auto !important;
   }
 }
+
 
 

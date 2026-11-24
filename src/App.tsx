@@ -14,7 +14,7 @@ import { NotificationPrompt } from './components/NotificationPrompt';
 import { CopyAdBanner } from './components/CopyAdBanner';
 import { ContactFooter } from './components/ContactFooter';
 import { AuthProvider, useAuth } from './context/AuthContext';
-import { TelegramModalProvider } from './context/TelegramModalContext';
+import { TelegramModalProvider, useTelegramModal } from './context/TelegramModalContext';
 import { AuthModal } from './components/AuthModal';
 import { OptionalWelcomeBanner } from './components/OptionalWelcomeBanner';
 import { CommunitySection } from './components/CommunitySection';
@@ -22,6 +22,10 @@ import { FirstVisitWelcomeModal } from './components/FirstVisitWelcomeModal';
 import { TelegramInviteModal } from './components/TelegramInviteModal';
 import { CommentsSection } from './components/CommentsSection';
 import { HelpCenterSection } from './components/HelpCenterSection';
+import { AdSlot } from './components/ads/AdSlot';
+import { AdOverlayManager } from './components/ads/AdOverlayManager';
+import type { AdActionHandlers } from './components/ads/AdUnitRenderer';
+import { resolveAdEffectiveStatus } from './utils/adSystem';
 import { AcademicGrade, Chapter, SectionType } from './types';
 import { api, PublicConfig } from './utils/api';
 import {
@@ -140,8 +144,10 @@ const SectionSkeleton: React.FC = () => (
 );
 
 function AppContent() {
-  useAuth();
+  const { isAuthModalOpen, openAuthModal } = useAuth();
+  const { isOpen: isTelegramModalOpen } = useTelegramModal();
   const [activeView, setActiveView] = useState<AppView>(resolveInitialView);
+  const [isWelcomeModalOpen, setIsWelcomeModalOpen] = useState(false);
 
   const [siteConfig, setSiteConfig] = useState<PublicConfig | null>(() => getCachedConfig());
   const [serverOffsetMs, setServerOffsetMs] = useState<number>(() => {
@@ -153,12 +159,15 @@ function AppContent() {
     return 0;
   });
 
+  const lastSyncedConfigRef = useRef<PublicConfig | null>(siteConfig);
+
   const loadSiteConfig = useCallback(async () => {
     try {
       const cfg = await api.getConfig();
       if (cfg.quotaDegraded && getCachedConfig()) {
         return;
       }
+      lastSyncedConfigRef.current = cfg;
       setFastConfig(cfg);
       setSiteConfig(cfg);
       const serverMs = Date.parse(cfg.serverTime);
@@ -173,7 +182,8 @@ function AppContent() {
   useEffect(() => {
     const unsubFast = subscribeFastStore(() => {
       const cfg = getCachedConfig();
-      if (cfg) {
+      if (cfg && cfg !== lastSyncedConfigRef.current) {
+        lastSyncedConfigRef.current = cfg;
         setSiteConfig(cfg);
         const serverMs = Date.parse(cfg.serverTime);
         if (Number.isFinite(serverMs)) {
@@ -390,8 +400,28 @@ function AppContent() {
   const [hasReachedAdDelay, setHasReachedAdDelay] = useState(false);
   const [hasShownAdThisVisit, setHasShownAdThisVisit] = useState(isPreviewRichAd);
 
+  const libraryPopupUnit = useMemo(
+    () =>
+      effectiveConfig?.ads?.find(
+        (a) => a.systemKey === 'library_popup' || a.id === 'ad_library_popup'
+      ),
+    [effectiveConfig?.ads]
+  );
+
+  const welcomeBannerUnit = useMemo(
+    () =>
+      effectiveConfig?.ads?.find(
+        (a) => a.systemKey === 'welcome_banner' || a.id === 'ad_welcome_banner'
+      ),
+    [effectiveConfig?.ads]
+  );
+
   const delayMs =
-    typeof effectiveConfig?.libraryAd?.delaySeconds === 'number' && effectiveConfig.libraryAd.delaySeconds >= 5
+    typeof libraryPopupUnit?.behavior?.delaySeconds === 'number' &&
+    libraryPopupUnit.behavior.delaySeconds >= 5
+      ? libraryPopupUnit.behavior.delaySeconds * 1000
+      : typeof effectiveConfig?.libraryAd?.delaySeconds === 'number' &&
+        effectiveConfig.libraryAd.delaySeconds >= 5
       ? effectiveConfig.libraryAd.delaySeconds * 1000
       : LIBRARY_AD_DELAY_MS;
 
@@ -415,13 +445,32 @@ function AppContent() {
       // Ignore storage read errors
     }
 
-    const canShow = shouldShowTimedLibraryAd({
-      enabled: effectiveConfig?.libraryAd.enabled ?? true,
-      isAdminView: activeView === 'admin',
-      hasOtherModalOpen: isSubModalOpen || isQuranModalOpen,
-      lastDismissedAtMs,
-      cooldownHours: effectiveConfig?.libraryAd?.cooldownHours,
-    });
+    const nowMs = Date.now() + serverOffsetMs;
+    const isMobileNow = typeof window !== 'undefined' ? window.innerWidth < 640 : false;
+    const unitLive = libraryPopupUnit ? resolveAdEffectiveStatus(libraryPopupUnit, nowMs).isLive : true;
+    const unitDeviceOk = libraryPopupUnit
+      ? libraryPopupUnit.behavior.deviceTarget === 'both' ||
+        (libraryPopupUnit.behavior.deviceTarget === 'mobile' && isMobileNow) ||
+        (libraryPopupUnit.behavior.deviceTarget === 'desktop' && !isMobileNow)
+      : true;
+    const unitPageOk = libraryPopupUnit
+      ? libraryPopupUnit.behavior.pages.includes('all') ||
+        libraryPopupUnit.behavior.pages.includes(activeView === 'admin' ? 'library' : activeView)
+      : true;
+
+    const canShow =
+      unitLive &&
+      unitDeviceOk &&
+      unitPageOk &&
+      shouldShowTimedLibraryAd({
+        enabled: effectiveConfig?.libraryAd.enabled ?? true,
+        isAdminView: activeView === 'admin',
+        hasOtherModalOpen:
+          isSubModalOpen || isQuranModalOpen || isAuthModalOpen || isWelcomeModalOpen || isTelegramModalOpen,
+        lastDismissedAtMs,
+        cooldownHours:
+          libraryPopupUnit?.behavior?.cooldownHours ?? effectiveConfig?.libraryAd?.cooldownHours,
+      });
 
     if (canShow) {
       setShowCopyAd(true);
@@ -432,9 +481,14 @@ function AppContent() {
     hasShownAdThisVisit,
     effectiveConfig?.libraryAd.enabled,
     effectiveConfig?.libraryAd?.cooldownHours,
+    libraryPopupUnit,
+    serverOffsetMs,
     activeView,
     isSubModalOpen,
     isQuranModalOpen,
+    isAuthModalOpen,
+    isWelcomeModalOpen,
+    isTelegramModalOpen,
   ]);
 
   const handleCloseTimedLibraryAd = useCallback(() => {
@@ -462,6 +516,8 @@ function AppContent() {
     }
     return {};
   });
+  const completedQuestionsRef = useRef<Record<string, boolean>>(completedQuestions);
+  const xpRef = useRef<number>(xp);
 
   const currentLevel = Math.floor(xp / 100) + 1;
 
@@ -509,17 +565,16 @@ function AppContent() {
   }, []);
 
   const handleCompleteQuestion = useCallback((key: string) => {
-    setCompletedQuestions((prev) => {
-      if (prev[key]) return prev;
-      const nextCompleted = { ...prev, [key]: true };
-      localStorage.setItem('student_completed_qs', JSON.stringify(nextCompleted));
-      setXp((prevXp) => {
-        const nextXp = prevXp + 25;
-        localStorage.setItem('student_xp', String(nextXp));
-        return nextXp;
-      });
-      return nextCompleted;
-    });
+    if (completedQuestionsRef.current[key]) return;
+    const nextCompleted = { ...completedQuestionsRef.current, [key]: true };
+    completedQuestionsRef.current = nextCompleted;
+    localStorage.setItem('student_completed_qs', JSON.stringify(nextCompleted));
+    setCompletedQuestions(nextCompleted);
+
+    const nextXp = xpRef.current + 25;
+    xpRef.current = nextXp;
+    localStorage.setItem('student_xp', String(nextXp));
+    setXp(nextXp);
   }, []);
 
   const handleCopyTrigger = useCallback(() => {
@@ -554,7 +609,11 @@ function AppContent() {
   const openReviewsPage = useCallback(() => navigateToView('reviews'), [navigateToView]);
   const openAdminView = useCallback(() => navigateToView('admin'), [navigateToView]);
   const exitAdminView = useCallback(() => navigateToView('library'), [navigateToView]);
-  const openSubscriptionModal = useCallback(() => setIsSubModalOpen(true), []);
+  const [subModalInitialChannel, setSubModalInitialChannel] = useState<'whatsapp' | 'telegram'>('whatsapp');
+  const openSubscriptionModal = useCallback((channel: 'whatsapp' | 'telegram' = 'whatsapp') => {
+    setSubModalInitialChannel(channel);
+    setIsSubModalOpen(true);
+  }, []);
   const closeSubModal = useCallback(() => setIsSubModalOpen(false), []);
   const openQuranModal = useCallback(() => setIsQuranModalOpen(true), []);
   const closeQuranModal = useCallback(() => setIsQuranModalOpen(false), []);
@@ -572,6 +631,27 @@ function AppContent() {
     [effectiveConfig?.adminWhatsappDisplay]
   );
 
+  const adActions: AdActionHandlers = useMemo(
+    () => ({
+      onOpenSubscription: () => openSubscriptionModal('whatsapp'),
+      onExploreTool: openToolDetails,
+      onOpenReviews: openReviewsPage,
+      onScrollToLibrary: scrollToLibrary,
+      onScrollToHelp: scrollToHelp,
+      onOpenAuth: () => openAuthModal('سجل دخولك لحفظ تقدمك ونقاطك'),
+    }),
+    [openSubscriptionModal, openToolDetails, openReviewsPage, scrollToLibrary, scrollToHelp, openAuthModal]
+  );
+
+  const hasBlockingModalOpen =
+    isSubModalOpen ||
+    isQuranModalOpen ||
+    showCopyAd ||
+    Boolean(returnReviewState) ||
+    isAuthModalOpen ||
+    isWelcomeModalOpen ||
+    isTelegramModalOpen;
+
   return (
     <div className="min-h-screen bg-[#EEF2F7] text-slate-800 font-['iOS15Arabic',_'Cairo',_sans-serif] flex flex-col relative selection:bg-indigo-500 selection:text-white">
       <div className="sticky top-0 z-40 w-full">
@@ -581,6 +661,11 @@ function AppContent() {
               config={effectiveConfig}
               serverOffsetMs={serverOffsetMs}
               onOpenSubscription={openSubscriptionModal}
+              onExploreTool={openToolDetails}
+              onOpenReviews={openReviewsPage}
+              onScrollToLibrary={scrollToLibrary}
+              onScrollToHelp={scrollToHelp}
+              activeView={activeView}
             />
           </div>
         )}
@@ -604,22 +689,55 @@ function AppContent() {
             </Suspense>
           </LazyErrorBoundary>
         ) : activeView === 'reviews' ? (
-          <CommentsSection fullPageMode onBackToLibrary={() => navigateToView('library')} />
+          <>
+            <AdSlot
+              placement="reviews_page"
+              view="reviews"
+              config={effectiveConfig}
+              serverOffsetMs={serverOffsetMs}
+              actions={adActions}
+            />
+            <CommentsSection fullPageMode onBackToLibrary={() => navigateToView('library')} />
+          </>
         ) : (
           <>
             {activeView === 'toolDetails' ? (
-              <LazyErrorBoundary>
-                <Suspense fallback={<SectionSkeleton />}>
-                  <ToolDetailsPage
-                    config={effectiveConfig}
-                    onBackToLibrary={() => navigateToView('library')}
-                    onOpenSubscription={openSubscriptionModal}
-                  />
-                </Suspense>
-              </LazyErrorBoundary>
+              <>
+                <AdSlot
+                  placement="tool_page"
+                  view="toolDetails"
+                  config={effectiveConfig}
+                  serverOffsetMs={serverOffsetMs}
+                  actions={adActions}
+                />
+                <LazyErrorBoundary>
+                  <Suspense fallback={<SectionSkeleton />}>
+                    <ToolDetailsPage
+                      config={effectiveConfig}
+                      onBackToLibrary={() => navigateToView('library')}
+                      onOpenSubscription={openSubscriptionModal}
+                    />
+                  </Suspense>
+                </LazyErrorBoundary>
+              </>
             ) : (
               <>
-                <OptionalWelcomeBanner />
+                <OptionalWelcomeBanner
+                  adUnit={welcomeBannerUnit}
+                  config={effectiveConfig}
+                  onOpenSubscription={openSubscriptionModal}
+                  onExploreTool={openToolDetails}
+                  onOpenReviews={openReviewsPage}
+                />
+
+                <AdSlot
+                  placement="hero_above"
+                  view="library"
+                  config={effectiveConfig}
+                  serverOffsetMs={serverOffsetMs}
+                  actions={adActions}
+                />
+
                 <HeroSection
                   onScrollToLibrary={scrollToLibrary}
                   onOpenToolDetails={openToolDetails}
@@ -631,6 +749,24 @@ function AppContent() {
                   onExploreTool={openToolDetails}
                   onOpenSubscription={openSubscriptionModal}
                   onOpenReviews={openReviewsPage}
+                  onScrollToLibrary={scrollToLibrary}
+                  onScrollToHelp={scrollToHelp}
+                />
+
+                <AdSlot
+                  placement="hero_below"
+                  view="library"
+                  config={effectiveConfig}
+                  serverOffsetMs={serverOffsetMs}
+                  actions={adActions}
+                />
+
+                <AdSlot
+                  placement="library_top"
+                  view="library"
+                  config={effectiveConfig}
+                  serverOffsetMs={serverOffsetMs}
+                  actions={adActions}
                 />
 
                 <SolutionsLibrary
@@ -646,6 +782,14 @@ function AppContent() {
                   onOpenToolDetails={openToolDetails}
                   onOpenSubscription={openSubscriptionModal}
                 />
+
+                <AdSlot
+                  placement="library_bottom"
+                  view="library"
+                  config={effectiveConfig}
+                  serverOffsetMs={serverOffsetMs}
+                  actions={adActions}
+                />
               </>
             )}
 
@@ -660,6 +804,14 @@ function AppContent() {
             />
 
             <CommunitySection />
+
+            <AdSlot
+              placement="footer_above"
+              view={activeView}
+              config={effectiveConfig}
+              serverOffsetMs={serverOffsetMs}
+              actions={adActions}
+            />
           </>
         )}
       </main>
@@ -681,13 +833,24 @@ function AppContent() {
         isVisible={showCopyAd}
         onClose={handleCloseTimedLibraryAd}
         adConfig={effectiveConfig?.libraryAd}
+        fullAdUnit={libraryPopupUnit}
+        config={effectiveConfig}
         onLearnMore={openToolDetails}
         onOpenSubscription={openSubscriptionModal}
+        actions={adActions}
         forceTemplateMode={isPreviewRichAd ? 'rich_crovo' : undefined}
       />
 
+      <AdOverlayManager
+        config={effectiveConfig}
+        activeView={activeView}
+        serverOffsetMs={serverOffsetMs}
+        hasBlockingModalOpen={hasBlockingModalOpen}
+        actions={adActions}
+      />
+
       <AuthModal />
-      <FirstVisitWelcomeModal />
+      <FirstVisitWelcomeModal onVisibilityChange={setIsWelcomeModalOpen} />
       <TelegramInviteModal />
 
       {returnReviewState && activeView !== 'admin' && !isSubModalOpen && !isQuranModalOpen && (
@@ -719,6 +882,7 @@ function AppContent() {
               onClose={closeSubModal}
               config={effectiveConfig}
               serverOffsetMs={serverOffsetMs}
+              initialChannel={subModalInitialChannel}
             />
           </Suspense>
         </LazyErrorBoundary>

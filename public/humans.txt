@@ -1,0 +1,14 @@
+/* TEAM */
+  Project: CROVO SPACE (كروفو سبيس)
+  Founder & Developer: Omar Sabry (عمر صبري — عمر صبري إبراهيم إبراهيم أحمد سليمان)
+  Role: مؤسس ومطور المشروع
+  Location: Egypt
+  Official URL: https://crovo-space.ai.studio/
+  Telegram Channel: https://t.me/CrovoSpace
+  Developer Contact: https://t.me/omarsaabry
+
+/* SITE */
+  Language: Arabic (ar-EG)
+  Standards: HTML5, CSS3, TypeScript, Schema.org JSON-LD, OpenGraph
+  Stack: React, Vite, Tailwind CSS, Firebase
+  Updated: 2026-11-23

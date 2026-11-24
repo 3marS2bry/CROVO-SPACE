@@ -10,7 +10,7 @@ import confetti from 'canvas-confetti';
 
 interface ToolDetailsPageProps {
   onBackToLibrary: () => void;
-  onOpenSubscription: () => void;
+  onOpenSubscription: (channel?: 'whatsapp' | 'telegram') => void;
   config?: PublicConfig | null;
 }
 
@@ -186,7 +186,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       </div>
 
       {/* 2. Main Pitch Hero Banner (الفكرة باختصار من غير لف ودوران) */}
-      <div className="clay-card p-4 sm:p-8 mb-6 sm:mb-8 relative overflow-hidden border border-white/80">
+      <div className="clay-card ambient-violet p-4 sm:p-8 mb-6 sm:mb-8 relative overflow-hidden border border-white/80">
         <div className="max-w-4xl space-y-3 sm:space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full clay-inset text-amber-700 text-xs font-bold font-decorative">
@@ -239,7 +239,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
           <div className="flex flex-wrap items-center gap-2.5 pt-1">
             <button
               type="button"
-              onClick={onOpenSubscription}
+              onClick={() => onOpenSubscription('whatsapp')}
               className="clay-whatsapp px-4 sm:px-5 py-2.5 rounded-2xl text-xs sm:text-sm font-bold flex items-center gap-2 shadow-md text-white font-ios"
             >
               <WhatsAppIcon className="w-4 h-4" />
@@ -248,7 +248,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
 
             <button
               type="button"
-              onClick={onOpenSubscription}
+              onClick={() => onOpenSubscription('telegram')}
               data-testid="tool-hero-telegram-btn"
               className="clay-telegram px-3.5 sm:px-4 py-2.5 rounded-2xl text-xs sm:text-sm font-bold flex items-center gap-2 text-white font-ios cursor-pointer"
             >
@@ -301,7 +301,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       </div>
 
       {/* 3. The Mechanism Breakdown */}
-      <div className="clay-card p-4 sm:p-5 mb-5 sm:mb-7 border border-white/80">
+      <div className="clay-card ambient-rose p-4 sm:p-5 mb-5 sm:mb-7 border border-white/80">
         <div className="text-right max-w-3xl mb-3">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full clay-inset text-indigo-700 text-[11px] font-bold mb-1 font-decorative">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-500" />
@@ -362,7 +362,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       </div>
 
       {/* 4. Vertical Video Demonstrations */}
-      <div className="clay-card p-5 sm:p-10 mb-8 sm:mb-10 border border-white/80">
+      <div className="clay-card ambient-ice p-5 sm:p-10 mb-8 sm:mb-10 border border-white/80">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-6 sm:mb-8">
           <div>
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-indigo-600 text-xs font-bold mb-1 font-decorative">
@@ -427,7 +427,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       </div>
 
       {/* 5. Gallery */}
-      <div className="clay-card p-5 sm:p-10 mb-8 sm:mb-10 border border-white/80 relative overflow-hidden">
+      <div className="clay-card ambient-gold p-5 sm:p-10 mb-8 sm:mb-10 border border-white/80 relative overflow-hidden">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
           <div className="text-right max-w-2xl">
             <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-indigo-600 text-xs font-bold mb-1 font-decorative">
@@ -524,7 +524,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
       )}
 
       {/* 6. FAQ Section */}
-      <div className="clay-card p-4 sm:p-6 mb-6 sm:mb-8 border border-white/80">
+      <div className="clay-card ambient-sky p-4 sm:p-6 mb-6 sm:mb-8 border border-white/80">
         <h2 className="text-base sm:text-xl font-black font-ios text-slate-900 mb-4">
           الأسئلة اللي في بالك وإجابتها ع البلاطة:
         </h2>
@@ -556,7 +556,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
         <div className="flex flex-wrap items-center justify-center gap-2.5 sm:gap-3">
           <button
             type="button"
-            onClick={onOpenSubscription}
+            onClick={() => onOpenSubscription('whatsapp')}
             className="clay-whatsapp inline-flex items-center gap-2 px-5 sm:px-6 py-3 rounded-2xl text-xs sm:text-sm font-bold shadow-lg hover:scale-105 active:scale-95 transition-transform text-white font-ios"
           >
             <WhatsAppIcon className="w-4 h-4 shrink-0" />
@@ -565,7 +565,7 @@ export const ToolDetailsPage: React.FC<ToolDetailsPageProps> = ({
 
           <button
             type="button"
-            onClick={onOpenSubscription}
+            onClick={() => onOpenSubscription('telegram')}
             data-testid="tool-cta-telegram-btn"
             className="clay-telegram inline-flex items-center gap-2 px-4 sm:px-5 py-3 rounded-2xl text-xs sm:text-sm font-bold shadow-md hover:scale-105 active:scale-95 transition-transform text-white font-ios cursor-pointer"
           >

@@ -9,7 +9,7 @@ import { getCachedToolLikes, hasCompletedInitialBootstrap, setFastToolLikes, sub
 interface HeroSectionProps {
   onScrollToLibrary: () => void;
   onOpenToolDetails: () => void;
-  onOpenSubscription: () => void;
+  onOpenSubscription: (channel?: 'whatsapp' | 'telegram') => void;
 }
 
 export const HeroSection: React.FC<HeroSectionProps> = ({
@@ -153,9 +153,16 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
 
   return (
     <section className="relative overflow-hidden py-4 sm:py-8 px-3 sm:px-6">
-      <div className="max-w-6xl mx-auto clay-card p-5 sm:p-10 relative overflow-hidden text-right border border-white/80">
-        {/* Subtle Ambient Soft Indigo/Purple Glow in Corner (zero filter-blur cost) */}
-        <div className="hidden sm:block absolute top-0 left-0 w-80 h-80 bg-[radial-gradient(circle_at_top_left,rgba(99,102,241,0.12),rgba(168,85,247,0.06)_50%,transparent_75%)] pointer-events-none" />
+      <div className="max-w-6xl mx-auto clay-card ambient-violet p-5 sm:p-10 relative overflow-hidden text-right border border-white/80">
+        {/* Subtle Ambient Soft Violet/Ice Diffused Light in Corners */}
+        <div
+          aria-hidden="true"
+          className="hidden sm:block absolute -top-14 -left-14 w-80 h-80 rounded-full bg-indigo-300/12 blur-3xl pointer-events-none"
+        />
+        <div
+          aria-hidden="true"
+          className="hidden sm:block absolute -bottom-16 -right-12 w-72 h-72 rounded-full bg-sky-300/10 blur-3xl pointer-events-none"
+        />
 
         <div className="relative z-10 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-6 sm:gap-8">
           {/* Main Content Side */}
@@ -210,6 +217,59 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             </div>
           </div>
 
+          {/* Official Pixel Art Hero Illustration Card */}
+          <div className="w-full lg:w-80 shrink-0 clay-card ambient-ice p-2 sm:p-3 rounded-3xl overflow-hidden shadow-xl border border-white/90 group">
+            <div className="relative rounded-2xl overflow-hidden clay-inset aspect-square sm:aspect-[4/3] lg:aspect-square">
+              <img
+                src="/media/crovo-pixel-art.png"
+                alt="تصميم فني بطابع البكسل آرت لمنصة ومكتبة حلول CROVO SPACE"
+                className="w-full h-full object-cover rounded-xl group-hover:scale-105 transition-transform duration-300"
+                loading="eager"
+              />
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-gradient-to-t from-slate-950/20 via-slate-900/5 to-transparent"
+              />
+            </div>
+
+            {/* Integrated Decorative Brand Identity Nameplate */}
+            <div className="mt-2 py-2 px-3 rounded-2xl clay-inset ambient-violet flex flex-col items-center justify-center gap-0.5 text-center border border-white/70">
+              <div className="flex items-center justify-center gap-2 w-full" dir="ltr">
+                <span
+                  aria-hidden="true"
+                  className="h-px flex-1 max-w-[26px] bg-gradient-to-r from-transparent to-indigo-300/80"
+                />
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 28 22"
+                  className="w-4 h-3.5 text-indigo-800/85 shrink-0"
+                  fill="none"
+                >
+                  <path
+                    d="M3 16.5C7.5 14.5 11.2 10.6 13.8 5.2C15.1 2.6 17.8 1.5 21.5 2.4C22.4 2.6 24.4 3.5 25.5 4.2C23.5 4.7 22.1 5.2 21.1 6.3C19.6 8 18.2 11.4 14.6 14.5C11.3 17.3 7.2 18.6 2.5 18.4C2.6 17.7 2.8 17.1 3 16.5Z"
+                    fill="currentColor"
+                    opacity="0.9"
+                  />
+                  <path
+                    d="M7.2 19.2C11.4 18.2 15.1 16 18.4 12.6C17.2 15.8 13.6 18.9 7.2 19.2Z"
+                    fill="currentColor"
+                    opacity="0.45"
+                  />
+                </svg>
+                <span className="crovo-emblem-wordmark text-[13px] sm:text-sm font-black uppercase leading-none select-none">
+                  CROVO SPACE
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="h-px flex-1 max-w-[26px] bg-gradient-to-l from-transparent to-indigo-300/80"
+                />
+              </div>
+              <span className="text-[10px] font-bold font-decorative text-indigo-800/80 tracking-wider leading-tight">
+                كـروفـو سـبـيـس · مساحة الغراب الهادئة
+              </span>
+            </div>
+          </div>
+
           {/* Action Callouts Buttons with Deep Apple Claymorphism */}
           <div className="flex flex-col gap-2.5 sm:gap-3 shrink-0 w-full lg:w-72 pt-2 lg:pt-0">
             <button
@@ -238,7 +298,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             <div className="flex items-center gap-2 pt-0.5">
               <button
                 type="button"
-                onClick={onOpenSubscription}
+                onClick={() => onOpenSubscription('whatsapp')}
                 title="اشترك الآن عبر نافذة الاشتراك"
                 className="clay-whatsapp flex-1 py-2 sm:py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 text-white font-ios"
               >
@@ -248,7 +308,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
 
               <button
                 type="button"
-                onClick={onOpenSubscription}
+                onClick={() => onOpenSubscription('telegram')}
                 data-testid="hero-telegram-btn"
                 title="تواصل مع المطور للاشتراك عبر تليجرام"
                 aria-label="تواصل مع المطور للاشتراك عبر تليجرام"

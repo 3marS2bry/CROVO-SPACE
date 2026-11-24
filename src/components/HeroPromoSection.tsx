@@ -1,12 +1,26 @@
 import React, { useEffect, useState } from 'react';
-import { BellOff, CheckCircle2, MessageSquare, Sparkles, Tag, Zap } from 'lucide-react';
+import { BellOff, CheckCircle2, MessageSquare, Sparkles, Zap } from 'lucide-react';
 import { PublicConfig } from '../utils/api';
+import {
+  type AdUnitConfig,
+  buildDefaultAdUnits,
+  getAdCardStyle,
+  renderDynamicAdText,
+  resolveAdEffectiveStatus,
+  sanitizeAdMediaUrl,
+} from '../utils/adSystem';
+import { AdIcon } from './ads/AdIcon';
+import { triggerAdCtaLink } from './ads/AdUnitRenderer';
 
 interface HeroPromoSectionProps {
   config: PublicConfig | null;
   onExploreTool: () => void;
   onOpenSubscription: () => void;
   onOpenReviews: () => void;
+  onScrollToLibrary?: () => void;
+  onScrollToHelp?: () => void;
+  forceAdUnit?: AdUnitConfig;
+  forceMobile?: boolean;
 }
 
 const SNOOZE_STORAGE_KEY = 'crovo_hero_promo_snooze_until';
@@ -17,10 +31,33 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
   onExploreTool,
   onOpenSubscription,
   onOpenReviews,
+  onScrollToLibrary,
+  onScrollToHelp,
+  forceAdUnit,
+  forceMobile,
 }) => {
   const [snoozed, setSnoozed] = useState(false);
+  const [isMobileViewport, setIsMobileViewport] = useState<boolean>(() => {
+    if (typeof forceMobile === 'boolean') return forceMobile;
+    if (typeof window === 'undefined') return false;
+    return window.innerWidth < 640;
+  });
 
   useEffect(() => {
+    if (typeof forceMobile === 'boolean') {
+      setIsMobileViewport(forceMobile);
+      return;
+    }
+    if (typeof window === 'undefined') return;
+    const mq = window.matchMedia('(max-width: 639px)');
+    const sync = () => setIsMobileViewport(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, [forceMobile]);
+
+  useEffect(() => {
+    if (forceAdUnit) return;
     try {
       const saved = localStorage.getItem(SNOOZE_STORAGE_KEY);
       if (saved) {
@@ -34,10 +71,24 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
     } catch {
       // Ignore storage failures
     }
-  }, []);
+  }, [forceAdUnit]);
 
-  if (config && !config.heroPromo.enabled) {
+  if (!forceAdUnit && config && !config.heroPromo.enabled) {
     return null;
+  }
+
+  const unit: AdUnitConfig =
+    forceAdUnit ||
+    config?.ads?.find(
+      (a) => a.systemKey === 'hero_promo' || a.id === 'ad_hero_promo'
+    ) ||
+    buildDefaultAdUnits({ heroPromo: config?.heroPromo })[1];
+
+  if (!forceAdUnit) {
+    const statusInfo = resolveAdEffectiveStatus(unit, Date.now());
+    if (!statusInfo.isLive) return null;
+    if (unit.behavior.deviceTarget === 'mobile' && !isMobileViewport) return null;
+    if (unit.behavior.deviceTarget === 'desktop' && isMobileViewport) return null;
   }
 
   const offerActive = config?.offerActive ?? true;
@@ -45,11 +96,29 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
   const qureoOld = config?.qureoOldPrice ?? 100;
   const bundlePrice = offerActive ? config?.bundleOfferPrice ?? 100 : config?.bundleOldPrice ?? 200;
 
-  const title =
-    config?.heroPromo.title || 'أداة CROVO الذكية — حل سريع ومنظّم لفصول المنصة بمحاكاة بشرية';
-  const subtitle =
-    config?.heroPromo.subtitle ||
-    'بدل ما تقضي ساعات في النسخ والحل سؤال بسؤال، أداتي بتشتغل بهدوء وتحل لك منصة QUREO أو الثقافة المالية بأمان وتشفير لبياناتك.';
+  const pricingVars = {
+    qureoOfferPrice: qureoPrice,
+    qureoOldPrice: qureoOld,
+    bundleOfferPrice: bundlePrice,
+    bundleOldPrice: config?.bundleOldPrice ?? 200,
+  };
+
+  const title = renderDynamicAdText(
+    unit.content.title || config?.heroPromo.title || 'أداة CROVO الذكية — حل سريع ومنظّم لفصول المنصة بمحاكاة بشرية',
+    pricingVars
+  );
+  const subtitle = renderDynamicAdText(
+    unit.content.subtitle ||
+      config?.heroPromo.subtitle ||
+      'بدل ما تقضي ساعات في النسخ والحل سؤال بسؤال، أداتي بتشتغل بهدوء وتحل لك منصة QUREO أو الثقافة المالية بأمان وتشفير لبياناتك.',
+    pricingVars
+  );
+  const badgeLabel = renderDynamicAdText(
+    unit.content.badgeText || (offerActive ? 'عرض متاح لفترة محدودة' : 'الأسعار الحالية'),
+    pricingVars
+  );
+  const primaryCtaText = renderDynamicAdText(unit.content.ctaText || 'اشترك الآن', pricingVars);
+  const secondaryCtaText = renderDynamicAdText(unit.content.secondaryCtaText || 'اكتشف الأداة', pricingVars);
 
   const handleSnooze = () => {
     const until = Date.now() + SNOOZE_DAYS * 86400 * 1000;
@@ -70,7 +139,7 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
     setSnoozed(false);
   };
 
-  if (snoozed) {
+  if (snoozed && !forceAdUnit) {
     return (
       <div className="max-w-6xl mx-auto px-3 sm:px-6 mb-3 flex justify-end">
         <button
@@ -85,24 +154,87 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
     );
   }
 
+  const { design, motion, content, behavior } = unit;
+  const cardStyle = getAdCardStyle(design, isMobileViewport);
+  const customBg = sanitizeAdMediaUrl(design.customBgImageUrl);
+  const mediaUrl = sanitizeAdMediaUrl(content.mediaUrl);
+
+  const fontClass =
+    design.fontFamily === 'decorative'
+      ? 'font-decorative'
+      : design.fontFamily === 'mono'
+      ? 'font-mono'
+      : 'font-ios';
+
+  const animClass =
+    !motion.disableAnimation && motion.entranceEffect !== 'none'
+      ? `ad-anim-${motion.entranceEffect}`
+      : '';
+  const ambientClass =
+    !motion.disableAnimation && motion.ambientEffect === 'float_gentle'
+      ? 'ad-ambient-float_gentle'
+      : !motion.disableAnimation && motion.ambientEffect === 'soft_pulse'
+      ? 'ad-ambient-soft_pulse'
+      : !motion.disableAnimation && motion.ambientEffect === 'light_sweep'
+      ? 'promo-light-sweep'
+      : '';
+
+  const actions = {
+    onOpenSubscription,
+    onExploreTool,
+    onOpenReviews,
+    onScrollToLibrary,
+    onScrollToHelp,
+  };
+
   return (
     <section
       aria-label="الإعلان الرئيسي لأداة CROVO"
       data-testid="hero-promo-card"
+      dir={content.dir}
       className="max-w-6xl mx-auto px-3 sm:px-6 mb-4 sm:mb-6"
     >
-      <div className="clay-card p-4 sm:p-6 bg-gradient-to-br from-indigo-50/90 via-white/90 to-purple-50/85 border border-indigo-200/70 text-right relative overflow-hidden">
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 sm:gap-6">
+      <div
+        style={cardStyle}
+        className={`mx-auto relative overflow-hidden ${animClass} ${ambientClass} ${
+          content.textAlign === 'center' ? 'text-center' : content.textAlign === 'left' ? 'text-left' : 'text-right'
+        }`}
+      >
+        {customBg && (
+          <>
+            <img
+              src={customBg}
+              alt=""
+              aria-hidden="true"
+              className="absolute inset-0 w-full h-full object-cover pointer-events-none"
+            />
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 pointer-events-none"
+              style={{ backgroundColor: `rgba(15, 23, 42, ${design.bgImageOverlayOpacity})` }}
+            />
+          </>
+        )}
+
+        <div className="relative z-10 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-4 sm:gap-6">
           {/* Content Column */}
           <div className="flex-1 space-y-2.5">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-[11px] font-black text-indigo-700 font-decorative">
-                <Tag className="w-3.5 h-3.5 text-amber-500" />
-                <span>{offerActive ? 'عرض متاح لفترة محدودة' : 'الأسعار الحالية'}</span>
-              </span>
+            <div className={`flex flex-wrap items-center gap-2 ${content.textAlign === 'center' ? 'justify-center' : ''}`}>
+              {badgeLabel && (
+                <span
+                  style={{ color: design.accentColor }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-[11px] font-black font-decorative"
+                >
+                  <AdIcon name={content.iconName} sizePx={14} color={design.iconColor} />
+                  <span>{badgeLabel}</span>
+                </span>
+              )}
 
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-xs font-black font-ios text-indigo-700">
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+              <span
+                style={{ color: design.accentColor }}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl clay-inset text-xs font-black font-ios"
+              >
+                <Sparkles className="w-3.5 h-3.5" style={{ color: design.iconColor }} />
                 <span>
                   {offerActive && qureoOld > qureoPrice ? (
                     <>
@@ -117,20 +249,47 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
                 </span>
               </span>
 
-              <span className="text-[11px] font-bold text-slate-600 font-ios">
+              <span
+                style={{ color: design.subtitleColor }}
+                className="text-[11px] font-bold font-ios opacity-85"
+              >
                 · الباقة الكاملة ({bundlePrice} جنيه)
               </span>
             </div>
 
-            <h2 className="text-base sm:text-xl font-black font-decorative text-slate-900 leading-snug">
+            {content.mediaType === 'image' && mediaUrl && (
+              <div className="w-full max-w-sm rounded-2xl overflow-hidden border border-white/40">
+                <img src={mediaUrl} alt={title} className="w-full h-36 object-cover" />
+              </div>
+            )}
+
+            <h2
+              style={{
+                fontSize: `${isMobileViewport ? design.fontSizeMobile : design.fontSizeDesktop}px`,
+                fontWeight: design.fontWeight,
+                color: design.textColor,
+              }}
+              className={`${fontClass} leading-snug`}
+            >
               {title}
             </h2>
 
-            <p className="text-xs sm:text-sm text-slate-700 font-ios leading-relaxed max-w-3xl">
+            <p
+              style={{
+                fontSize: `${isMobileViewport ? design.subtitleSizeMobile : design.subtitleSizeDesktop}px`,
+                color: design.subtitleColor,
+              }}
+              className="font-ios leading-relaxed max-w-3xl"
+            >
               {subtitle}
             </p>
 
-            <div className="flex flex-wrap items-center gap-3 text-[11px] font-bold text-slate-600 font-ios">
+            <div
+              style={{ color: design.subtitleColor }}
+              className={`flex flex-wrap items-center gap-3 text-[11px] font-bold font-ios opacity-90 ${
+                content.textAlign === 'center' ? 'justify-center' : ''
+              }`}
+            >
               <span className="inline-flex items-center gap-1">
                 <CheckCircle2 className="w-3.5 h-3.5 text-indigo-500" />
                 حماية وأمان كامل لبيانات حسابك
@@ -148,21 +307,27 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
               <button
                 type="button"
                 data-testid="promo-subscribe-btn"
-                onClick={onOpenSubscription}
-                className="clay-whatsapp py-2.5 px-4 rounded-2xl text-xs sm:text-sm font-black text-white flex items-center justify-center gap-1.5 shadow-md font-ios"
+                onClick={() => triggerAdCtaLink(content.ctaLink || '#subscribe', actions)}
+                style={{
+                  backgroundColor: design.ctaBgColor,
+                  color: design.ctaTextColor,
+                }}
+                className="py-2.5 px-4 rounded-2xl text-xs sm:text-sm font-black flex items-center justify-center gap-1.5 shadow-md hover:brightness-105 active:scale-95 transition-all font-ios cursor-pointer"
               >
                 <Zap className="w-4 h-4 fill-amber-300 text-amber-300" />
-                <span>اشترك الآن</span>
+                <span>{primaryCtaText}</span>
               </button>
 
-              <button
-                type="button"
-                data-testid="promo-explore-btn"
-                onClick={onExploreTool}
-                className="clay-apple-blue py-2.5 px-4 rounded-2xl text-xs sm:text-sm font-bold text-white flex items-center justify-center gap-1.5 shadow-sm font-ios"
-              >
-                <span>اكتشف الأداة</span>
-              </button>
+              {secondaryCtaText && (
+                <button
+                  type="button"
+                  data-testid="promo-explore-btn"
+                  onClick={() => triggerAdCtaLink(content.secondaryCtaLink || '#tool', actions)}
+                  className="clay-apple-blue py-2.5 px-4 rounded-2xl text-xs sm:text-sm font-bold text-white flex items-center justify-center gap-1.5 shadow-sm font-ios cursor-pointer"
+                >
+                  <span>{secondaryCtaText}</span>
+                </button>
+              )}
             </div>
 
             <div className="flex items-center justify-between gap-2 pt-0.5">
@@ -176,16 +341,18 @@ export const HeroPromoSection: React.FC<HeroPromoSectionProps> = ({
                 <span>آراء عملائنا</span>
               </button>
 
-              <button
-                type="button"
-                data-testid="promo-snooze-btn"
-                onClick={handleSnooze}
-                title="إخفاء الإعلان مؤقتاً وتذكيري بعد كام يوم"
-                className="clay-btn py-2 px-2.5 rounded-xl text-[11px] font-bold text-slate-500 hover:text-slate-700 flex items-center gap-1 font-ios"
-              >
-                <BellOff className="w-3.5 h-3.5" />
-                <span>لاحقاً</span>
-              </button>
+              {behavior.closable && (
+                <button
+                  type="button"
+                  data-testid="promo-snooze-btn"
+                  onClick={handleSnooze}
+                  title="إخفاء الإعلان مؤقتاً وتذكيري بعد كام يوم"
+                  className="clay-btn py-2 px-2.5 rounded-xl text-[11px] font-bold text-slate-500 hover:text-slate-700 flex items-center gap-1 font-ios"
+                >
+                  <BellOff className="w-3.5 h-3.5" />
+                  <span>لاحقاً</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

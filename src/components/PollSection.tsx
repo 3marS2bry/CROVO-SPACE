@@ -181,7 +181,7 @@ export const PollSection: React.FC = () => {
       data-testid="extend-offer-poll"
       className="max-w-5xl mx-auto px-3 sm:px-6 my-6 sm:my-8"
     >
-      <div className="clay-card p-5 sm:p-8 text-right border border-white/90 relative overflow-hidden">
+      <div className="clay-card ambient-sky p-5 sm:p-8 text-right border border-white/90 relative overflow-hidden">
         {/* Soft Ambient Snowy Indigo Glow */}
         <div className="hidden sm:block absolute -top-16 -left-16 w-48 h-48 rounded-full bg-indigo-500/8 pointer-events-none" />
 

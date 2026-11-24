@@ -151,6 +151,7 @@
         "heroPromo": { "type": "object" },
         "promoBanner": { "type": "object" },
         "libraryAd": { "type": "object" },
+        "ads": { "type": "array" },
         "toolServices": { "type": "array" },
         "toolVideos": { "type": "array" },
         "trackingStartedAt": { "type": "string", "maxLength": 64 },
